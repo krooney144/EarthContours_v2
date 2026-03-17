@@ -141,6 +141,9 @@ export interface SkylineData {
   bands:       SkylineBand[]
   /** Refined arcs — dense ray-march data around detected ridgeline features */
   refinedArcs: RefinedArc[]
+  /** Per-band detected peaks (local maxima in elevation profile per azimuth).
+   *  Only populated for bands 0–2 (ultra-near through mid-near). */
+  detectedPeaks: BandDetectedPeaksW[]
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -340,6 +343,26 @@ interface PeakRefineItem {
   bandIndex: number
   /** Peak name (for debug logging) */
   name: string
+}
+
+/** Detected peak — local maximum in elevation profile along one azimuth. */
+interface DetectedPeakW {
+  azimuthIdx: number
+  azimuthDeg: number
+  distance: number
+  elevation: number
+  angle: number
+  lat: number
+  lng: number
+  terrainType: 'land' | 'water' | 'ocean'
+  bandIndex: number
+}
+
+/** Per-band collection of detected peaks with azimuth offset index. */
+interface BandDetectedPeaksW {
+  peaks: DetectedPeakW[]
+  peakOffsets: Uint32Array
+  bandIndex: number
 }
 
 // ─── Peak Refinement Handler ─────────────────────────────────────────────────
@@ -951,7 +974,93 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands[bi].crossingOffsets = offsets
   }
 
-  // Phase 6 removed — refined arcs now computed on-demand via 'refine-peaks' message.
+  // ── Phase 6: Peak detection pass (local maxima in elevation profile) ────────
+  // For bands 0–2 (ultra-near through mid-near, 0–31km), scan each azimuth's
+  // elevation profile for local maxima: elevation goes up then down.
+  // These "detected peaks" are terrain ridges visible from the viewer, used by
+  // the depth renderer for peak polygons and layered occlusion.
+
+  const MAX_PEAK_DETECT_BAND = 3  // bands 0, 1, 2 (ultra-near, near, mid-near)
+
+  const detectedPeaks: BandDetectedPeaksW[] = []
+
+  for (let bi = 0; bi < Math.min(MAX_PEAK_DETECT_BAND, DEPTH_BANDS.length); bi++) {
+    const band = bands[bi]
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const bandCfg = DEPTH_BANDS[bi]
+    const allPeaks: DetectedPeakW[] = []
+    const peakOffsets = new Uint32Array(bandAz + 1)
+
+    for (let ai = 0; ai < bandAz; ai++) {
+      peakOffsets[ai] = allPeaks.length
+
+      // Collect elevation samples along this azimuth within band range
+      // We use crossing data + band ridgeline to reconstruct profile
+      // But more efficiently: re-march this azimuth using cached tiles
+      const azDeg = ai / bandRes
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA = Math.sin(azRad)
+      const cosA = Math.cos(azRad)
+
+      // Choose the right distance step array for this band
+      const isHires = bandCfg.resolution && bandCfg.resolution > resolution
+      const distSteps = isHires ? hiresLogDists : logDists
+
+      // Collect samples within band range (near → far order for peak detection)
+      const samples: Array<{ dist: number; elev: number; lat: number; lng: number; angle: number }> = []
+      for (let di = distSteps.length - 1; di >= 0; di--) {
+        const dist = distSteps[di]
+        if (dist < bandCfg.minDist || dist > bandCfg.maxDist) continue
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+        const zoom = distToZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom)
+        if (rawElev < OCEAN_ELEV_M) continue
+
+        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const effElev = rawElev - curvDrop
+        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+        samples.push({ dist, elev: rawElev, lat: sLat, lng: sLng, angle: elevAngle })
+      }
+
+      if (samples.length < 3) continue
+
+      // Detect local maxima: elevation goes up then down
+      let prevSlope = 0  // -1 falling, 0 flat, +1 rising
+      for (let si = 1; si < samples.length; si++) {
+        const slope = Math.sign(samples[si].elev - samples[si - 1].elev)
+        if (slope === 0) continue  // Flat — keep last direction
+
+        if (prevSlope === 1 && slope === -1) {
+          // Peak at samples[si - 1]
+          const pk = samples[si - 1]
+          const terrainType: 'land' | 'water' | 'ocean' = pk.elev < OCEAN_ELEV_M ? 'ocean' : 'land'
+          allPeaks.push({
+            azimuthIdx: ai,
+            azimuthDeg: azDeg,
+            distance: pk.dist,
+            elevation: pk.elev,
+            angle: pk.angle,
+            lat: pk.lat,
+            lng: pk.lng,
+            terrainType,
+            bandIndex: bi,
+          })
+        }
+        prevSlope = slope
+      }
+    }
+    peakOffsets[bandAz] = allPeaks.length
+
+    detectedPeaks.push({
+      peaks: allPeaks,
+      peakOffsets,
+      bandIndex: bi,
+    })
+  }
+
+  // Phase 7 (old 6) removed — refined arcs now computed on-demand via 'refine-peaks' message.
   // See handleRefinePeaks() below.
 
   self.postMessage({ type: 'progress', phase: 'skyline', progress: 1.0 })
@@ -970,6 +1079,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     shading,
     bands,
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
+    detectedPeaks,
     resolution,
     numAzimuths,
     computedAt: {
