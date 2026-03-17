@@ -184,7 +184,7 @@ function reprojectRefinedArcs(
 /** Contour interval in metres for each depth band index.
  *  Progressive density: ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+const CONTOUR_INTERVALS_M: number[] = [6.096, 15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
 
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
@@ -250,7 +250,7 @@ function buildContourStrands(
         // For far bands (3+), within-band occlusion remains useful since crossings
         // are at similar depths where true occlusion is meaningful.
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
+        const useOcclusion = bi === 0 || bi >= 4  // Immediate (0–1km) + mid/mid-far/far
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -274,11 +274,13 @@ function buildContourStrands(
           // Match to closest strand by distance proximity
           // Per-band tolerance: tight for close bands (prevents jumpy connections),
           // looser for far bands where large gaps are natural
-          const maxDistDiff = bi <= 1
+          const maxDistDiff = bi === 0
+            ? Math.max(5, c.dist * 0.015)   // immediate: 1.5%, floor 5m
+            : bi <= 2
             ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
-            : bi === 2
+            : bi === 3
             ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
-            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
+            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
@@ -745,10 +747,11 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
+ *  immediate 6→5.5, ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
  *  Thinner lines let elevation color and terrain shape show through. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],  // ultra-near: 5px at 0km → 4.5px at 4.5km
+  [6, 5.5],  // immediate:  6px at 0km → 5.5px at 1km
+  [5, 4.5],  // ultra-near: 5px at 0.5km → 4.5px at 4.5km
   [4.5, 3.5],// near:       4.5px at 4km → 3.5px at 10.5km
   [3.5, 3],  // mid-near:   3.5px at 10km → 3px at 31km
   [3, 2.5],  // mid:        3px at 30km → 2.5px at 81km
@@ -762,11 +765,12 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,  6,  12],   // immediate — darkest void
     [2,  12, 20],   // ultra-near — near void
-    [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
-    [14, 62, 90],   // mid-far — 80% toward deep
+    [5,  24, 38],   // near — ~17% toward deep
+    [8,  36, 56],   // mid-near — ~33% toward deep
+    [11, 48, 74],   // mid — ~50% toward deep
+    [14, 62, 90],   // mid-far — ~67% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]
   const bandIdx = bandCount <= 1 ? 0 : Math.round((1 - t) * (FILL_COLORS.length - 1))
@@ -815,7 +819,7 @@ function renderTerrain(
 
   // Per-band segment size: near bands update color/width frequently,
   // far bands use long segments to avoid dotty appearance from stroke gaps
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
+  const SEGMENT_SIZES = [2, 3, 4, 6, 12, 24, 48]  // immediate → far
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -960,7 +964,7 @@ function renderContours(
   const WIDTH_POWER = 0.2
 
   // Per-band opacity (near=vivid, far=faint)
-  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+  const CONTOUR_OPACITIES = [0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
 
   // Width change threshold: flush path when width differs by >20%
   const WIDTH_FLUSH_RATIO = 0.2

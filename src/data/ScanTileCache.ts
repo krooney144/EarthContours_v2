@@ -35,12 +35,12 @@ const TILE_PX = 256
  * We match zoom to distance so nearby terrain gets high-res data
  * and distant terrain uses coarser (but wider-coverage) tiles.
  *
- * z15 (~4.8 m/px) for ultra-near 0–1 km: 50ft contour precision
- * z14 (~9.5 m/px) for ultra-near 1–4.5 km
- * z13 (~19 m/px) for near 4.5–10.5 km
+ * z16 (~2.4 m/px) for immediate 0–1 km: 20ft contour precision
+ * z14 (~9.5 m/px) for ultra-near 0.5–4.5 km
+ * z13 (~19 m/px) for near 4–10.5 km
  */
 export function distanceToZoom(distM: number): number {
-  if (distM < 1_000)   return 15
+  if (distM < 1_000)   return 16
   if (distM < 4_500)   return 14
   if (distM < 10_500)  return 13
   if (distM < 31_000)  return 11

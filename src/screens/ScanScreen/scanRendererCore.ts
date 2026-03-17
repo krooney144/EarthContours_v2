@@ -126,7 +126,7 @@ export function reprojectRefinedArcs(
 
 // ─── Contour Strand Precomputation ──────────────────────────────────────────
 
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+const CONTOUR_INTERVALS_M: number[] = [6.096, 15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
 
 export function buildContourStrands(
   skyline: SkylineData,
@@ -166,7 +166,7 @@ export function buildContourStrands(
         azCrossings.sort((a, b) => a.dist - b.dist)
 
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3
+        const useOcclusion = bi === 0 || bi >= 4  // Immediate (0–1km) + mid/mid-far/far
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -186,11 +186,13 @@ export function buildContourStrands(
             activeStrands.set(levelKey, strands)
           }
 
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)
-            : bi === 2
-            ? Math.max(50, c.dist * 0.03)
-            : Math.max(200, c.dist * 0.05)
+          const maxDistDiff = bi === 0
+            ? Math.max(5, c.dist * 0.015)   // immediate: 1.5%, floor 5m
+            : bi <= 2
+            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
+            : bi === 3
+            ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
+            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
@@ -455,12 +457,13 @@ export interface BandStyle {
 }
 
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],
-  [4.5, 3.5],
-  [3.5, 3],
-  [3, 2.5],
-  [2.5, 2],
-  [2, 1],
+  [6, 5.5],    // immediate
+  [5, 4.5],    // ultra-near
+  [4.5, 3.5],  // near
+  [3.5, 3],    // mid-near
+  [3, 2.5],    // mid
+  [2.5, 2],    // mid-far
+  [2, 1],      // far
 ]
 
 export function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -468,11 +471,12 @@ export function bandStyleForIndex(bandIndex: number, bandCount: number): BandSty
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,  6,  12],   // immediate — darkest void
     [2,  12, 20],   // ultra-near — near void
-    [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
-    [14, 62, 90],   // mid-far — 80% toward deep
+    [5,  24, 38],   // near — ~17% toward deep
+    [8,  36, 56],   // mid-near — ~33% toward deep
+    [11, 48, 74],   // mid — ~50% toward deep
+    [14, 62, 90],   // mid-far — ~67% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]
   const bandIdx = bandCount <= 1 ? 0 : Math.round((1 - t) * (FILL_COLORS.length - 1))
@@ -513,7 +517,7 @@ export function renderTerrain(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
+  const SEGMENT_SIZES = [2, 3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
 
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const style = bandStyleForIndex(bi, numBands)
@@ -638,7 +642,7 @@ export function renderContours(
   const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
   const WIDTH_POWER = 0.2
 
-  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+  const CONTOUR_OPACITIES = [0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
 
   const WIDTH_FLUSH_RATIO = 0.2
 
