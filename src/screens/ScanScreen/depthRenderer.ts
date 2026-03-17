@@ -286,6 +286,7 @@ export function renderDepthTerrain(
 
   // Ridgeline stroke widths per band (near=thick, far=thin)
   const BAND_STROKE_WIDTHS: [number, number][] = [
+    [6, 5.5],    // immediate
     [5, 4.5],    // ultra-near
     [4.5, 3.5],  // near
     [3.5, 3],    // mid-near
@@ -295,10 +296,10 @@ export function renderDepthTerrain(
   ]
 
   // Ridgeline opacity per band
-  const BAND_OPACITIES = [0.90, 0.80, 0.65, 0.50, 0.35, 0.25]
+  const BAND_OPACITIES = [0.95, 0.90, 0.80, 0.65, 0.50, 0.35, 0.25]
 
   // Segment sizes for color/width update frequency
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
+  const SEGMENT_SIZES = [2, 3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
 
   for (let bi = numBands - 1; bi >= 0; bi--) {
     const bandCfg = DEPTH_BANDS[bi]
@@ -552,7 +553,7 @@ export function renderDepthContours(
   const WIDTH_POWER = 0.2
 
   // Base opacity per band (before haze reduction)
-  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+  const CONTOUR_OPACITIES = [0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
 
   const WIDTH_FLUSH_RATIO = 0.2
 
