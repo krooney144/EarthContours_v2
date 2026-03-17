@@ -1,0 +1,575 @@
+/**
+ * MAP Screen — 2D topographic map using OpenTopoMap tiles
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-secondary);
+  overflow: hidden;
+}
+
+/* ── Canvas ────────────────────────────────────────────────────────────────── */
+
+/**
+ * touch-action: none — CRITICAL for mobile pinch-zoom.
+ * Without this, the browser intercepts 2-finger pinch as native page zoom
+ * instead of routing it to our onTouchMove handler for map tile zoom.
+ * This was causing the "whole app shrinks" bug on mobile.
+ */
+.mapCanvas {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.mapCanvas:active {
+  cursor: grabbing;
+}
+
+/* ── Globe (Three.js) Canvas ───────────────────────────────────────────────── */
+
+.globeCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  touch-action: none;
+  transition: opacity 600ms ease-in-out;
+}
+
+.mapCanvas {
+  z-index: 1;
+}
+
+/* ── Globe Debug Panel ─────────────────────────────────────────────────────── */
+
+.globeDebug {
+  position: absolute;
+  top: 44px;
+  left: var(--space-2);
+  background: rgba(0, 8, 16, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  line-height: 1.5;
+  max-width: 360px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.globeDebug strong {
+  color: var(--ec-foam);
+  font-family: var(--font-display);
+  letter-spacing: 0.08em;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.globeDebugToggle {
+  position: absolute;
+  top: 44px;
+  left: var(--space-2);
+  width: 28px;
+  height: 28px;
+  background: rgba(0, 8, 16, 0.8);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-hud);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.globeDebugToggle:hover {
+  border-color: var(--ec-border-active);
+  color: var(--ec-glow);
+}
+
+/* ── Location Banner ────────────────────────────────────────────────────────── */
+/* Shows the active viewpoint — either a tapped location (teal) or GPS (blue). */
+
+.locationBanner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: var(--space-2) var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  z-index: var(--z-hud);
+  animation: fade-in 300ms ease-out;
+}
+
+/* Teal variant — user tapped a location on the map */
+.locationBanner.bannerExplore {
+  background: rgba(47, 109, 135, 0.95);
+  border-bottom: 1px solid var(--ec-border-active);
+}
+
+/* Blue variant — GPS / "my location" is the active viewpoint */
+.locationBanner.bannerGps {
+  background: rgba(30, 60, 110, 0.95);
+  border-bottom: 1px solid rgba(70, 130, 230, 0.4);
+}
+
+.bannerDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.bannerExplore .bannerDot {
+  background: #84D1DB;
+  box-shadow: 0 0 6px rgba(132, 209, 219, 0.6);
+}
+
+.bannerGps .bannerDot {
+  background: #4682E6;
+  box-shadow: 0 0 6px rgba(70, 130, 230, 0.6);
+}
+
+.bannerLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-white);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.bannerCoords {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: rgba(240, 248, 255, 0.7);
+}
+
+/* ── Map Controls ────────────────────────────────────────────────────────────── */
+
+.controls {
+  position: absolute;
+  right: var(--space-2);
+  bottom: calc(var(--ec-nav-height) + var(--space-10));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: var(--z-overlay);
+}
+
+@media (max-width: 480px) {
+  .controls {
+    right: 8px;
+    bottom: calc(var(--ec-nav-height) + 16px);
+    gap: var(--space-3);
+  }
+}
+
+/**
+ * Map control buttons — minimum 44×44px for mobile touch targets
+ * per Apple HIG and Material Design guidelines.
+ * All map action buttons inherit this base style.
+ */
+.controlBtn {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  background: rgba(13, 30, 46, 0.9);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  color: var(--ec-text-secondary);
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  backdrop-filter: blur(4px);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.controlBtn:hover {
+  background: var(--ec-bg-elevated);
+  border-color: var(--ec-border-active);
+  color: var(--ec-glow);
+}
+
+.controlBtn:active {
+  background: rgba(132, 209, 219, 0.15);
+}
+
+/**
+ * "My Location" button — always visible.
+ * Blue highlight when GPS is actively locked (locationActive state).
+ * TODO: Add spinning animation while acquiring GPS fix.
+ */
+.locationBtn {
+  margin-top: var(--space-2);
+}
+
+.locationBtn.locationActive {
+  color: #4682E6;
+  border-color: rgba(70, 130, 230, 0.5);
+}
+
+/**
+ * Area selection button — toggle for rectangle drawing mode (EXPLORE only).
+ * Highlighted when selection mode is active.
+ */
+.selectAreaBtn {
+  margin-top: var(--space-1);
+}
+
+.selectAreaBtn.selectAreaActive {
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+  background: rgba(132, 209, 219, 0.15);
+}
+
+/**
+ * Selection overlay — floating panel with instructions, dimensions, and EXPLORE button.
+ * Border color changes based on area size severity (teal → orange → red).
+ */
+.selectionOverlay {
+  position: absolute;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(13, 30, 46, 0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  z-index: var(--z-hud);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 200px;
+  transition: border-color 200ms ease;
+}
+
+/* Severity color overrides for selection overlay border */
+.selectionOverlay.selection_ok {
+  border-color: var(--ec-border-active);
+}
+
+.selectionOverlay.selection_warning {
+  border-color: rgba(230, 160, 50, 0.7);
+}
+
+.selectionOverlay.selection_danger {
+  border-color: rgba(220, 70, 70, 0.7);
+}
+
+.selectionHint {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-glow);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: center;
+  transition: color 200ms ease;
+}
+
+/* Warning/danger hint colors */
+.selection_warning .selectionHint {
+  color: rgba(230, 180, 80, 0.95);
+}
+
+.selection_danger .selectionHint {
+  color: rgba(230, 90, 90, 0.95);
+}
+
+/** Dimension display — shows width × height of selection */
+.selectionDims {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--ec-text-secondary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+/**
+ * EXPLORE action button — wider than standard control buttons.
+ */
+.selectionActionBtn {
+  width: auto;
+  min-width: 44px;
+  padding: 0 var(--space-4);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  margin-top: var(--space-1);
+}
+
+/** Disabled state for EXPLORE button when area is too large */
+.selectionActionBtn.selectionActionDisabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ── Scale bar ──────────────────────────────────────────────────────────────── */
+
+.scaleBar {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 44px);
+  left: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.scaleBarLine {
+  height: 2px;
+  background: rgba(132, 209, 219, 0.7);
+  border-left: 2px solid rgba(132, 209, 219, 0.7);
+  border-right: 2px solid rgba(132, 209, 219, 0.7);
+  box-sizing: content-box;
+  min-width: 20px;
+}
+
+.scaleBarLabel {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: rgba(132, 209, 219, 0.8);
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.scaleBarDebug {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: rgba(132, 209, 219, 0.5);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+
+/* ── Coordinates bar ─────────────────────────────────────────────────────────── */
+
+.coordBar {
+  position: absolute;
+  bottom: var(--ec-nav-height);
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: var(--ec-hud-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-top: 1px solid var(--ec-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  z-index: var(--z-hud);
+  pointer-events: none;
+}
+
+.coordText {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+}
+
+.zoomText {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.1em;
+}
+
+/* ── GPS Permission Prompt ──────────────────────────────────────────────────── */
+/* Toast-style prompt that appears when user taps "My Location" without permission. */
+
+.gpsPrompt {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 60px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(13, 30, 46, 0.96);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 260px;
+  max-width: 340px;
+  animation: gps-prompt-in 250ms ease-out;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes gps-prompt-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.gpsPromptContent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+}
+
+.gpsPromptIcon {
+  flex-shrink: 0;
+  color: #4682E6;
+}
+
+.gpsPromptIcon.gpsPromptIconDenied {
+  color: rgba(230, 100, 80, 0.9);
+}
+
+.gpsPromptText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gpsPromptText strong {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  color: var(--ec-white);
+  letter-spacing: 0.06em;
+}
+
+.gpsPromptText span {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ec-text-muted);
+  line-height: 1.3;
+}
+
+.gpsPromptDismiss {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.gpsPromptDismiss:hover {
+  color: var(--ec-white);
+  border-color: var(--ec-border-active);
+}
+
+/* ── Tap to explore hint ──────────────────────────────────────────────────────── */
+
+.tapHint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height) + 50px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ec-bg-overlay);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-full);
+  padding: var(--space-2) var(--space-4);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+  transition: opacity 1s;
+}
+
+.tapHint.hidden {
+  opacity: 0;
+}
+
+/* ── Loading overlay for tiles ─────────────────────────────────────────────── */
+
+.tileLoadingIndicator {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ec-glow);
+  animation: pulse-glow 1s ease-in-out infinite;
+  z-index: var(--z-overlay);
+  opacity: 0;
+  transition: opacity 300ms;
+}
+
+.tileLoadingIndicator.loading {
+  opacity: 1;
+}
+
+/* ── Custom Vertical Zoom Slider ──────────────────────────────────────────── */
+/* Div-based vertical slider — avoids cross-browser writing-mode issues.
+   Layout: wide touch target (44px) with narrow visible track (4px) centered. */
+
+.zoomTrackContainer {
+  position: relative;
+  width: 44px;
+  height: 120px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.zoomTrack {
+  position: absolute;
+  width: 4px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  border: 1px solid var(--ec-border);
+}
+
+.zoomThumb {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ec-white);
+  border: 2px solid var(--ec-glow);
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.5);
+  transform: translate(-50%, -50%);
+  left: 50%;
+  pointer-events: none;
+  transition: top 60ms ease-out;
+}
