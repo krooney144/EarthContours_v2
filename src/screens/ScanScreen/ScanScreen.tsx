@@ -57,6 +57,13 @@ import {
 import { fetchPeaksNear }                from '../../data/peakLoader'
 import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
+import type { CameraParams as DepthCameraParams } from './scanRendererCore'
+import {
+  buildSkylineBuffer,
+  renderDepthTerrain,
+  renderFarSkylineGlow,
+  renderDepthContours,
+} from './depthRenderer'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -1411,27 +1418,31 @@ function drawScanCanvas(
   }
   ctx.restore()
 
-  // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
+  // ── 2. Terrain — depth-layered rendering with atmospheric haze ──────────────
+  // Uses the new depth renderer which provides:
+  //   - Distance-based terrain coloring (dark near, lighter far)
+  //   - Atmospheric haze (terrain fades toward sky color with distance)
+  //   - Water feature coloring (ocean/lakes rendered distinctly)
+  //   - Valley occlusion via painter's algorithm (far→near)
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill)
-  }
+    const skylineBuffer = buildSkylineBuffer(skylineData, cam as DepthCameraParams, projectedBands)
 
-  // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
-  if (contourStrands.length > 0 && skylineData) {
-    // Compute global elevation range (same as renderTerrain uses)
-    let cElevMin = Infinity, cElevMax = -Infinity
-    for (let bi = 0; bi < skylineData.bands.length; bi++) {
-      const elev = skylineData.bands[bi].elevations
-      for (let i = 0; i < elev.length; i++) {
-        if (elev[i] === -Infinity) continue
-        if (elev[i] < cElevMin) cElevMin = elev[i]
-        if (elev[i] > cElevMax) cElevMax = elev[i]
-      }
+    renderDepthTerrain(ctx, skylineBuffer, skylineData, cam as DepthCameraParams, projectedBands, showBandLines, showFill)
+
+    // ── 2b. Contour lines with depth haze ──────────────────────────────────────
+    if (contourStrands.length > 0) {
+      renderDepthContours(
+        ctx, contourStrands, cam as DepthCameraParams,
+        skylineBuffer.globalElevMin, skylineBuffer.globalElevMax,
+        skylineData, projectedBands,
+      )
     }
-    renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
+
+    // ── 3. Far skyline glow — makes farthest mountains stand out against sky ──
+    renderFarSkylineGlow(ctx, skylineBuffer, cam as DepthCameraParams)
   }
 
-  // ── 3. Horizon glow ──────────────────────────────────────────────────────────
+  // ── 3b. Horizon glow ─────────────────────────────────────────────────────────
   const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
   glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
   glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')

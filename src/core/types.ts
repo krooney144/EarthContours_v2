@@ -429,6 +429,10 @@ export interface SkylineData {
   /** Refined arcs — dense ray-march data around detected ridgeline features.
    *  Used for high-resolution peak ridgeline rendering. Empty if no features detected. */
   refinedArcs: RefinedArc[]
+  /** Per-band detected peaks (local maxima in elevation profile per azimuth).
+   *  Only populated for bands 0–2 (ultra-near through mid-near, 0–31km).
+   *  Used by depth renderer for peak polygon and occlusion system. */
+  detectedPeaks: BandDetectedPeaks[]
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
@@ -447,4 +451,50 @@ export interface SkylineRequest {
   viewerHeightM:  number
   resolution:     number
   maxRange:       number
+}
+
+// ─── SCAN — Detected Peak (elevation profile local maximum) ──────────────────
+
+/** Terrain classification for a detected peak point. */
+export type TerrainType = 'land' | 'water' | 'ocean'
+
+/**
+ * A local maximum in the elevation profile along a single azimuth ray.
+ * Detected after the ray march completes by scanning for elevation-goes-up-then-down patterns.
+ * Used by the depth renderer to build peak polygons for layered terrain rendering.
+ */
+export interface DetectedPeak {
+  /** Azimuth index in the band's coordinate system */
+  azimuthIdx: number
+  /** Azimuth angle in degrees (0=N, 90=E) */
+  azimuthDeg: number
+  /** Distance from viewer (metres) */
+  distance: number
+  /** Raw ground elevation (metres) */
+  elevation: number
+  /** Elevation angle from viewer (radians) */
+  angle: number
+  /** GPS latitude of the peak point */
+  lat: number
+  /** GPS longitude of the peak point */
+  lng: number
+  /** Terrain classification at this point */
+  terrainType: TerrainType
+  /** Depth band index this peak was found in */
+  bandIndex: number
+}
+
+/**
+ * Per-azimuth array of detected peaks for a single depth band.
+ * Packed format: detectedPeaks[bandIndex] contains all peaks found in that band,
+ * grouped by azimuth via peakOffsets.
+ */
+export interface BandDetectedPeaks {
+  /** All detected peaks for this band, sorted by azimuth then distance */
+  peaks: DetectedPeak[]
+  /** Per-azimuth offset into peaks array (length = numAzimuths + 1).
+   *  Azimuth ai's peaks are at indices peakOffsets[ai]..peakOffsets[ai+1]. */
+  peakOffsets: Uint32Array
+  /** Band index */
+  bandIndex: number
 }
