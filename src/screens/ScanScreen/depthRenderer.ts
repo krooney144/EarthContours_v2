@@ -43,10 +43,10 @@ const HAZE_START_DIST = 20_000    // Haze begins at 20km
 const HAZE_FULL_DIST  = 350_000   // Full haze at 350km
 const HAZE_MAX_ALPHA  = 0.75      // Maximum haze opacity (never fully obscures)
 
-/** Terrain base colors by distance — near terrain is darker, far terrain lighter */
-const TERRAIN_NEAR_COLOR: [number, number, number] = [2, 10, 18]     // Near-black deep ocean
+/** Terrain base colors by distance — visible contrast against dark sky background */
+const TERRAIN_NEAR_COLOR: [number, number, number] = [8, 28, 42]     // Dark teal — distinct from sky
 const TERRAIN_FAR_COLOR:  [number, number, number] = [14, 50, 75]    // Muted deep blue
-const TERRAIN_MID_COLOR:  [number, number, number] = [8, 30, 48]     // Mid-range blue-grey
+const TERRAIN_MID_COLOR:  [number, number, number] = [12, 38, 58]    // Mid-range blue-grey
 
 /** Water feature colors */
 const WATER_COLOR: [number, number, number]  = [4, 18, 35]    // Dark blue for lakes/rivers
@@ -140,33 +140,22 @@ export function buildSkylineBuffer(
     let farDist = 0
     let farBandIdx = numBands - 1
 
-    // First pass: compute raw band angles
+    // First pass: compute band screen positions (always — painter's order handles
+    // fill/stroke occlusion automatically). bandScreenY is the real projected Y
+    // for every band, never set to H for occlusion purposes.
     for (let bi = 0; bi < numBands; bi++) {
-      bandAngles[bi] = bandAngleAt(skyline, bi, bearingDeg, projected)
-      bandElevs[bi] = bandElevAt(skyline, bi, bearingDeg)
-      bandDists[bi] = bandDistAt(skyline, bi, bearingDeg)
-      bandIsWater[bi] = bandElevs[bi] !== -Infinity && bandElevs[bi] < OCEAN_ELEV_M
-    }
+      const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
+      const elev = bandElevAt(skyline, bi, bearingDeg)
+      const dist = bandDistAt(skyline, bi, bearingDeg)
 
-    // Per-ray depth occlusion: sweep near → far, track running max angle.
-    // A farther band whose ridgeline falls below the max angle from closer
-    // bands is fully occluded — closer terrain blocks the view.
-    let maxOccAngle = SENTINEL
-    for (let bi = 0; bi < numBands; bi++) {
-      occlusionEnvelope[bi] = maxOccAngle
-      const angle = bandAngles[bi]
+      bandAngles[bi] = angle
+      bandElevs[bi] = elev
+      bandDists[bi] = dist
+      bandIsWater[bi] = elev !== -Infinity && elev < OCEAN_ELEV_M
 
       if (angle <= SENTINEL) {
-        bandOccluded[bi] = false  // no terrain — nothing to occlude
-        bandScreenY[bi] = H
-      } else if (angle <= maxOccAngle) {
-        // This band's ridgeline is hidden behind closer terrain
-        bandOccluded[bi] = true
         bandScreenY[bi] = H
       } else {
-        // Visible — update the occlusion envelope
-        bandOccluded[bi] = false
-        maxOccAngle = angle
         const { y } = project(bearingDeg, angle, cam)
         bandScreenY[bi] = Math.round(Math.min(H, Math.max(0, y)))
 
@@ -175,11 +164,29 @@ export function buildSkylineBuffer(
         }
       }
 
-      // Track the farthest visible (non-occluded) band
-      if (!bandOccluded[bi] && angle > SENTINEL && bandDists[bi] > farDist) {
-        farDist = bandDists[bi]
+      // Track the farthest visible band
+      if (angle > SENTINEL && dist > farDist) {
+        farDist = dist
         farBandIdx = bi
       }
+    }
+
+    // Second pass: compute per-ray occlusion envelope for contour lines.
+    // Sweep near → far, tracking running max elevation angle. The envelope
+    // tells the contour renderer: "at this column, any contour point from
+    // band bi at an angle ≤ occlusionEnvelope[bi] is hidden behind closer
+    // terrain." Fills and ridgeline strokes don't need this — painter's
+    // order (far → near) handles their occlusion automatically.
+    let maxOccAngle = SENTINEL
+    for (let bi = 0; bi < numBands; bi++) {
+      occlusionEnvelope[bi] = maxOccAngle
+      const angle = bandAngles[bi]
+      if (angle > maxOccAngle) {
+        maxOccAngle = angle
+      }
+      // A band is "ridgeline-occluded" when its ridgeline stroke would be
+      // hidden behind a closer band's fill. Used only for stroke skipping.
+      bandOccluded[bi] = angle > SENTINEL && angle <= occlusionEnvelope[bi]
     }
 
     columns[col] = {
@@ -374,7 +381,8 @@ export function renderDepthTerrain(
         const cd = columns[col]
         const screenY = cd.bandScreenY[bi]
 
-        if (screenY >= H) {
+        // Skip if no terrain, or if this band's ridgeline is occluded by closer terrain
+        if (screenY >= H || cd.bandOccluded[bi]) {
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
           continue
