@@ -72,6 +72,12 @@ export interface ColumnData {
   bandElevs: number[]
   /** Per-band: is this column water (ocean/lake)? */
   bandIsWater: boolean[]
+  /** Per-band: true if this band is hidden behind closer terrain at this column */
+  bandOccluded: boolean[]
+  /** Per-ray occlusion envelope: max elevation angle from all bands 0..bi-1 at this column.
+   *  occlusionEnvelope[bi] = max angle seen from bands nearer than bi.
+   *  Used by contour renderer to skip points hidden behind closer terrain. */
+  occlusionEnvelope: number[]
   /** Overall max screen Y across all bands (the visible silhouette) */
   silhouetteY: number
   /** Distance to the farthest visible ridgeline at this column */
@@ -127,24 +133,40 @@ export function buildSkylineBuffer(
     const bandDists: number[] = new Array(numBands)
     const bandElevs: number[] = new Array(numBands)
     const bandIsWater: boolean[] = new Array(numBands)
+    const bandOccluded: boolean[] = new Array(numBands)
+    const occlusionEnvelope: number[] = new Array(numBands)
 
     let silhouetteY = H
     let farDist = 0
     let farBandIdx = numBands - 1
 
+    // First pass: compute raw band angles
     for (let bi = 0; bi < numBands; bi++) {
-      const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
-      const elev = bandElevAt(skyline, bi, bearingDeg)
-      const dist = bandDistAt(skyline, bi, bearingDeg)
+      bandAngles[bi] = bandAngleAt(skyline, bi, bearingDeg, projected)
+      bandElevs[bi] = bandElevAt(skyline, bi, bearingDeg)
+      bandDists[bi] = bandDistAt(skyline, bi, bearingDeg)
+      bandIsWater[bi] = bandElevs[bi] !== -Infinity && bandElevs[bi] < OCEAN_ELEV_M
+    }
 
-      bandAngles[bi] = angle
-      bandElevs[bi] = elev
-      bandDists[bi] = dist
-      bandIsWater[bi] = elev !== -Infinity && elev < OCEAN_ELEV_M
+    // Per-ray depth occlusion: sweep near → far, track running max angle.
+    // A farther band whose ridgeline falls below the max angle from closer
+    // bands is fully occluded — closer terrain blocks the view.
+    let maxOccAngle = SENTINEL
+    for (let bi = 0; bi < numBands; bi++) {
+      occlusionEnvelope[bi] = maxOccAngle
+      const angle = bandAngles[bi]
 
       if (angle <= SENTINEL) {
+        bandOccluded[bi] = false  // no terrain — nothing to occlude
+        bandScreenY[bi] = H
+      } else if (angle <= maxOccAngle) {
+        // This band's ridgeline is hidden behind closer terrain
+        bandOccluded[bi] = true
         bandScreenY[bi] = H
       } else {
+        // Visible — update the occlusion envelope
+        bandOccluded[bi] = false
+        maxOccAngle = angle
         const { y } = project(bearingDeg, angle, cam)
         bandScreenY[bi] = Math.round(Math.min(H, Math.max(0, y)))
 
@@ -153,9 +175,9 @@ export function buildSkylineBuffer(
         }
       }
 
-      // Track the farthest visible band
-      if (angle > SENTINEL && dist > farDist) {
-        farDist = dist
+      // Track the farthest visible (non-occluded) band
+      if (!bandOccluded[bi] && angle > SENTINEL && bandDists[bi] > farDist) {
+        farDist = bandDists[bi]
         farBandIdx = bi
       }
     }
@@ -167,6 +189,8 @@ export function buildSkylineBuffer(
       bandDists,
       bandElevs,
       bandIsWater,
+      bandOccluded,
+      occlusionEnvelope,
       silhouetteY,
       farDist,
       farBandIdx,
@@ -507,8 +531,7 @@ export function renderDepthContours(
   cam: CameraParams,
   globalElevMin: number,
   globalElevMax: number,
-  skyline: SkylineData,
-  projected: ProjectedBands | null,
+  buffer: SkylineBuffer | null,
 ): void {
   const { W, H } = cam
   const scale = cam.scale ?? 1
@@ -551,19 +574,19 @@ export function renderDepthContours(
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
 
-      // Occlusion: skip points hidden behind nearer bands
-      if (bi > 0) {
-        let occluded = false
-        for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
-          const nearerAngle = bandAngleAt(skyline, nearerBi, pt.bearingDeg, projected ?? null)
-          if (nearerAngle > -Math.PI / 2 + 0.001 && nearerAngle >= pt.elevAngleRad) {
-            occluded = true
-            break
+      // Per-ray depth occlusion: use precomputed occlusion envelope from buffer.
+      // The envelope stores the max elevation angle from all nearer bands at each
+      // screen column. If this contour point's angle is below that, it's hidden
+      // behind closer terrain.
+      if (bi > 0 && buffer) {
+        const col = Math.round((pt.bearingDeg - cam.heading_deg) / cam.hfov * W + W * 0.5)
+        if (col >= 0 && col < W) {
+          const cd = buffer.columns[col]
+          if (cd.occlusionEnvelope[bi] > -Math.PI / 2 + 0.001 &&
+              pt.elevAngleRad <= cd.occlusionEnvelope[bi]) {
+            if (pathStarted) { ctx.stroke(); pathStarted = false }
+            continue
           }
-        }
-        if (occluded) {
-          if (pathStarted) { ctx.stroke(); pathStarted = false }
-          continue
         }
       }
 

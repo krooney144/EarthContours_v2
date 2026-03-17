@@ -1434,7 +1434,7 @@ function drawScanCanvas(
       renderDepthContours(
         ctx, contourStrands, cam as DepthCameraParams,
         skylineBuffer.globalElevMin, skylineBuffer.globalElevMax,
-        skylineData, projectedBands,
+        skylineBuffer,
       )
     }
 
