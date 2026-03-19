@@ -159,11 +159,23 @@ export function buildContourStrands(
       const bearingDeg = ai / bandRes
 
       if (start < end) {
-        const azCrossings: Array<{ elev: number; dist: number; dir: number }> = []
+        const azCrossingsRaw: Array<{ elev: number; dist: number; dir: number }> = []
         for (let j = start; j < end; j += 5) {
-          azCrossings.push({ elev: data[j], dist: data[j + 1], dir: data[j + 4] })
+          azCrossingsRaw.push({ elev: data[j], dist: data[j + 1], dir: data[j + 4] })
         }
-        azCrossings.sort((a, b) => a.dist - b.dist)
+        azCrossingsRaw.sort((a, b) => a.dist - b.dist)
+
+        // Deduplicate crossings at same elevation within 50m distance.
+        // Multiple ray-march passes can produce duplicate crossings at
+        // the same contour level but slightly different distances.
+        const azCrossings: typeof azCrossingsRaw = []
+        for (const c of azCrossingsRaw) {
+          const last = azCrossings[azCrossings.length - 1]
+          if (last && Math.abs(c.dist - last.dist) < 50 && Math.abs(c.elev - last.elev) < 2) {
+            continue  // skip duplicate
+          }
+          azCrossings.push(c)
+        }
 
         // Self-occlusion within a band: skip crossings hidden behind closer terrain
         // along the same ray. Only apply for bands 4+ (mid-far, far) where very
