@@ -695,9 +695,9 @@ function bandGpsAt(
  *  Near terrain has tight radius (ridge points are close together),
  *  far terrain needs wider radius (ridge points are spread far apart). */
 const BAND_GPS_RADIUS: number[] = [
+  200,     // immediate:  0.2 km
   500,     // ultra-near: 0.5 km
   2_000,   // near:       2 km
-  5_000,   // mid-near:   5 km
   10_000,  // mid:        10 km
   10_000,  // mid-far:    10 km
   15_000,  // far:        15 km
@@ -746,15 +746,14 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
- *  Thinner lines let elevation color and terrain shape show through. */
+ *  immediate 5.5→5, ultra-near 5→4.5, near 4.5→3.5, mid 3.5→2.5, mid-far 2.5→2, far 2→1. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],  // ultra-near: 5px at 0km → 4.5px at 4.5km
-  [4.5, 3.5],// near:       4.5px at 4km → 3.5px at 10.5km
-  [3.5, 3],  // mid-near:   3.5px at 10km → 3px at 31km
-  [3, 2.5],  // mid:        3px at 30km → 2.5px at 81km
-  [2.5, 2],  // mid-far:    2.5px at 80km → 2px at 152km
-  [2, 1],    // far:        2px at 150km → 1px at 400km
+  [5.5, 5],   // immediate:  5.5px at 0km → 5px at 1km
+  [5, 4.5],   // ultra-near: 5px at 1km → 4.5px at 5km
+  [4.5, 3.5], // near:       4.5px at 5km → 3.5px at 15km
+  [3.5, 2.5], // mid:        3.5px at 15km → 2.5px at 70km
+  [2.5, 2],   // mid-far:    2.5px at 70km → 2px at 152km
+  [2, 1],     // far:        2px at 152km → 1px at 400km
 ]
 
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -763,10 +762,10 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,   8, 16],   // immediate — deepest void
     [2,  12, 20],   // ultra-near — near void
     [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
+    [8,  36, 56],   // mid — 40% toward deep
     [14, 62, 90],   // mid-far — 80% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]

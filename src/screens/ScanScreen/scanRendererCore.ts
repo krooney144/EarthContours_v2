@@ -204,10 +204,12 @@ export function buildContourStrands(
           }
 
           const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)
-            : bi === 2
-            ? Math.max(50, c.dist * 0.03)
-            : Math.max(200, c.dist * 0.05)
+            ? Math.max(10, c.dist * 0.02)   // immediate + ultra-near: tight
+            : bi <= 2
+            ? Math.max(50, c.dist * 0.03)   // near: medium
+            : bi <= 3
+            ? Math.max(100, c.dist * 0.04)  // mid: slightly wider for 1.005× steps
+            : Math.max(200, c.dist * 0.05)  // mid-far, far: wide
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
