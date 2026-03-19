@@ -96,7 +96,7 @@ interface BandConfig {
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'immediate',  minDist: 0,       maxDist: 1_000   },                   // 0–1 km     (0.5°, 720 az)
+  { label: 'immediate',  minDist: 0,       maxDist: 1_000,   resolution: 8 },     // 0–1 km     (0.125°, 720 az)
   { label: 'ultra-near', minDist: 500,     maxDist: 4_500,   resolution: 8 },    // 0.5–4.5 km (0.125°, 2880 az)
   { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },    // 4–10.5 km  (0.125°, 2880 az)
   { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },    // 10–31 km   (0.125°, 2880 az)
