@@ -179,11 +179,14 @@ export function buildContourStrands(
           azCrossings.push(c)
         }
 
-        // Within-band occlusion: only for bi >= 4 (mid-far, far) where the
-        // band's depth range is narrow relative to distance. Bands 0–3 span
-        // wide ranges where close terrain would wrongly hide far terrain.
+        // Within-band occlusion: sweep near→far within the band, tracking
+        // max elevation angle. Crossings at lower angles than already-seen
+        // terrain are hidden behind it. Enabled for bi >= 1 (all bands
+        // except immediate/band 0, which has sparse Phase 4b azimuth data
+        // that could create false occlusion). Cross-band occlusion is
+        // handled separately by painter's order rendering (far→near).
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 4  // bi 4=mid-far, 5=far only
+        const useOcclusion = bi >= 1
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
