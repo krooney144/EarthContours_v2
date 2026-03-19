@@ -305,16 +305,16 @@ export interface DepthBandConfig {
   resolution?: number
 }
 
-/** 6-band configuration: ultra-near through far, with scaled overlaps.
+/** 6-band configuration: ultra-near through far, non-overlapping distance ranges.
  *  Bands 0–2 are high-res (8 steps/°, 2880 azimuths).
  *  Bands 3–5 are standard-res (4 steps/°, 1440 azimuths). */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az) — 0.5 km overlap into near
-  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az) — 0.5 km overlap into mid-near
-  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az) — 1 km overlap into mid
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)  — 1 km overlap into med-far
-  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)  — 2 km overlap into far
-  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
+  { label: 'ultra-near', minDist: 0,        maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
+  { label: 'near',       minDist: 4_500,    maxDist: 10_500,  resolution: 8 },  // 4.5–10.5 km  (0.125°, 2880 az)
+  { label: 'mid-near',   minDist: 10_500,   maxDist: 31_000,  resolution: 8 },  // 10.5–31 km   (0.125°, 2880 az)
+  { label: 'mid',        minDist: 31_000,   maxDist: 81_000  },                  // 31–81 km   (0.25°, 1440 az)
+  { label: 'mid-far',    minDist: 81_000,   maxDist: 152_000 },                  // 81–152 km  (0.25°, 1440 az)
+  { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
 
 /**
@@ -344,6 +344,39 @@ export interface SkylineBand {
   resolution: number
   /** Number of azimuth samples in this band's arrays = 360 × resolution */
   numAzimuths: number
+}
+
+// ─── SCAN — Ridge Strand Types ───────────────────────────────────────────────
+
+/** One point along a ridge strand — detected during ray march via rolling-window
+ *  slope analysis. Ready to project to screen coordinates. */
+export interface RidgeStrandPoint {
+  /** Azimuth bearing in degrees (0=N, 90=E) — maps to screen X */
+  bearingDeg:  number
+  /** Raw ground elevation in metres — for color mapping */
+  elev:        number
+  /** Distance from viewer in metres — for thickness + atmospheric haze */
+  dist:        number
+  /** GPS latitude of the ridge point */
+  lat:         number
+  /** GPS longitude of the ridge point */
+  lng:         number
+  /** Angular curvature sharpness 0–1 (1 = knife-edge, 0.05 = gentle hill).
+   *  Controls stroke weight: sharp ridges get bold lines, gentle slopes thin/fade. */
+  sharpness:   number
+}
+
+/** A connected sequence of ridge points across consecutive azimuths.
+ *  Built in the worker by grouping detected peaks at similar distances. */
+export interface RidgeStrand {
+  /** Ordered points along this ridge, one per azimuth where detected */
+  points:    RidgeStrandPoint[]
+  /** Depth band index where this ridge was found */
+  bandIndex: number
+  /** Highest elevation on this strand (metres) */
+  peakElev:  number
+  /** Distance to the highest point (metres) */
+  peakDist:  number
 }
 
 // ─── SCAN — Refined Arc (Dense Peak Ridgeline Data) ─────────────────────────
@@ -433,6 +466,10 @@ export interface SkylineData {
    *  Only populated for bands 0–2 (ultra-near through mid-near, 0–31km).
    *  Used by depth renderer for peak polygon and occlusion system. */
   detectedPeaks: BandDetectedPeaks[]
+  /** Ridge strands — connected sequences of detected ridge points across azimuths.
+   *  Built by grouping per-azimuth peak detections at similar distances.
+   *  Used by renderRidgeStrands for variable-weight ridgeline rendering. */
+  ridgeStrands: RidgeStrand[]
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */

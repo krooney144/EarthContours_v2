@@ -18,7 +18,7 @@
  * No React, no stores, no side effects.
  */
 
-import type { SkylineData, BandDetectedPeaks } from '../../core/types'
+import type { SkylineData, BandDetectedPeaks, RidgeStrand } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
 import type { CameraParams, ProjectedBands, PrebuiltContourStrand } from './scanRendererCore'
 import {
@@ -117,7 +117,7 @@ export function buildSkylineBuffer(
   for (let bi = 0; bi < numBands; bi++) {
     const elev = skyline.bands[bi].elevations
     for (let i = 0; i < elev.length; i++) {
-      if (elev[i] === -Infinity || elev[i] < OCEAN_ELEV_M) continue
+      if (elev[i] === -Infinity || elev[i] < -500) continue
       if (elev[i] < globalElevMin) globalElevMin = elev[i]
       if (elev[i] > globalElevMax) globalElevMax = elev[i]
     }
@@ -151,7 +151,7 @@ export function buildSkylineBuffer(
       bandAngles[bi] = angle
       bandElevs[bi] = elev
       bandDists[bi] = dist
-      bandIsWater[bi] = elev !== -Infinity && elev < OCEAN_ELEV_M
+      bandIsWater[bi] = elev !== -Infinity && elev >= -10 && elev < OCEAN_ELEV_M
 
       if (angle <= SENTINEL) {
         bandScreenY[bi] = H
@@ -254,206 +254,196 @@ function mixColors(
 // ─── Main Depth Terrain Renderer ─────────────────────────────────────────────
 
 /**
- * Render layered terrain with atmospheric haze, valley occlusion, and
- * distance-based coloring. Replaces the old flat band-fill system.
+ * Render layered terrain with continuous distance-based coloring using
+ * putImageData for per-pixel color control. No band color steps — every
+ * column gets its own color based on distance, with atmospheric haze.
  *
  * Algorithm:
- *   For each band (far → near, painter's order):
- *     1. Compute terrain base color from distance
- *     2. Apply atmospheric haze (blend toward sky color)
- *     3. Apply water coloring for ocean/lake areas
- *     4. Fill below ridgeline with the hazed color
- *     5. Draw ridgeline stroke with elevation-based color + haze
+ *   1. Build an ImageData pixel buffer
+ *   2. For each column, paint bands far→near (painter's order)
+ *      - Each column fills from its own screenY down to the canvas bottom
+ *      - Near bands overwrite far bands, providing natural occlusion
+ *   3. Stamp the buffer with one putImageData call
  *
- *   Valley occlusion: each nearer band's fill covers farther bands,
- *   naturally hiding terrain behind closer ridgelines (painter's algorithm).
+ *   Ridgeline strokes are NOT drawn here — they come from renderRidgeStrands
+ *   which uses detected ridge features rather than band maxima.
  */
 export function renderDepthTerrain(
   ctx: CanvasRenderingContext2D,
   buffer: SkylineBuffer,
   skyline: SkylineData,
   cam: CameraParams,
-  projected: ProjectedBands | null,
-  showBandLines: boolean = true,
+  _projected: ProjectedBands | null,
+  _showBandLines: boolean = true,
   showFill: boolean = true,
 ): void {
   const { W, H } = cam
-  const scale = cam.scale ?? 1
   const numBands = skyline.bands.length
-  const { columns, globalElevMin, globalElevMax } = buffer
-  const elevRange = globalElevMax - globalElevMin
-  const hasElevRange = elevRange > 1
+  const { columns } = buffer
 
-  // Ridgeline stroke widths per band (near=thick, far=thin)
-  const BAND_STROKE_WIDTHS: [number, number][] = [
-    [5, 4.5],    // ultra-near
-    [4.5, 3.5],  // near
-    [3.5, 3],    // mid-near
-    [3, 2.5],    // mid
-    [2.5, 2],    // mid-far
-    [2, 1],      // far
-  ]
+  if (!showFill) return
 
-  // Ridgeline opacity per band
-  const BAND_OPACITIES = [0.90, 0.80, 0.65, 0.50, 0.35, 0.25]
+  // ── Pixel buffer — one putImageData call for all terrain fill ───────────
+  const imageData = ctx.createImageData(W, H)
+  const px = imageData.data
 
-  // Segment sizes for color/width update frequency
-  const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48].map(s => Math.round(s * scale))
+  for (let col = 0; col < W; col++) {
+    const cd = columns[col]
 
-  for (let bi = numBands - 1; bi >= 0; bi--) {
-    const bandCfg = DEPTH_BANDS[bi]
-    const segSize = SEGMENT_SIZES[bi] ?? 24
-    const bandOpacity = BAND_OPACITIES[bi] ?? 0.25
+    // Paint bands far → near (painter's algorithm per column)
+    for (let bi = numBands - 1; bi >= 0; bi--) {
+      const screenY = cd.bandScreenY[bi]
+      if (screenY >= H) continue  // no terrain this band this column
 
-    // ── Fill below this band's ridgeline ────────────────────────────────────
-    if (showFill) {
-      // Use ImageData for per-column coloring (avoids hundreds of fillRect calls)
-      // But for simplicity and performance, draw column-by-column with fillRect
-      // batching adjacent columns with same color.
+      const dist  = cd.bandDists[bi]
+      const isWater = cd.bandIsWater[bi]
 
-      let batchStartCol = -1
-      let batchColor = ''
-      let lastScreenY = H
-
-      for (let col = 0; col < W; col++) {
-        const cd = columns[col]
-        const screenY = cd.bandScreenY[bi]
-
-        if (screenY >= H) {
-          // No terrain — flush batch
-          if (batchStartCol >= 0) {
-            ctx.fillStyle = batchColor
-            ctx.fillRect(batchStartCol, lastScreenY, col - batchStartCol, H - lastScreenY)
-            batchStartCol = -1
-          }
-          continue
-        }
-
-        // Compute fill color for this column
-        const dist = cd.bandDists[bi]
-        const isWater = cd.bandIsWater[bi]
-
-        let baseColor: [number, number, number]
-        if (isWater) {
-          baseColor = cd.bandElevs[bi] < 2 ? OCEAN_COLOR : WATER_COLOR
+      // Base color
+      let baseR: number, baseG: number, baseB: number
+      if (isWater) {
+        if (cd.bandElevs[bi] < 2) {
+          baseR = OCEAN_COLOR[0]; baseG = OCEAN_COLOR[1]; baseB = OCEAN_COLOR[2]
         } else {
-          baseColor = terrainColorForDist(dist)
+          baseR = WATER_COLOR[0]; baseG = WATER_COLOR[1]; baseB = WATER_COLOR[2]
         }
-
-        // Apply atmospheric haze
-        const haze = hazeFactor(dist)
-        const finalColor = haze > 0 ? mixColors(baseColor, HAZE_COLOR, haze) : baseColor
-        const colorStr = `rgb(${finalColor[0]},${finalColor[1]},${finalColor[2]})`
-
-        // Batch: if color changed or first column, flush old batch
-        if (batchStartCol < 0 || colorStr !== batchColor || Math.abs(screenY - lastScreenY) > 1) {
-          if (batchStartCol >= 0) {
-            ctx.fillStyle = batchColor
-            ctx.fillRect(batchStartCol, lastScreenY, col - batchStartCol, H - lastScreenY)
-          }
-          batchStartCol = col
-          batchColor = colorStr
-          lastScreenY = screenY
-        }
-      }
-      // Flush remaining batch
-      if (batchStartCol >= 0) {
-        ctx.fillStyle = batchColor
-        ctx.fillRect(batchStartCol, lastScreenY, W - batchStartCol, H - lastScreenY)
-      }
-    }
-
-    // ── Ridgeline stroke ───────────────────────────────────────────────────
-    if (showBandLines) {
-      ctx.lineCap = 'butt'
-      ctx.lineJoin = 'round'
-
-      const widths = BAND_STROKE_WIDTHS[bi] || [2, 1]
-      const lwNear = widths[0]
-      const lwFar = widths[1]
-      const lwMin = bandCfg.minDist
-      const lwMax = bandCfg.maxDist
-      const lwRange = lwMax - lwMin
-
-      let segStartCol = -1
-
-      for (let col = 0; col < W; col++) {
-        const cd = columns[col]
-        const screenY = cd.bandScreenY[bi]
-
-        // Skip if no terrain, or if this band's ridgeline is occluded by closer terrain
-        if (screenY >= H || cd.bandOccluded[bi]) {
-          if (segStartCol >= 0) ctx.stroke()
-          segStartCol = -1
-          continue
-        }
-
-        if (segStartCol < 0) {
-          // Start new segment
-          const elev = cd.bandElevs[bi]
-          const dist = cd.bandDists[bi]
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange : 0.5
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          const lw = (lwNear + tDist * (lwFar - lwNear)) * scale
-
-          // Apply haze to ridgeline color
-          const baseRidgeColor = elevToRidgeColor(tElev)
-          const haze = hazeFactor(dist)
-          const rgbMatch = baseRidgeColor.match(/\d+/g)
-
-          if (rgbMatch) {
-            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-            const hr = Math.round(r + (HAZE_COLOR[0] - r) * haze * 0.5)
-            const hg = Math.round(g + (HAZE_COLOR[1] - g) * haze * 0.5)
-            const hb = Math.round(b + (HAZE_COLOR[2] - b) * haze * 0.5)
-            ctx.strokeStyle = `rgba(${hr},${hg},${hb},${bandOpacity})`
-          } else {
-            ctx.strokeStyle = `rgba(132,209,219,${bandOpacity})`
-          }
-
-          ctx.lineWidth = lw
-          ctx.beginPath()
-          ctx.moveTo(col, screenY)
-          segStartCol = col
-        } else if (col - segStartCol >= segSize) {
-          // Flush segment and start new one with updated color/width
-          ctx.lineTo(col, screenY)
-          ctx.stroke()
-
-          const elev = cd.bandElevs[bi]
-          const dist = cd.bandDists[bi]
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange : 0.5
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          const lw = (lwNear + tDist * (lwFar - lwNear)) * scale
-
-          const baseRidgeColor = elevToRidgeColor(tElev)
-          const haze = hazeFactor(dist)
-          const rgbMatch = baseRidgeColor.match(/\d+/g)
-
-          if (rgbMatch) {
-            const r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2])
-            const hr = Math.round(r + (HAZE_COLOR[0] - r) * haze * 0.5)
-            const hg = Math.round(g + (HAZE_COLOR[1] - g) * haze * 0.5)
-            const hb = Math.round(b + (HAZE_COLOR[2] - b) * haze * 0.5)
-            ctx.strokeStyle = `rgba(${hr},${hg},${hb},${bandOpacity})`
-          } else {
-            ctx.strokeStyle = `rgba(132,209,219,${bandOpacity})`
-          }
-
-          ctx.lineWidth = lw
-          ctx.beginPath()
-          ctx.moveTo(col, screenY)
-          segStartCol = col
-        } else {
-          ctx.lineTo(col, screenY)
-        }
+      } else {
+        const [r, g, b] = terrainColorForDist(dist)
+        baseR = r; baseG = g; baseB = b
       }
 
-      if (segStartCol >= 0) ctx.stroke()
+      // Continuous atmospheric haze — no steps
+      const haze = hazeFactor(dist)
+      const finalR = Math.round(baseR + (HAZE_COLOR[0] - baseR) * haze)
+      const finalG = Math.round(baseG + (HAZE_COLOR[1] - baseG) * haze)
+      const finalB = Math.round(baseB + (HAZE_COLOR[2] - baseB) * haze)
+
+      // Subtle vertical darkening for depth perception
+      const bandH = Math.max(1, H - screenY)
+
+      // Fill from screenY to H — near bands overwrite far bands
+      for (let y = screenY; y < H; y++) {
+        const yFrac = (y - screenY) / bandH
+        const shade = 1 - yFrac * 0.15
+
+        const idx = (y * W + col) * 4
+        px[idx]     = Math.round(finalR * shade)
+        px[idx + 1] = Math.round(finalG * shade)
+        px[idx + 2] = Math.round(finalB * shade)
+        px[idx + 3] = 255
+      }
     }
   }
+
+  // One single draw call for all terrain fill
+  ctx.putImageData(imageData, 0, 0)
+}
+
+// ─── Ridge Strand Renderer ───────────────────────────────────────────────────
+
+/**
+ * Render ridge strands as variable-weight elevation-colored strokes.
+ *
+ * Each strand is a connected sequence of detected peak points across azimuths.
+ * Stroke weight = baseThickness × sharpness × distanceFade
+ * Stroke color  = elevToRidgeColor(tElev) with atmospheric haze
+ *
+ * Draw order: far strands first so near strands paint over them (painter's order).
+ * Called after renderDepthTerrain fill, before contour lines.
+ */
+export function renderRidgeStrands(
+  ctx:           CanvasRenderingContext2D,
+  ridgeStrands:  RidgeStrand[],
+  cam:           CameraParams,
+  viewerElev:    number,
+  globalElevMin: number,
+  globalElevMax: number,
+): void {
+  const { W, H } = cam
+  const scale     = cam.scale ?? 1
+  const elevRange = globalElevMax - globalElevMin || 1
+
+  // Per-band base thickness — near bands thicker, far bands hairline
+  const BASE_WIDTHS  = [3.0, 2.4, 1.8, 1.2, 0.8, 0.5]
+  const BASE_ALPHAS  = [0.90, 0.78, 0.62, 0.45, 0.30, 0.16]
+
+  // Sort strands far → near for correct painter's order
+  const sorted = [...ridgeStrands].sort((a, b) => b.peakDist - a.peakDist)
+
+  ctx.lineCap  = 'round'
+  ctx.lineJoin = 'round'
+
+  for (const strand of sorted) {
+    if (strand.points.length < 2) continue
+
+    const bi        = strand.bandIndex
+    const baseWidth = (BASE_WIDTHS[bi]  ?? 0.5) * scale
+    const baseAlpha = BASE_ALPHAS[bi] ?? 0.16
+
+    // Draw segment by segment so each gets its own width/opacity
+    for (let i = 1; i < strand.points.length; i++) {
+      const prev = strand.points[i - 1]
+      const curr = strand.points[i]
+
+      // Project both points to screen using current viewer elevation
+      const curvDropPrev = (prev.dist * prev.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const anglePrev    = Math.atan2(prev.elev - curvDropPrev - viewerElev, prev.dist)
+
+      const curvDropCurr = (curr.dist * curr.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const angleCurr    = Math.atan2(curr.elev - curvDropCurr - viewerElev, curr.dist)
+
+      const SENTINEL = -Math.PI / 2 + 0.001
+      if (anglePrev <= SENTINEL || angleCurr <= SENTINEL) continue
+
+      const p0 = project(prev.bearingDeg, anglePrev, cam)
+      const p1 = project(curr.bearingDeg, angleCurr, cam)
+
+      // Skip if both points off screen
+      if ((p0.x < -10 && p1.x < -10) ||
+          (p0.x > W+10 && p1.x > W+10) ||
+          (p0.y > H    && p1.y > H)) continue
+
+      // Average sharpness of the two endpoints
+      const sharpness = (prev.sharpness + curr.sharpness) * 0.5
+
+      // Distance-based haze — continuous, no steps
+      const avgDist = (prev.dist + curr.dist) * 0.5
+      const tDist = Math.pow(Math.min(1, avgDist / MAX_DIST), 0.6)
+      const haze  = tDist * 0.7
+
+      // Elevation-based color
+      const avgElev = (prev.elev + curr.elev) * 0.5
+      const tElev  = Math.max(0, Math.min(1, (avgElev - globalElevMin) / elevRange))
+      const colorStr = elevToRidgeColor(tElev)
+      const rgb    = colorStr.match(/\d+/g)
+      if (!rgb) continue
+
+      // Apply atmospheric haze to the elevation color
+      const r = Math.round(+rgb[0] + (HAZE_COLOR[0] - +rgb[0]) * haze)
+      const g = Math.round(+rgb[1] + (HAZE_COLOR[1] - +rgb[1]) * haze)
+      const b = Math.round(+rgb[2] + (HAZE_COLOR[2] - +rgb[2]) * haze)
+
+      // Final stroke weight — three factors:
+      // 1. base thickness for this band distance
+      // 2. sharpness — knife ridge = 1.0, gentle hill = 0.05
+      // 3. distance fade — near = full, far = thin
+      const finalWidth = baseWidth * sharpness * (1 - tDist * 0.6)
+      const finalAlpha = baseAlpha * sharpness * (1 - haze * 0.5)
+
+      if (finalAlpha < 0.02 || finalWidth < 0.15) continue
+
+      ctx.globalAlpha = finalAlpha
+      ctx.strokeStyle = `rgb(${r},${g},${b})`
+      ctx.lineWidth   = finalWidth
+
+      ctx.beginPath()
+      ctx.moveTo(p0.x, p0.y)
+      ctx.lineTo(p1.x, p1.y)
+      ctx.stroke()
+    }
+  }
+
+  // Always restore globalAlpha
+  ctx.globalAlpha = 1
 }
 
 // ─── Far Skyline Glow ────────────────────────────────────────────────────────
