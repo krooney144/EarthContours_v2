@@ -210,6 +210,8 @@ function buildContourStrands(
 ): PrebuiltContourStrand[] {
   const completed: PrebuiltContourStrand[] = []
 
+  // Process bands far→near (bi = band index: 0=immediate, 1=ultra-near,
+  // 2=near, 3=mid, 4=mid-far, 5=far)
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
     const bandAz = band.numAzimuths
@@ -222,12 +224,13 @@ function buildContourStrands(
 
     const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
 
-    // Active strands keyed by snapped-level + direction
+    // Active strands keyed by snapped-level + direction.
+    // Now tracks lastAngle (elevation angle in radians) for angle-based matching.
     const activeStrands = new Map<string, Array<{
-      lastAi:   number
-      lastDist: number
-      level:    number
-      points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
+      lastAi:    number
+      lastAngle: number
+      level:     number
+      points:    Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
     }>>()
 
     for (let ai = 0; ai < bandAz; ai++) {
@@ -243,15 +246,14 @@ function buildContourStrands(
         }
         azCrossings.sort((a, b) => a.dist - b.dist)
 
-        // Occlusion sweep: skip crossings hidden behind nearer terrain.
-        // For near bands (0–2), disable within-band occlusion — these bands span
-        // wide depth ranges (e.g. 0–4.5km) where a hillside at 200m would wrongly
-        // occlude all contours out to 4.5km. Painter's order rendering handles
-        // visual overlap correctly without data-level occlusion.
-        // For far bands (3+), within-band occlusion remains useful since crossings
-        // are at similar depths where true occlusion is meaningful.
+        // Within-band occlusion: skip crossings hidden behind nearer terrain
+        // on the same ray. Only for bi >= 4 (mid-far, far) where the band's
+        // depth range is narrow relative to distance, so true occlusion applies.
+        // Bands 0–3 (immediate through mid) span wide depth ranges where a
+        // close hillside would wrongly hide all terrain behind it. Painter's
+        // order rendering handles cross-band occlusion instead.
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
+        const useOcclusion = bi >= 4  // bi 4=mid-far, 5=far only
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -272,22 +274,19 @@ function buildContourStrands(
             activeStrands.set(levelKey, strands)
           }
 
-          // Match to closest strand by distance proximity
-          // Per-band tolerance: tight for close bands (prevents jumpy connections),
-          // looser for far bands where large gaps are natural
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
-            : bi === 2
-            ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
-            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
+          // Match to closest strand by ELEVATION ANGLE proximity.
+          // Screen Y = horizonY - angle * pxPerRad, so matching by angle
+          // ensures connected points are at similar screen positions.
+          // Threshold: ~0.3° (0.005 rad) — about 15-25px at typical FOV.
+          const maxAngleDiff = 0.005  // ~0.3° in radians
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
             const s = strands[si]
             if (s.lastAi === ai) continue          // Already matched this azimuth
-            if (ai - s.lastAi > maxAzGap) continue // Too old
-            const diff = Math.abs(c.dist - s.lastDist)
-            if (diff < bestDiff && diff < maxDistDiff) {
+            if (ai - s.lastAi > maxAzGap) continue // Too old — expired
+            const diff = Math.abs(angle - s.lastAngle)
+            if (diff < bestDiff && diff < maxAngleDiff) {
               bestIdx = si
               bestDiff = diff
             }
@@ -295,12 +294,12 @@ function buildContourStrands(
 
           if (bestIdx >= 0) {
             strands[bestIdx].lastAi = ai
-            strands[bestIdx].lastDist = c.dist
+            strands[bestIdx].lastAngle = angle
             strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle, dist: c.dist })
           } else {
             strands.push({
               lastAi: ai,
-              lastDist: c.dist,
+              lastAngle: angle,
               level: snappedLevel,
               points: [{ bearingDeg, elevAngleRad: angle, dist: c.dist }],
             })

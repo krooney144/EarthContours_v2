@@ -722,12 +722,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
     const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
 
-    // Global previous sample for boundary seeding (same fix as Phase 4)
-    let globalPrevElev3 = -Infinity as number
-    let globalPrevDist3 = 0
-    let globalPrevLat3  = viewerLat
-    let globalPrevLng3  = viewerLng
-
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
@@ -749,7 +743,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         ridgeLng  = sLng
       }
 
-      // Per-band: ridgeline tracking + crossing detection (standard-res bands only)
+      // Per-band: ridgeline tracking + crossing detection
+      // (standard-res bands only: bi 4=mid-far, bi 5=far)
       for (const bi of standardBandIndices) {
         const band = DEPTH_BANDS[bi]
         if (dist < band.minDist || dist > band.maxDist) continue
@@ -761,14 +756,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           bandRidgeLat[bi]  = sLat
           bandRidgeLng[bi]  = sLng
           bandRidgeElev[bi] = rawElev
-        }
-
-        // Seed per-band prev from global prev at band boundaries
-        if (bandPrevElev[bi] === -Infinity && globalPrevElev3 !== -Infinity) {
-          bandPrevElev[bi] = globalPrevElev3
-          bandPrevDist[bi] = globalPrevDist3
-          bandPrevLat[bi]  = globalPrevLat3
-          bandPrevLng[bi]  = globalPrevLng3
         }
 
         // Crossing detection — uses raw (uncorrected) elevation for contour levels
@@ -785,14 +772,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         bandPrevDist[bi] = dist
         bandPrevLat[bi]  = sLat
         bandPrevLng[bi]  = sLng
-      }
-
-      // Update global prev for boundary seeding
-      if (rawElev !== -Infinity) {
-        globalPrevElev3 = rawElev
-        globalPrevDist3 = dist
-        globalPrevLat3  = sLat
-        globalPrevLng3  = sLng
       }
     }
 
@@ -846,13 +825,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
       const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
 
-      // Global previous sample — used to seed per-band prev at band boundaries
-      // so contour crossings spanning boundaries aren't lost.
-      let globalPrevElev = -Infinity as number
-      let globalPrevDist = 0
-      let globalPrevLat  = viewerLat
-      let globalPrevLng  = viewerLng
-
       for (const dist of hiresLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
@@ -866,6 +838,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
         if (elevAngle > Math.PI / 3) continue
 
+        // Hi-res bands: bi 0=immediate, 1=ultra-near, 2=near, 3=mid
         for (const bi of hiresBandIndices) {
           const band = DEPTH_BANDS[bi]
           if (dist < band.minDist || dist > band.maxDist) continue
@@ -877,15 +850,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             bandRidgeLat[bi]  = sLat
             bandRidgeLng[bi]  = sLng
             bandRidgeElev[bi] = rawElev
-          }
-
-          // Seed per-band prev from global prev if this is the band's first sample.
-          // This ensures contour crossings at band boundaries are detected.
-          if (bandPrevElev[bi] === -Infinity && globalPrevElev !== -Infinity) {
-            bandPrevElev[bi] = globalPrevElev
-            bandPrevDist[bi] = globalPrevDist
-            bandPrevLat[bi]  = globalPrevLat
-            bandPrevLng[bi]  = globalPrevLng
           }
 
           // Crossing detection
@@ -902,14 +866,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           bandPrevDist[bi] = dist
           bandPrevLat[bi]  = sLat
           bandPrevLng[bi]  = sLng
-        }
-
-        // Update global prev for boundary seeding
-        if (rawElev !== -Infinity) {
-          globalPrevElev = rawElev
-          globalPrevDist = dist
-          globalPrevLat  = sLat
-          globalPrevLng  = sLng
         }
       }
 
