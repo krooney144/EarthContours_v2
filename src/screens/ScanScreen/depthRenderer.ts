@@ -600,7 +600,11 @@ export function renderDepthContours(
       // screen column. If this contour point's angle is below that, it's hidden
       // behind closer terrain.
       if (bi > 0 && buffer) {
-        const col = Math.round((pt.bearingDeg - cam.heading_deg) / cam.hfov * W + W * 0.5)
+        // Handle bearing wraparound (e.g. heading=10°, bearing=350° → diff=-20°)
+        let dBearing = pt.bearingDeg - cam.heading_deg
+        if (dBearing > 180) dBearing -= 360
+        if (dBearing < -180) dBearing += 360
+        const col = Math.round(dBearing / cam.hfov * W + W * 0.5)
         if (col >= 0 && col < W) {
           const cd = buffer.columns[col]
           if (cd.occlusionEnvelope[bi] > -Math.PI / 2 + 0.001 &&
