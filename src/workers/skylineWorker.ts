@@ -981,15 +981,24 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
   // ── Phase 4c: Mid-range crossing refinement (31–152km, finer steps) ────────
   // Phase 3 uses logDists (1.015× step) which gives ~522m steps at 35km —
-  // too coarse for 152.4m contour intervals. This pass adds finer crossing
-  // detection using midRangeLogDists (1.005× step, ~175m at 35km) for
-  // standard-res bands only. Ridgelines are already captured from Phase 3;
-  // this only adds contour crossings.
+  // too coarse for 152.4m contour intervals. This pass REPLACES Phase 3's
+  // crossings with finer ones using midRangeLogDists (1.005× step, ~175m at 35km).
+  // Ridgelines are already captured from Phase 3; this only fixes contour crossings.
 
   if (midRangeLogDists.length > 0 && standardBandIndices.length > 0) {
     // Only refine bands 3 and 4 (mid: 31-81km, mid-far: 81-152km)
     // Band 5 (far: 152-400km) uses 609.6m intervals — coarse steps are fine
     const midBandsToRefine = standardBandIndices.filter(bi => bi <= 4)
+
+    // CLEAR Phase 3 crossings for these bands — Phase 4c replaces them entirely.
+    // Without this, both phases write to the same array creating duplicate
+    // crossings at same elevation but slightly different distances, which
+    // causes sawtooth/zigzag contour rendering.
+    for (const bi of midBandsToRefine) {
+      for (let ai = 0; ai < numAzimuths; ai++) {
+        bandCrossingsTemp[bi][ai] = []
+      }
+    }
 
     for (let ai = 0; ai < numAzimuths; ai++) {
       const azDeg = ai / resolution
