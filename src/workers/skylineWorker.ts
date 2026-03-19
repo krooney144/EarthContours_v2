@@ -65,12 +65,12 @@ const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
  *  ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
 const CONTOUR_INTERVALS_M: number[] = [
-  15.24,   // ultra-near: 50ft
-  30.48,   // near:       100ft
-  60.96,   // mid-near:   200ft
-  152.4,   // mid:        500ft
-  304.8,   // mid-far:    1000ft
-  609.6,   // far:        2000ft
+  15.24,   // immediate:  50ft   (0–1 km)
+  15.24,   // ultra-near: 50ft   (1–5 km)
+  30.48,   // near:       100ft  (5–15 km)
+  60.96,   // mid:        200ft  (15–70 km)
+  304.8,   // mid-far:    1000ft (70–152 km)
+  609.6,   // far:        2000ft (152–400 km)
 ]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -95,11 +95,11 @@ interface BandConfig {
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'ultra-near', minDist: 0,        maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
-  { label: 'near',       minDist: 4_500,    maxDist: 10_500,  resolution: 8 },  // 4.5–10.5 km  (0.125°, 2880 az)
-  { label: 'mid-near',   minDist: 10_500,   maxDist: 31_000,  resolution: 8 },  // 10.5–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 31_000,   maxDist: 81_000  },                  // 31–81 km   (0.25°, 1440 az)
-  { label: 'mid-far',    minDist: 81_000,   maxDist: 152_000 },                  // 81–152 km  (0.25°, 1440 az)
+  { label: 'immediate',  minDist: 0,        maxDist: 1_000,   resolution: 8 },  // 0–1 km     (0.125°, 2880 az)
+  { label: 'ultra-near', minDist: 1_000,    maxDist: 5_000,   resolution: 8 },  // 1–5 km     (0.125°, 2880 az)
+  { label: 'near',       minDist: 5_000,    maxDist: 15_000,  resolution: 8 },  // 5–15 km    (0.125°, 2880 az)
+  { label: 'mid',        minDist: 15_000,   maxDist: 70_000,  resolution: 8 },  // 15–70 km   (0.125°, 2880 az)
+  { label: 'mid-far',    minDist: 70_000,   maxDist: 152_000 },                  // 70–152 km  (0.25°, 1440 az)
   { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
 
@@ -235,11 +235,10 @@ function tileTopLeft(x: number, y: number, zoom: number): { lat: number; lng: nu
 }
 
 function distToZoom(distM: number): number {
-  if (distM < 1_000)   return 15   // ultra-near detail — ~4.8 m/px, 50ft contours
-  if (distM < 4_500)   return 14   // ultra-near outer — ~9.5 m/px
-  if (distM < 10_500)  return 13   // near — ~19 m/px
-  if (distM < 31_000)  return 11   // mid-near — ~76 m/px
-  if (distM < 81_000)  return 10   // mid — ~152 m/px
+  if (distM < 1_000)   return 15   // immediate — ~4.8 m/px, 50ft contours
+  if (distM < 5_000)   return 14   // ultra-near — ~9.5 m/px
+  if (distM < 15_000)  return 13   // near — ~19 m/px
+  if (distM < 70_000)  return 11   // mid — ~76 m/px
   if (distM < 152_000) return 9    // mid-far — ~305 m/px
   return 8                         // far — ~610 m/px
 }
@@ -627,20 +626,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
-  // Mid-range log steps for standard-res bands (31–152km) with finer stepping.
-  // The standard 1.015× gives ~522m steps at 35km — too coarse for 152.4m contour intervals.
-  // Using 1.005× gives ~175m steps at 35km, sufficient for 152.4m intervals.
-  const MID_RANGE_MAX_DIST = 152_000
-  const midRangeLogDists: number[] = []
-  let d4 = 31_000
-  while (d4 <= MID_RANGE_MAX_DIST) {
-    midRangeLogDists.push(d4)
-    d4 *= 1.005
-  }
-  midRangeLogDists.reverse()
-
-  // Short-range log steps for the high-res near pass (extends to 31km for mid-near band)
-  const HIRES_MAX_DIST = 31_000
+  // Hi-res log steps for near+mid pass (extends to 70km — covers all hi-res bands)
+  const HIRES_MAX_DIST = 70_000
   const hiresLogDists: number[] = []
   let d2 = 200  // Start closer for near detail
   while (d2 <= HIRES_MAX_DIST) {
@@ -649,17 +636,17 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   hiresLogDists.reverse()
 
-  // Ultra-near log steps: 20m → 200m at 1.005× step (very fine for cliff faces)
+  // Immediate-range log steps: 20m → 1000m at 1.005× step (very fine for cliff faces)
   // Uses 360 azimuths (1° per step) — sufficient for close terrain
-  const ULTRA_NEAR_MAX_DIST = 200
-  const ultraNearLogDists: number[] = []
+  const IMMEDIATE_MAX_DIST = 1_000
+  const immediateLogDists: number[] = []
   let d3 = 20
-  while (d3 <= ULTRA_NEAR_MAX_DIST) {
-    ultraNearLogDists.push(d3)
+  while (d3 <= IMMEDIATE_MAX_DIST) {
+    immediateLogDists.push(d3)
     d3 *= 1.005
   }
-  ultraNearLogDists.reverse()
-  const ULTRA_NEAR_AZIMUTHS = 360  // 1° per step for 20–200m range
+  immediateLogDists.reverse()
+  const IMMEDIATE_AZIMUTHS = 360  // 1° per step for 20–1000m range
 
   // Determine which bands are high-res vs standard
   const HIRES_RESOLUTION = 8  // 0.125° per step
@@ -894,17 +881,17 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
   }
 
-  // ── Phase 4b: Ultra-near pass (360 azimuths, 20–200m) ─────────────────────
-  // Fills the ultra-near band (index 0) with close-range terrain that the
+  // ── Phase 4b: Immediate pass (360 azimuths, 20–1000m) ──────────────────────
+  // Fills the immediate band (index 0) with close-range terrain that the
   // hi-res pass (starting at 200m) would miss.  Uses coarser 1° azimuth
-  // resolution since features at 20–200m subtend large angular spans.
+  // resolution since features at 20–1000m subtend large angular spans.
   // Results are merged into every 8th slot of the 2880-element band arrays.
 
-  if (ultraNearLogDists.length > 0 && DEPTH_BANDS[0].maxDist > 0) {
-    const ultraBandIdx = 0  // ultra-near is always band 0
-    const band = bands[ultraBandIdx]
+  if (immediateLogDists.length > 0 && DEPTH_BANDS[0].maxDist > 0) {
+    const immediateBandIdx = 0  // immediate is always band 0
+    const band = bands[immediateBandIdx]
 
-    for (let uai = 0; uai < ULTRA_NEAR_AZIMUTHS; uai++) {
+    for (let uai = 0; uai < IMMEDIATE_AZIMUTHS; uai++) {
       const azDeg = uai  // 1° steps
       const azRad = azDeg * DEG_TO_RAD
       const sinA  = Math.sin(azRad)
@@ -928,7 +915,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       let prevLat  = viewerLat
       let prevLng  = viewerLng
 
-      for (const dist of ultraNearLogDists) {
+      for (const dist of immediateLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
@@ -949,14 +936,14 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           bestElev  = rawElev
         }
 
-        // Crossing detection for ultra-near band
-        const interval = CONTOUR_INTERVALS_M[ultraBandIdx] || 15.24
+        // Crossing detection for immediate band
+        const interval = CONTOUR_INTERVALS_M[immediateBandIdx] || 7.62
         if (prevElev !== -Infinity) {
           detectCrossings(
             prevElev, prevDist, prevLat, prevLng,
             rawElev, dist, sLat, sLng,
             interval,
-            bandCrossingsTemp[ultraBandIdx][bandAi],
+            bandCrossingsTemp[immediateBandIdx][bandAi],
           )
         }
         prevElev = rawElev
@@ -965,7 +952,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         prevLng  = sLng
       }
 
-      // Only update if ultra-near pass found a higher ridgeline than hi-res pass
+      // Only update if immediate pass found a higher ridgeline than hi-res pass
       if (bestElev > -Infinity && bestAngle > (band.elevations[bandAi] > -Infinity
         ? Math.atan2(band.elevations[bandAi] - (band.distances[bandAi] * band.distances[bandAi]) / (2 * EARTH_R) * (1 - REFRACTION_K) - correctedViewerElev, band.distances[bandAi])
         : -Math.PI / 2)) {
@@ -977,71 +964,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
 
     self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.93 })
-  }
-
-  // ── Phase 4c: Mid-range crossing refinement (31–152km, finer steps) ────────
-  // Phase 3 uses logDists (1.015× step) which gives ~522m steps at 35km —
-  // too coarse for 152.4m contour intervals. This pass REPLACES Phase 3's
-  // crossings with finer ones using midRangeLogDists (1.005× step, ~175m at 35km).
-  // Ridgelines are already captured from Phase 3; this only fixes contour crossings.
-
-  if (midRangeLogDists.length > 0 && standardBandIndices.length > 0) {
-    // Only refine bands 3 and 4 (mid: 31-81km, mid-far: 81-152km)
-    // Band 5 (far: 152-400km) uses 609.6m intervals — coarse steps are fine
-    const midBandsToRefine = standardBandIndices.filter(bi => bi <= 4)
-
-    // CLEAR Phase 3 crossings for these bands — Phase 4c replaces them entirely.
-    // Without this, both phases write to the same array creating duplicate
-    // crossings at same elevation but slightly different distances, which
-    // causes sawtooth/zigzag contour rendering.
-    for (const bi of midBandsToRefine) {
-      for (let ai = 0; ai < numAzimuths; ai++) {
-        bandCrossingsTemp[bi][ai] = []
-      }
-    }
-
-    for (let ai = 0; ai < numAzimuths; ai++) {
-      const azDeg = ai / resolution
-      const azRad = azDeg * DEG_TO_RAD
-      const sinA  = Math.sin(azRad)
-      const cosA  = Math.cos(azRad)
-
-      const bandPrevElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
-      const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
-      const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
-      const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
-
-      for (const dist of midRangeLogDists) {
-        const sLat = viewerLat + (cosA * dist) / 111_132
-        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
-
-        const zoom    = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom)
-
-        if (rawElev === -Infinity) continue
-
-        for (const bi of midBandsToRefine) {
-          const band = DEPTH_BANDS[bi]
-          if (dist < band.minDist || dist > band.maxDist) continue
-
-          const interval = CONTOUR_INTERVALS_M[bi] || 152.4
-          if (bandPrevElev[bi] !== -Infinity) {
-            detectCrossings(
-              bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
-              rawElev, dist, sLat, sLng,
-              interval,
-              bandCrossingsTemp[bi][ai],
-            )
-          }
-          bandPrevElev[bi] = rawElev
-          bandPrevDist[bi] = dist
-          bandPrevLat[bi]  = sLat
-          bandPrevLng[bi]  = sLng
-        }
-      }
-    }
-
-    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.96 })
   }
 
   // ── Phase 5: Pack crossing data into flat arrays ──────────────────────────
@@ -1079,7 +1001,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // These "detected peaks" are terrain ridges visible from the viewer, used by
   // the depth renderer for peak polygons and layered occlusion.
 
-  const MAX_PEAK_DETECT_BAND = 3  // bands 0, 1, 2 (ultra-near, near, mid-near)
+  const MAX_PEAK_DETECT_BAND = 4  // bands 0–3 (immediate, ultra-near, near, mid)
 
   const detectedPeaks: BandDetectedPeaksW[] = []
 

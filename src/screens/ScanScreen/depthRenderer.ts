@@ -363,8 +363,8 @@ export function renderRidgeStrands(
   const elevRange = globalElevMax - globalElevMin || 1
 
   // Per-band base thickness — thicker near, fading far
-  const BASE_WIDTHS  = [4.0, 3.2, 2.4, 1.6, 1.0, 0.5]
-  const BASE_ALPHAS  = [0.95, 0.85, 0.72, 0.55, 0.35, 0.18]
+  const BASE_WIDTHS  = [4.5, 4.0, 3.2, 2.4, 1.0, 0.5]
+  const BASE_ALPHAS  = [0.95, 0.92, 0.85, 0.72, 0.35, 0.18]
 
   // Sort strands far → near for correct painter's order
   const sorted = [...ridgeStrands].sort((a, b) => b.peakDist - a.peakDist)
