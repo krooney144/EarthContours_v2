@@ -165,8 +165,13 @@ export function buildContourStrands(
         }
         azCrossings.sort((a, b) => a.dist - b.dist)
 
+        // Self-occlusion within a band: skip crossings hidden behind closer terrain
+        // along the same ray. Only apply for bands 4+ (mid-far, far) where very
+        // distant terrain often hides behind closer terrain on the same ray.
+        // Bands 0-3 skip this — the renderer's occlusionEnvelope handles cross-band
+        // occlusion, and within-band occlusion is rarely needed at shorter distances.
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3
+        const useOcclusion = bi >= 4
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)

@@ -362,9 +362,9 @@ export function renderRidgeStrands(
   const scale     = cam.scale ?? 1
   const elevRange = globalElevMax - globalElevMin || 1
 
-  // Per-band base thickness — near bands thicker, far bands hairline
-  const BASE_WIDTHS  = [3.0, 2.4, 1.8, 1.2, 0.8, 0.5]
-  const BASE_ALPHAS  = [0.90, 0.78, 0.62, 0.45, 0.30, 0.16]
+  // Per-band base thickness — thicker near, fading far
+  const BASE_WIDTHS  = [4.0, 3.2, 2.4, 1.6, 1.0, 0.5]
+  const BASE_ALPHAS  = [0.95, 0.85, 0.72, 0.55, 0.35, 0.18]
 
   // Sort strands far → near for correct painter's order
   const sorted = [...ridgeStrands].sort((a, b) => b.peakDist - a.peakDist)
@@ -372,14 +372,21 @@ export function renderRidgeStrands(
   ctx.lineCap  = 'round'
   ctx.lineJoin = 'round'
 
+  const SENTINEL = -Math.PI / 2 + 0.001
+
   for (const strand of sorted) {
     if (strand.points.length < 2) continue
 
     const bi        = strand.bandIndex
     const baseWidth = (BASE_WIDTHS[bi]  ?? 0.5) * scale
-    const baseAlpha = BASE_ALPHAS[bi] ?? 0.16
+    const baseAlpha = BASE_ALPHAS[bi] ?? 0.18
 
-    // Draw segment by segment so each gets its own width/opacity
+    // Batched path rendering — only flush when width/alpha change significantly.
+    // This eliminates visual gaps between segments and produces smooth continuous strokes.
+    let pathOpen   = false
+    let lastWidth  = 0
+    let lastAlpha  = 0
+
     for (let i = 1; i < strand.points.length; i++) {
       const prev = strand.points[i - 1]
       const curr = strand.points[i]
@@ -391,8 +398,10 @@ export function renderRidgeStrands(
       const curvDropCurr = (curr.dist * curr.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const angleCurr    = Math.atan2(curr.elev - curvDropCurr - viewerElev, curr.dist)
 
-      const SENTINEL = -Math.PI / 2 + 0.001
-      if (anglePrev <= SENTINEL || angleCurr <= SENTINEL) continue
+      if (anglePrev <= SENTINEL || angleCurr <= SENTINEL) {
+        if (pathOpen) { ctx.stroke(); pathOpen = false }
+        continue
+      }
 
       const p0 = project(prev.bearingDeg, anglePrev, cam)
       const p1 = project(curr.bearingDeg, angleCurr, cam)
@@ -400,9 +409,12 @@ export function renderRidgeStrands(
       // Skip if both points off screen
       if ((p0.x < -10 && p1.x < -10) ||
           (p0.x > W+10 && p1.x > W+10) ||
-          (p0.y > H    && p1.y > H)) continue
+          (p0.y > H    && p1.y > H)) {
+        if (pathOpen) { ctx.stroke(); pathOpen = false }
+        continue
+      }
 
-      // Average sharpness of the two endpoints
+      // Use smoothed sharpness
       const sharpness = (prev.sharpness + curr.sharpness) * 0.5
 
       // Distance-based haze — continuous, no steps
@@ -410,36 +422,47 @@ export function renderRidgeStrands(
       const tDist = Math.pow(Math.min(1, avgDist / MAX_DIST), 0.6)
       const haze  = tDist * 0.7
 
-      // Elevation-based color
-      const avgElev = (prev.elev + curr.elev) * 0.5
-      const tElev  = Math.max(0, Math.min(1, (avgElev - globalElevMin) / elevRange))
-      const colorStr = elevToRidgeColor(tElev)
-      const rgb    = colorStr.match(/\d+/g)
-      if (!rgb) continue
+      // Final stroke weight
+      const finalWidth = baseWidth * sharpness * (1 - tDist * 0.5)
+      const finalAlpha = baseAlpha * sharpness * (1 - haze * 0.4)
 
-      // Apply atmospheric haze to the elevation color
-      const r = Math.round(+rgb[0] + (HAZE_COLOR[0] - +rgb[0]) * haze)
-      const g = Math.round(+rgb[1] + (HAZE_COLOR[1] - +rgb[1]) * haze)
-      const b = Math.round(+rgb[2] + (HAZE_COLOR[2] - +rgb[2]) * haze)
+      if (finalAlpha < 0.02 || finalWidth < 0.15) {
+        if (pathOpen) { ctx.stroke(); pathOpen = false }
+        continue
+      }
 
-      // Final stroke weight — three factors:
-      // 1. base thickness for this band distance
-      // 2. sharpness — knife ridge = 1.0, gentle hill = 0.05
-      // 3. distance fade — near = full, far = thin
-      const finalWidth = baseWidth * sharpness * (1 - tDist * 0.6)
-      const finalAlpha = baseAlpha * sharpness * (1 - haze * 0.5)
+      // Only flush and restart path when width/alpha change significantly
+      const widthChanged = Math.abs(finalWidth - lastWidth) > lastWidth * 0.15
+      const alphaChanged = Math.abs(finalAlpha - lastAlpha) > 0.08
 
-      if (finalAlpha < 0.02 || finalWidth < 0.15) continue
+      if (!pathOpen || widthChanged || alphaChanged) {
+        if (pathOpen) ctx.stroke()
 
-      ctx.globalAlpha = finalAlpha
-      ctx.strokeStyle = `rgb(${r},${g},${b})`
-      ctx.lineWidth   = finalWidth
+        // Elevation-based color with atmospheric haze
+        const avgElev = (prev.elev + curr.elev) * 0.5
+        const tElev  = Math.max(0, Math.min(1, (avgElev - globalElevMin) / elevRange))
+        const colorStr = elevToRidgeColor(tElev)
+        const rgb    = colorStr.match(/\d+/g)
+        if (!rgb) { pathOpen = false; continue }
 
-      ctx.beginPath()
-      ctx.moveTo(p0.x, p0.y)
+        const r = Math.round(+rgb[0] + (HAZE_COLOR[0] - +rgb[0]) * haze)
+        const g = Math.round(+rgb[1] + (HAZE_COLOR[1] - +rgb[1]) * haze)
+        const b = Math.round(+rgb[2] + (HAZE_COLOR[2] - +rgb[2]) * haze)
+
+        ctx.globalAlpha = finalAlpha
+        ctx.strokeStyle = `rgb(${r},${g},${b})`
+        ctx.lineWidth   = finalWidth
+        ctx.beginPath()
+        ctx.moveTo(p0.x, p0.y)
+        pathOpen  = true
+        lastWidth = finalWidth
+        lastAlpha = finalAlpha
+      }
+
       ctx.lineTo(p1.x, p1.y)
-      ctx.stroke()
     }
+
+    if (pathOpen) ctx.stroke()
   }
 
   // Always restore globalAlpha

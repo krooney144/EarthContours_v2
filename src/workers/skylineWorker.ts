@@ -627,6 +627,18 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
+  // Mid-range log steps for standard-res bands (31–152km) with finer stepping.
+  // The standard 1.015× gives ~522m steps at 35km — too coarse for 152.4m contour intervals.
+  // Using 1.005× gives ~175m steps at 35km, sufficient for 152.4m intervals.
+  const MID_RANGE_MAX_DIST = 152_000
+  const midRangeLogDists: number[] = []
+  let d4 = 31_000
+  while (d4 <= MID_RANGE_MAX_DIST) {
+    midRangeLogDists.push(d4)
+    d4 *= 1.005
+  }
+  midRangeLogDists.reverse()
+
   // Short-range log steps for the high-res near pass (extends to 31km for mid-near band)
   const HIRES_MAX_DIST = 31_000
   const hiresLogDists: number[] = []
@@ -964,7 +976,63 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       }
     }
 
-    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.95 })
+    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.93 })
+  }
+
+  // ── Phase 4c: Mid-range crossing refinement (31–152km, finer steps) ────────
+  // Phase 3 uses logDists (1.015× step) which gives ~522m steps at 35km —
+  // too coarse for 152.4m contour intervals. This pass adds finer crossing
+  // detection using midRangeLogDists (1.005× step, ~175m at 35km) for
+  // standard-res bands only. Ridgelines are already captured from Phase 3;
+  // this only adds contour crossings.
+
+  if (midRangeLogDists.length > 0 && standardBandIndices.length > 0) {
+    // Only refine bands 3 and 4 (mid: 31-81km, mid-far: 81-152km)
+    // Band 5 (far: 152-400km) uses 609.6m intervals — coarse steps are fine
+    const midBandsToRefine = standardBandIndices.filter(bi => bi <= 4)
+
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      const azDeg = ai / resolution
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA  = Math.sin(azRad)
+      const cosA  = Math.cos(azRad)
+
+      const bandPrevElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
+      const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+      const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
+      const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+
+      for (const dist of midRangeLogDists) {
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+
+        const zoom    = distToZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom)
+
+        if (rawElev === -Infinity) continue
+
+        for (const bi of midBandsToRefine) {
+          const band = DEPTH_BANDS[bi]
+          if (dist < band.minDist || dist > band.maxDist) continue
+
+          const interval = CONTOUR_INTERVALS_M[bi] || 152.4
+          if (bandPrevElev[bi] !== -Infinity) {
+            detectCrossings(
+              bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
+              rawElev, dist, sLat, sLng,
+              interval,
+              bandCrossingsTemp[bi][ai],
+            )
+          }
+          bandPrevElev[bi] = rawElev
+          bandPrevDist[bi] = dist
+          bandPrevLat[bi]  = sLat
+          bandPrevLng[bi]  = sLng
+        }
+      }
+    }
+
+    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.96 })
   }
 
   // ── Phase 5: Pack crossing data into flat arrays ──────────────────────────
@@ -1085,10 +1153,11 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
   // ── Phase 6b: Group detected peaks into ridge strands ──────────────────────
   //
-  // Scans each band's detected peaks left-to-right across azimuths.
-  // Peaks at similar distances in consecutive azimuths are grouped into
-  // connected RidgeStrand paths. Computes angular sharpness at each point
-  // from the curvature of neighboring azimuth elevation angles.
+  // Step 1: Group peaks into connected strands (sharpness = placeholder 0.5).
+  // Step 2: Compute sharpness from actual strand neighbors (not band maxima).
+  //         This prevents the jumpiness caused by comparing a detected peak
+  //         at one distance with a band-max ridgeline at a completely different
+  //         distance in the neighboring azimuth.
 
   const ridgeStrands: RidgeStrandW[] = []
 
@@ -1097,13 +1166,11 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     if (!bandPeaks || bandPeaks.peaks.length === 0) continue
 
     const bandCfg = DEPTH_BANDS[bi]
-    const band    = bands[bi]
-    const bandAz  = band.numAzimuths
-    const bandRes = band.resolution
 
     // Distance tolerance scales with band range
     const distTolerance = Math.max(500, bandCfg.maxDist * 0.04)
     // Max azimuth gap allowed within a strand (in azimuth indices)
+    const bandRes = bands[bi].resolution
     const maxAzGap = Math.ceil(bandRes * 1.5)
 
     // Active strands being built — multiple parallel ridges possible
@@ -1118,28 +1185,9 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     // Sort peaks by azimuth index (left to right)
     const sortedPeaks = [...bandPeaks.peaks].sort((a, b) => a.azimuthIdx - b.azimuthIdx)
 
+    // Step 1: Group peaks into strands with placeholder sharpness
     for (const peak of sortedPeaks) {
       const ai = peak.azimuthIdx
-
-      // Compute sharpness from angular curvature of neighboring azimuths
-      const elevPrev = ai > 0        ? band.elevations[ai - 1] : peak.elevation
-      const elevNext = ai < bandAz-1 ? band.elevations[ai + 1] : peak.elevation
-      const distPrev = ai > 0        ? band.distances[ai - 1]  : peak.distance
-      const distNext = ai < bandAz-1 ? band.distances[ai + 1]  : peak.distance
-
-      // Convert to angles for curvature calculation
-      const cDrop  = (peak.distance * peak.distance) / (2 * EARTH_R) * (1 - REFRACTION_K)
-      const cDropP = distPrev > 0 ? (distPrev * distPrev) / (2 * EARTH_R) * (1 - REFRACTION_K) : 0
-      const cDropN = distNext > 0 ? (distNext * distNext) / (2 * EARTH_R) * (1 - REFRACTION_K) : 0
-
-      const anglePrev = distPrev > 0 ? Math.atan2(elevPrev - cDropP - correctedViewerElev, distPrev) : 0
-      const angleCurr = Math.atan2(peak.elevation - cDrop - correctedViewerElev, peak.distance)
-      const angleNext = distNext > 0 ? Math.atan2(elevNext - cDropN - correctedViewerElev, distNext) : 0
-
-      // Second derivative — more negative = sharper peak
-      const curvature = anglePrev + angleNext - 2 * angleCurr
-      // Normalize: curvature of -0.005 rad ≈ sharpness 1.0
-      const sharpness = Math.min(1, Math.max(0.05, Math.abs(curvature) / 0.005))
 
       const point: RidgeStrandPointW = {
         bearingDeg: peak.azimuthDeg,
@@ -1147,7 +1195,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         dist:       peak.distance,
         lat:        peak.lat,
         lng:        peak.lng,
-        sharpness,
+        sharpness:  0.5,  // placeholder — computed from strand neighbors below
       }
 
       // Try to attach to an existing active strand
@@ -1211,6 +1259,47 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           peakElev:  s.peakElev,
           peakDist:  s.peakDist,
         })
+      }
+    }
+  }
+
+  // Step 2: Compute sharpness from actual strand neighbors.
+  // For each point, compute elevation angle curvature using the previous
+  // and next points IN THE SAME STRAND — not band maxima which may be at
+  // completely different distances.
+  for (const strand of ridgeStrands) {
+    const pts = strand.points
+    for (let i = 0; i < pts.length; i++) {
+      const curr = pts[i]
+      const prev = i > 0           ? pts[i - 1] : curr
+      const next = i < pts.length - 1 ? pts[i + 1] : curr
+
+      const cDropC = (curr.dist * curr.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const cDropP = (prev.dist * prev.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const cDropN = (next.dist * next.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+
+      const angleC = Math.atan2(curr.elev - cDropC - correctedViewerElev, curr.dist)
+      const angleP = prev === curr ? angleC : Math.atan2(prev.elev - cDropP - correctedViewerElev, prev.dist)
+      const angleN = next === curr ? angleC : Math.atan2(next.elev - cDropN - correctedViewerElev, next.dist)
+
+      // Second derivative — magnitude indicates sharpness of angular peak
+      const curvature = angleP + angleN - 2 * angleC
+      // Normalize: curvature of -0.003 rad ≈ sharpness 1.0 (gentler threshold)
+      pts[i].sharpness = Math.min(1, Math.max(0.1, Math.abs(curvature) / 0.003))
+    }
+
+    // Smooth sharpness with 3-point moving average to eliminate single-azimuth spikes
+    if (pts.length >= 3) {
+      const smoothed = new Float64Array(pts.length)
+      smoothed[0] = pts[0].sharpness
+      smoothed[pts.length - 1] = pts[pts.length - 1].sharpness
+      for (let i = 1; i < pts.length - 1; i++) {
+        smoothed[i] = pts[i - 1].sharpness * 0.25 +
+                      pts[i].sharpness     * 0.50 +
+                      pts[i + 1].sharpness * 0.25
+      }
+      for (let i = 0; i < pts.length; i++) {
+        pts[i].sharpness = smoothed[i]
       }
     }
   }
