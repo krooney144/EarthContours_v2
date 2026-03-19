@@ -126,7 +126,7 @@ export function reprojectRefinedArcs(
 
 // ─── Contour Strand Precomputation ──────────────────────────────────────────
 
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+const CONTOUR_INTERVALS_M: number[] = [15.24, 15.24, 30.48, 60.96, 304.8, 609.6]
 
 export function buildContourStrands(
   skyline: SkylineData,
@@ -472,12 +472,12 @@ export interface BandStyle {
 }
 
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],
-  [4.5, 3.5],
-  [3.5, 3],
-  [3, 2.5],
-  [2.5, 2],
-  [2, 1],
+  [5.5, 5],     // immediate
+  [5, 4.5],     // ultra-near
+  [4.5, 3.5],   // near
+  [3.5, 2.5],   // mid
+  [2.5, 2],     // mid-far
+  [2, 1],       // far
 ]
 
 export function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -485,10 +485,10 @@ export function bandStyleForIndex(bandIndex: number, bandCount: number): BandSty
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,   8, 16],   // immediate — deepest void
     [2,  12, 20],   // ultra-near — near void
     [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
+    [8,  36, 56],   // mid — 40% toward deep
     [14, 62, 90],   // mid-far — 80% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]
