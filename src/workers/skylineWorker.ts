@@ -65,12 +65,11 @@ const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
  *  ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
 const CONTOUR_INTERVALS_M: number[] = [
-  15.24,   // ultra-near: 50ft
-  30.48,   // near:       100ft
-  60.96,   // mid-near:   200ft
-  152.4,   // mid:        500ft
-  304.8,   // mid-far:    1000ft
-  609.6,   // far:        2000ft
+  15.24,   // ultra-near: 50ft   (0–4.5 km)
+  30.48,   // near:       100ft  (4.5–10.5 km)
+  60.96,   // mid:        200ft  (10.5–81 km)
+  304.8,   // mid-far:    1000ft (81–152 km)
+  609.6,   // far:        2000ft (152–400 km)
 ]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -97,8 +96,7 @@ interface BandConfig {
 const DEPTH_BANDS: BandConfig[] = [
   { label: 'ultra-near', minDist: 0,        maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
   { label: 'near',       minDist: 4_500,    maxDist: 10_500,  resolution: 8 },  // 4.5–10.5 km  (0.125°, 2880 az)
-  { label: 'mid-near',   minDist: 10_500,   maxDist: 31_000,  resolution: 8 },  // 10.5–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 31_000,   maxDist: 81_000  },                  // 31–81 km   (0.25°, 1440 az)
+  { label: 'mid',        minDist: 10_500,   maxDist: 81_000,  resolution: 8 },  // 10.5–81 km   (0.125°, 2880 az)
   { label: 'mid-far',    minDist: 81_000,   maxDist: 152_000 },                  // 81–152 km  (0.25°, 1440 az)
   { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
@@ -639,8 +637,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   midRangeLogDists.reverse()
 
-  // Short-range log steps for the high-res near pass (extends to 31km for mid-near band)
-  const HIRES_MAX_DIST = 31_000
+  // Hi-res log steps for near+mid pass (extends to 81km — covers all hi-res bands)
+  const HIRES_MAX_DIST = 81_000
   const hiresLogDists: number[] = []
   let d2 = 200  // Start closer for near detail
   while (d2 <= HIRES_MAX_DIST) {
