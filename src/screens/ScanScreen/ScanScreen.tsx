@@ -55,12 +55,13 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
+import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, RidgeStrand } from '../../core/types'
 import { DEPTH_BANDS } from '../../core/types'
 import type { CameraParams as DepthCameraParams } from './scanRendererCore'
 import {
   buildSkylineBuffer,
   renderDepthTerrain,
+  renderRidgeStrands,
   renderFarSkylineGlow,
   renderDepthContours,
 } from './depthRenderer'
@@ -1428,6 +1429,18 @@ function drawScanCanvas(
     const skylineBuffer = buildSkylineBuffer(skylineData, cam as DepthCameraParams, projectedBands)
 
     renderDepthTerrain(ctx, skylineBuffer, skylineData, cam as DepthCameraParams, projectedBands, showBandLines, showFill)
+
+    // ── 2a. Ridge strands — variable-weight ridgeline strokes from detected peaks ──
+    if (showBandLines && skylineData.ridgeStrands && skylineData.ridgeStrands.length > 0) {
+      renderRidgeStrands(
+        ctx,
+        skylineData.ridgeStrands,
+        cam as DepthCameraParams,
+        eyeElev,
+        skylineBuffer.globalElevMin,
+        skylineBuffer.globalElevMax,
+      )
+    }
 
     // ── 2b. Contour lines with depth haze ──────────────────────────────────────
     if (contourStrands.length > 0) {

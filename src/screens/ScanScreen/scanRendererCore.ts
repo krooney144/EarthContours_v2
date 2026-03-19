@@ -83,7 +83,7 @@ export function reprojectBands(
       const elev = band.elevations[ai]
       const dist = band.distances[ai]
 
-      if (elev === -Infinity || elev < OCEAN_ELEV_M || dist <= 0) {
+      if (elev === -Infinity || elev < -500 || dist <= 0) {
         angles[ai] = -Math.PI / 2
         continue
       }
@@ -174,8 +174,8 @@ export function buildContourStrands(
           if (useOcclusion && angle <= runningMaxAngle) continue
           if (useOcclusion) runningMaxAngle = angle
 
-          // Skip ocean / near-sea-level elevation — avoids coastline artifacts
-          if (c.elev < OCEAN_ELEV_M) continue
+          // Skip tile-decode errors but allow below-sea-level terrain (Death Valley etc)
+          if (c.elev < -500) continue
 
           const snappedLevel = Math.round(c.elev / interval) * interval
           const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`

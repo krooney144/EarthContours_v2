@@ -95,12 +95,12 @@ interface BandConfig {
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
-  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az)
-  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)
-  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)
-  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
+  { label: 'ultra-near', minDist: 0,        maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
+  { label: 'near',       minDist: 4_500,    maxDist: 10_500,  resolution: 8 },  // 4.5–10.5 km  (0.125°, 2880 az)
+  { label: 'mid-near',   minDist: 10_500,   maxDist: 31_000,  resolution: 8 },  // 10.5–31 km   (0.125°, 2880 az)
+  { label: 'mid',        minDist: 31_000,   maxDist: 81_000  },                  // 31–81 km   (0.25°, 1440 az)
+  { label: 'mid-far',    minDist: 81_000,   maxDist: 152_000 },                  // 81–152 km  (0.25°, 1440 az)
+  { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
 
 interface SkylineBand {
@@ -130,6 +130,24 @@ interface RefinedArc {
   featureBearing: number
 }
 
+/** Ridge strand point — one detected ridge point along an azimuth. */
+interface RidgeStrandPointW {
+  bearingDeg: number
+  elev:       number
+  dist:       number
+  lat:        number
+  lng:        number
+  sharpness:  number
+}
+
+/** Connected sequence of ridge points across consecutive azimuths. */
+interface RidgeStrandW {
+  points:    RidgeStrandPointW[]
+  bandIndex: number
+  peakElev:  number
+  peakDist:  number
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -144,6 +162,8 @@ export interface SkylineData {
   /** Per-band detected peaks (local maxima in elevation profile per azimuth).
    *  Only populated for bands 0–2 (ultra-near through mid-near). */
   detectedPeaks: BandDetectedPeaksW[]
+  /** Ridge strands — connected sequences of detected ridge points across azimuths. */
+  ridgeStrands: RidgeStrandW[]
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -258,11 +278,12 @@ function sampleTileGrid(
 }
 
 /** Best-available elevation: tile cache first, sea-level fallback.
- *  Clamps to 0 — ocean/negative elevations are treated as sea level. */
+ *  Allows negative elevations (Death Valley -86m, Dead Sea -430m).
+ *  Only values below -500m indicate tile decode errors — those are clamped. */
 function sampleBest(lat: number, lng: number, zoom: number): number {
   const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
   const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
-  if (grid) return Math.max(0, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
+  if (grid) return Math.max(-500, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
   return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
 }
 
@@ -301,9 +322,10 @@ function detectCrossings(
   crossings: number[],  // output: push [elev, dist, lat, lng, dir] tuples
 ): void {
   if (prevElev === -Infinity || currElev === -Infinity) return
-  // Skip crossings involving ocean/sea-level on EITHER side — avoids coastline spike artifacts.
-  // Ocean-to-land transitions generate many spurious crossings that render as vertical columns.
-  if (prevElev <= 0 || currElev <= 0) return
+  // Skip crossings where BOTH points are deep subsea — indicates open ocean.
+  // Single zero-crossings (coastline transitions) are valid and detected normally.
+  // Negative elevations like Death Valley (-86m) are valid terrain.
+  if (prevElev < -10 && currElev < -10) return
 
   const dElev = currElev - prevElev
   if (Math.abs(dElev) < 0.01) return  // Flat — no crossings
@@ -1016,7 +1038,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
         const zoom = distToZoom(dist)
         const rawElev = sampleBest(sLat, sLng, zoom)
-        if (rawElev < OCEAN_ELEV_M) continue
+        // Skip tile-decode errors (< -500m) but allow valid below-sea-level terrain
+        if (rawElev < -500) continue
 
         const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev = rawElev - curvDrop
@@ -1060,6 +1083,138 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     })
   }
 
+  // ── Phase 6b: Group detected peaks into ridge strands ──────────────────────
+  //
+  // Scans each band's detected peaks left-to-right across azimuths.
+  // Peaks at similar distances in consecutive azimuths are grouped into
+  // connected RidgeStrand paths. Computes angular sharpness at each point
+  // from the curvature of neighboring azimuth elevation angles.
+
+  const ridgeStrands: RidgeStrandW[] = []
+
+  for (let bi = 0; bi < Math.min(MAX_PEAK_DETECT_BAND, DEPTH_BANDS.length); bi++) {
+    const bandPeaks = detectedPeaks[bi]
+    if (!bandPeaks || bandPeaks.peaks.length === 0) continue
+
+    const bandCfg = DEPTH_BANDS[bi]
+    const band    = bands[bi]
+    const bandAz  = band.numAzimuths
+    const bandRes = band.resolution
+
+    // Distance tolerance scales with band range
+    const distTolerance = Math.max(500, bandCfg.maxDist * 0.04)
+    // Max azimuth gap allowed within a strand (in azimuth indices)
+    const maxAzGap = Math.ceil(bandRes * 1.5)
+
+    // Active strands being built — multiple parallel ridges possible
+    const activeStrands: Array<{
+      lastAzIdx:  number
+      lastDist:   number
+      peakElev:   number
+      peakDist:   number
+      points:     RidgeStrandPointW[]
+    }> = []
+
+    // Sort peaks by azimuth index (left to right)
+    const sortedPeaks = [...bandPeaks.peaks].sort((a, b) => a.azimuthIdx - b.azimuthIdx)
+
+    for (const peak of sortedPeaks) {
+      const ai = peak.azimuthIdx
+
+      // Compute sharpness from angular curvature of neighboring azimuths
+      const elevPrev = ai > 0        ? band.elevations[ai - 1] : peak.elevation
+      const elevNext = ai < bandAz-1 ? band.elevations[ai + 1] : peak.elevation
+      const distPrev = ai > 0        ? band.distances[ai - 1]  : peak.distance
+      const distNext = ai < bandAz-1 ? band.distances[ai + 1]  : peak.distance
+
+      // Convert to angles for curvature calculation
+      const cDrop  = (peak.distance * peak.distance) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const cDropP = distPrev > 0 ? (distPrev * distPrev) / (2 * EARTH_R) * (1 - REFRACTION_K) : 0
+      const cDropN = distNext > 0 ? (distNext * distNext) / (2 * EARTH_R) * (1 - REFRACTION_K) : 0
+
+      const anglePrev = distPrev > 0 ? Math.atan2(elevPrev - cDropP - correctedViewerElev, distPrev) : 0
+      const angleCurr = Math.atan2(peak.elevation - cDrop - correctedViewerElev, peak.distance)
+      const angleNext = distNext > 0 ? Math.atan2(elevNext - cDropN - correctedViewerElev, distNext) : 0
+
+      // Second derivative — more negative = sharper peak
+      const curvature = anglePrev + angleNext - 2 * angleCurr
+      // Normalize: curvature of -0.005 rad ≈ sharpness 1.0
+      const sharpness = Math.min(1, Math.max(0.05, Math.abs(curvature) / 0.005))
+
+      const point: RidgeStrandPointW = {
+        bearingDeg: peak.azimuthDeg,
+        elev:       peak.elevation,
+        dist:       peak.distance,
+        lat:        peak.lat,
+        lng:        peak.lng,
+        sharpness,
+      }
+
+      // Try to attach to an existing active strand
+      let bestIdx  = -1
+      let bestDiff = Infinity
+
+      for (let si = 0; si < activeStrands.length; si++) {
+        const s = activeStrands[si]
+        if (ai - s.lastAzIdx > maxAzGap) continue
+        const diff = Math.abs(peak.distance - s.lastDist)
+        if (diff < distTolerance && diff < bestDiff) {
+          bestIdx  = si
+          bestDiff = diff
+        }
+      }
+
+      if (bestIdx >= 0) {
+        const s = activeStrands[bestIdx]
+        s.points.push(point)
+        s.lastAzIdx = ai
+        s.lastDist  = peak.distance
+        if (peak.elevation > s.peakElev) {
+          s.peakElev = peak.elevation
+          s.peakDist = peak.distance
+        }
+      } else {
+        activeStrands.push({
+          lastAzIdx: ai,
+          lastDist:  peak.distance,
+          peakElev:  peak.elevation,
+          peakDist:  peak.distance,
+          points:    [point],
+        })
+      }
+
+      // Periodically flush stale strands
+      if (ai % 20 === 0) {
+        for (let si = activeStrands.length - 1; si >= 0; si--) {
+          if (ai - activeStrands[si].lastAzIdx > maxAzGap) {
+            const s = activeStrands[si]
+            if (s.points.length >= 3) {
+              ridgeStrands.push({
+                points:    s.points,
+                bandIndex: bi,
+                peakElev:  s.peakElev,
+                peakDist:  s.peakDist,
+              })
+            }
+            activeStrands.splice(si, 1)
+          }
+        }
+      }
+    }
+
+    // Flush remaining strands
+    for (const s of activeStrands) {
+      if (s.points.length >= 3) {
+        ridgeStrands.push({
+          points:    s.points,
+          bandIndex: bi,
+          peakElev:  s.peakElev,
+          peakDist:  s.peakDist,
+        })
+      }
+    }
+  }
+
   // Phase 7 (old 6) removed — refined arcs now computed on-demand via 'refine-peaks' message.
   // See handleRefinePeaks() below.
 
@@ -1080,6 +1235,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands,
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
     detectedPeaks,
+    ridgeStrands,
     resolution,
     numAzimuths,
     computedAt: {
