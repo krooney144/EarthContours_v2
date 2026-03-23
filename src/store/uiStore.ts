@@ -55,7 +55,7 @@ interface UIStore {
 // ─── Store Implementation ─────────────────────────────────────────────────────
 
 export const useUIStore = create<UIStore>()((set, get) => ({
-  activeScreen: 'scan',
+  activeScreen: 'home',
   isPreviewMode: false,
   hasEnteredScreen: false,
   transitionState: 'idle',
@@ -89,8 +89,8 @@ export const useUIStore = create<UIStore>()((set, get) => ({
     if (isWide) {
       set({ isPreviewMode: true })
     } else {
-      // Mobile: go straight to SCAN
-      set({ isPreviewMode: false, activeScreen: 'scan' })
+      // Mobile: go to home landing page
+      set({ isPreviewMode: false, activeScreen: 'home' })
     }
   },
 

@@ -1,0 +1,207 @@
+/**
+ * SCAN Screen — Placeholder + AGL slider + location button
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50px;
+  background: rgba(8, 20, 35, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--ec-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  z-index: var(--z-hud);
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--ec-text-secondary);
+  text-transform: uppercase;
+}
+
+.headerSubtitle {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  letter-spacing: 0.06em;
+}
+
+/* ── Placeholder ──────────────────────────────────────────────────────────── */
+
+.placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.placeholderIcon {
+  font-size: 48px;
+  color: var(--ec-glow);
+  opacity: 0.3;
+}
+
+.placeholderTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-text-muted);
+  text-transform: uppercase;
+}
+
+.placeholderText {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ec-text-muted);
+  text-align: center;
+  max-width: 280px;
+  line-height: 1.5;
+  opacity: 0.6;
+}
+
+/* ── AGL Height Slider (vertical, right edge) ─────────────────────────────── */
+
+.aglSlider {
+  position: absolute;
+  right: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  z-index: var(--z-overlay);
+}
+
+.aglLabel {
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-text-muted);
+  text-transform: uppercase;
+}
+
+.aglRange {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 28px;
+  height: 150px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.aglRange::-webkit-slider-runnable-track {
+  width: 4px;
+  background: var(--ec-border);
+  border-radius: 2px;
+}
+
+.aglRange::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  border: 2px solid var(--ec-bg-primary);
+  box-shadow: 0 0 6px rgba(132, 209, 219, 0.4);
+  margin-left: -6px;
+}
+
+.aglRange::-moz-range-track {
+  width: 4px;
+  background: var(--ec-border);
+  border-radius: 2px;
+}
+
+.aglRange::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--ec-glow);
+  border-radius: 50%;
+  border: 2px solid var(--ec-bg-primary);
+}
+
+.aglValue {
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* ── Current Location Button ──────────────────────────────────────────────── */
+
+.locationBtn {
+  position: absolute;
+  bottom: var(--space-4);
+  left: var(--space-4);
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  background: var(--ec-bg-elevated);
+  color: var(--ec-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-overlay);
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.locationBtn:hover {
+  background: var(--ec-glow-soft);
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+}
+
+.locationBtn.locationActive {
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+}
+
+/* ── GPS Prompt ───────────────────────────────────────────────────────────── */
+
+.gpsPrompt {
+  position: absolute;
+  bottom: calc(var(--space-4) + 48px);
+  left: var(--space-4);
+  right: var(--space-4);
+  padding: var(--space-3);
+  background: var(--ec-bg-overlay);
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  color: var(--ec-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  text-align: center;
+  z-index: var(--z-modal);
+}

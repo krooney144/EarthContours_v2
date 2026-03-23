@@ -2,9 +2,8 @@
  * EarthContours — Map View Store
  *
  * Shared state for map center position and zoom level.
- * Used by MapScreen (reads + writes via gestures) and B2MapScreen
- * control strips (writes via buttons). Single source of truth so
- * the B2 exhibit table can drive the same map.
+ * Used by MapScreen (reads + writes via gestures).
+ * Single source of truth for map viewport state.
  */
 
 import { create } from 'zustand'

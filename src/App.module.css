@@ -19,8 +19,9 @@
   bottom: var(--ec-nav-height);
 }
 
-/* When in preview mode, screen container fills full height (no nav offset) */
-.screenContainer.previewMode {
+/* When in preview mode or on home screen, screen container fills full height */
+.screenContainer.previewMode,
+.screenContainer.noNav {
   bottom: 0;
 }
 

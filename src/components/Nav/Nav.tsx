@@ -1,16 +1,11 @@
 /**
  * EarthContours — Bottom Navigation Bar
  *
- * The 4-tab nav at the bottom: SCAN · EXPLORE · MAP · SETTINGS
+ * 4-tab nav: MAP · EXPLORE · SCAN · SETTINGS
+ * Plus a home button to return to the landing page.
  *
  * Uses Josefin Sans (display font) per briefing.
  * The active tab has a glow indicator at the top.
- *
- * Why not use React Router's <Link>?
- * EarthContours uses a custom state-based router (not URL routing) because:
- * 1. The app is designed as a native-feeling app, not a webpage
- * 2. The 3D/AR screens need to persist state between visits
- * 3. We want full control over the zoom transition animation
  */
 
 import React, { useCallback } from 'react'
@@ -24,10 +19,10 @@ const log = createLogger('COMPONENT:NAV')
 // ─── Tab Definitions ──────────────────────────────────────────────────────────
 
 const TABS: Array<{ id: ScreenId; label: string; icon: string; ariaLabel: string }> = [
-  { id: 'scan',     label: 'SCAN',     icon: '◉', ariaLabel: 'Scan — AR terrain view' },
-  { id: 'explore',  label: 'EXPLORE',  icon: '⬡', ariaLabel: 'Explore — 3D terrain view' },
-  { id: 'map',      label: 'MAP',      icon: '⊕', ariaLabel: 'Map — Topographic map' },
-  { id: 'settings', label: 'SETTINGS', icon: '⊞', ariaLabel: 'Settings' },
+  { id: 'map',      label: 'MAP',      icon: '\u2295', ariaLabel: 'Map — Topographic map' },
+  { id: 'explore',  label: 'EXPLORE',  icon: '\u2B21', ariaLabel: 'Explore — 3D terrain view' },
+  { id: 'scan',     label: 'SCAN',     icon: '\u25C9', ariaLabel: 'Scan — AR terrain view' },
+  { id: 'settings', label: 'SETTINGS', icon: '\u229E', ariaLabel: 'Settings' },
 ]
 
 // ─── Component ────────────────────────────────────────────────────────────────

@@ -52,7 +52,7 @@ const ExploreScreen: React.FC = () => {
     loadingState, loadingProgress, loadingMessage,
   } = useTerrainStore()
   const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
-  const { activeLat, activeLng, mode } = useLocationStore()
+  const { activeLat, activeLng, mode, gpsPermission, gpsLat, requestGPS, switchToGPS } = useLocationStore()
 
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef    = useRef<HTMLCanvasElement>(null)
@@ -66,6 +66,8 @@ const ExploreScreen: React.FC = () => {
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [showDebug, setShowDebug] = useState(false)
 
+  const [gpsPrompt, setGpsPrompt] = useState<string | null>(null)
+
   const [showHint, setShowHint] = useState<boolean>(() => {
     try { return !localStorage.getItem('ec_explore_hint_seen') } catch { return true }
   })
@@ -74,6 +76,29 @@ const ExploreScreen: React.FC = () => {
     setShowHint(false)
     try { localStorage.setItem('ec_explore_hint_seen', '1') } catch { /* ignore */ }
   }, [])
+
+  // ── Current location handler ─────────────────────────────────────────────
+
+  const handleMyLocation = useCallback(async () => {
+    if (gpsPermission === 'denied') {
+      setGpsPrompt('Location access denied. Enable in device settings.')
+      setTimeout(() => setGpsPrompt(null), 4000)
+      return
+    }
+    if (gpsPermission === 'unavailable') {
+      setGpsPrompt('GPS not available on this device.')
+      setTimeout(() => setGpsPrompt(null), 4000)
+      return
+    }
+    if (gpsPermission === 'unknown') {
+      setGpsPrompt('Requesting location access...')
+      await requestGPS()
+      setTimeout(() => setGpsPrompt(null), 3000)
+      return
+    }
+    switchToGPS()
+    log.info('Explore: switched to GPS location')
+  }, [gpsPermission, requestGPS, switchToGPS])
 
   // ── Re-center handler ────────────────────────────────────────────────────
 
@@ -468,6 +493,30 @@ const ExploreScreen: React.FC = () => {
         </svg>
         RE-CENTER
       </button>
+
+      {/* Current location button */}
+      <button
+        className={`${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
+        onClick={handleMyLocation}
+        aria-label="Center on my GPS location"
+        title="My Location"
+      >
+        <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <circle cx="9" cy="9" r="4" />
+          <circle cx="9" cy="9" r="1.5" fill="currentColor" />
+          <line x1="9" y1="1" x2="9" y2="4" />
+          <line x1="9" y1="14" x2="9" y2="17" />
+          <line x1="1" y1="9" x2="4" y2="9" />
+          <line x1="14" y1="9" x2="17" y2="9" />
+        </svg>
+      </button>
+
+      {/* GPS Prompt */}
+      {gpsPrompt && (
+        <div className={styles.gpsPrompt} role="status">
+          {gpsPrompt}
+        </div>
+      )}
 
       {/* Debug toggle */}
       <button

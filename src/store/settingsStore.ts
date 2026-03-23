@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
   // Appearance
+  darkMode: true,
   colorTheme: 'ocean',
   labelSize: 'medium',
   reduceMotion: false,
@@ -91,6 +92,7 @@ interface SettingsStore extends AppSettings {
   toggleSolidTerrain: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
+  toggleDarkMode: () => void
   setColorTheme: (theme: ColorTheme) => void
   setLabelSize: (size: LabelSize) => void
   toggleReduceMotion: () => void
@@ -199,6 +201,12 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ verticalExaggeration })
       },
 
+      toggleDarkMode: () => {
+        const next = !get().darkMode
+        log.info('Dark mode toggled', { now: next })
+        set({ darkMode: next })
+      },
+
       setColorTheme: (colorTheme) => {
         log.info('Color theme changed', { to: colorTheme })
         set({ colorTheme })
@@ -265,7 +273,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 4,                          // bump when persisted shape changes
+      version: 5,                          // bump when persisted shape changes
       /**
        * Migrations:
        * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
@@ -282,6 +290,10 @@ export const useSettingsStore = create<SettingsStore>()(
           )
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
+        }
+        if (fromVersion < 5) {
+          log.info('Migrating settings v4→v5: add darkMode')
+          if (state.darkMode === undefined) state.darkMode = true
         }
         if (fromVersion < 4) {
           log.info('Migrating settings v3→v4: add showFill, showBandLines default off')
@@ -329,6 +341,7 @@ export const useSettingsStore = create<SettingsStore>()(
         solidTerrain: state.solidTerrain,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,
+        darkMode: state.darkMode,
         colorTheme: state.colorTheme,
         labelSize: state.labelSize,
         reduceMotion: state.reduceMotion,

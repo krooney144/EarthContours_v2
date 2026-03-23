@@ -75,6 +75,17 @@
   text-transform: uppercase;
 }
 
+/* ── About text ──────────────────────────────────────────────────────────── */
+
+.aboutText {
+  padding: var(--space-2) var(--space-5) var(--space-4);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--ec-text-secondary);
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+
 /* ── Row (individual setting) ─────────────────────────────────────────────── */
 
 .row {

@@ -145,9 +145,16 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   /**
    * Set height from the vertical slider on SCAN screen.
    * The slider shows feet (imperial) but we store meters internally.
+   *
+   * Threshold logic: only updates the store if the change exceeds ~3m (10ft).
+   * This prevents excessive re-renders on mobile where slider events fire
+   * rapidly during drag, causing lag in skyline re-projection.
    */
   setHeightFromSlider: (heightFt) => {
     const height_m = clamp(feetToMeters(heightFt), MIN_HEIGHT_M, MAX_HEIGHT_M)
+    const current = get().height_m
+    const THRESHOLD_M = 3.0  // ~10ft minimum change
+    if (Math.abs(height_m - current) < THRESHOLD_M) return
     log.debug('Height set from slider', { heightFt: heightFt.toFixed(0), height_m: height_m.toFixed(1) })
     set({ height_m })
   },

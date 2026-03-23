@@ -2146,7 +2146,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
         aria-hidden="true"
       />
 
-      {/* In exhibit mode, hide all chrome — B2 control strips handle everything */}
+      {/* In exhibit mode, hide all chrome */}
       {!exhibitMode && (<>
 
       {/* Location banner — shows active viewpoint with color-coded state.
