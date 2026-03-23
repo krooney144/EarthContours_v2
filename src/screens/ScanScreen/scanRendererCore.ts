@@ -19,6 +19,7 @@ export const MAX_PEAK_DIST     = 400_000     // Max distance for peak label disp
 export const EARTH_R           = 6_371_000   // Earth radius (m)
 export const REFRACTION_K      = 0.13        // Atmospheric refraction coefficient
 export const DEG_TO_RAD        = Math.PI / 180
+export const OCEAN_ELEV_M      = 5           // Elevations below this are ocean (matches worker threshold)
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +83,7 @@ export function reprojectBands(
       const elev = band.elevations[ai]
       const dist = band.distances[ai]
 
-      if (elev === -Infinity || elev <= 0 || dist <= 0) {
+      if (elev === -Infinity || elev < -500 || dist <= 0) {
         angles[ai] = -Math.PI / 2
         continue
       }
@@ -125,7 +126,7 @@ export function reprojectRefinedArcs(
 
 // ─── Contour Strand Precomputation ──────────────────────────────────────────
 
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+const CONTOUR_INTERVALS_M: number[] = [15.24, 15.24, 30.48, 60.96, 304.8, 609.6]
 
 export function buildContourStrands(
   skyline: SkylineData,
@@ -133,6 +134,8 @@ export function buildContourStrands(
 ): PrebuiltContourStrand[] {
   const completed: PrebuiltContourStrand[] = []
 
+  // Process bands far→near (bi = band index: 0=immediate, 1=ultra-near,
+  // 2=near, 3=mid, 4=mid-far, 5=far)
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
     const bandAz = band.numAzimuths
@@ -145,11 +148,13 @@ export function buildContourStrands(
 
     const maxAzGap = Math.ceil(bandRes * 2)
 
+    // Active strands keyed by snapped-level + direction.
+    // Tracks lastAngle (elevation angle) for angle-based matching.
     const activeStrands = new Map<string, Array<{
-      lastAi:   number
-      lastDist: number
-      level:    number
-      points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
+      lastAi:    number
+      lastAngle: number
+      level:     number
+      points:    Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
     }>>()
 
     for (let ai = 0; ai < bandAz; ai++) {
@@ -158,14 +163,30 @@ export function buildContourStrands(
       const bearingDeg = ai / bandRes
 
       if (start < end) {
-        const azCrossings: Array<{ elev: number; dist: number; dir: number }> = []
+        const azCrossingsRaw: Array<{ elev: number; dist: number; dir: number }> = []
         for (let j = start; j < end; j += 5) {
-          azCrossings.push({ elev: data[j], dist: data[j + 1], dir: data[j + 4] })
+          azCrossingsRaw.push({ elev: data[j], dist: data[j + 1], dir: data[j + 4] })
         }
-        azCrossings.sort((a, b) => a.dist - b.dist)
+        azCrossingsRaw.sort((a, b) => a.dist - b.dist)
 
+        // Deduplicate crossings at same elevation within 50m distance.
+        const azCrossings: typeof azCrossingsRaw = []
+        for (const c of azCrossingsRaw) {
+          const last = azCrossings[azCrossings.length - 1]
+          if (last && Math.abs(c.dist - last.dist) < 50 && Math.abs(c.elev - last.elev) < 2) {
+            continue  // skip duplicate
+          }
+          azCrossings.push(c)
+        }
+
+        // Within-band occlusion: sweep near→far within the band, tracking
+        // max elevation angle. Crossings at lower angles than already-seen
+        // terrain are hidden behind it. Enabled for bi >= 1 (all bands
+        // except immediate/band 0, which has sparse Phase 4b azimuth data
+        // that could create false occlusion). Cross-band occlusion is
+        // handled separately by painter's order rendering (far→near).
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3
+        const useOcclusion = bi >= 1
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -173,8 +194,7 @@ export function buildContourStrands(
           if (useOcclusion && angle <= runningMaxAngle) continue
           if (useOcclusion) runningMaxAngle = angle
 
-          // Skip sea-level / near-sea-level elevation — avoids coastline artifacts
-          if (c.elev < 1) continue
+          if (c.elev < -500) continue
 
           const snappedLevel = Math.round(c.elev / interval) * interval
           const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`
@@ -185,19 +205,18 @@ export function buildContourStrands(
             activeStrands.set(levelKey, strands)
           }
 
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)
-            : bi === 2
-            ? Math.max(50, c.dist * 0.03)
-            : Math.max(200, c.dist * 0.05)
+          // Match to closest strand by ELEVATION ANGLE proximity.
+          // Screen Y = horizonY - angle * pxPerRad, so matching by angle
+          // ensures connected points are at similar screen positions.
+          const maxAngleDiff = 0.005  // ~0.3° in radians
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
             const s = strands[si]
             if (s.lastAi === ai) continue
             if (ai - s.lastAi > maxAzGap) continue
-            const diff = Math.abs(c.dist - s.lastDist)
-            if (diff < bestDiff && diff < maxDistDiff) {
+            const diff = Math.abs(angle - s.lastAngle)
+            if (diff < bestDiff && diff < maxAngleDiff) {
               bestIdx = si
               bestDiff = diff
             }
@@ -205,12 +224,12 @@ export function buildContourStrands(
 
           if (bestIdx >= 0) {
             strands[bestIdx].lastAi = ai
-            strands[bestIdx].lastDist = c.dist
+            strands[bestIdx].lastAngle = angle
             strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle, dist: c.dist })
           } else {
             strands.push({
               lastAi: ai,
-              lastDist: c.dist,
+              lastAngle: angle,
               level: snappedLevel,
               points: [{ bearingDeg, elevAngleRad: angle, dist: c.dist }],
             })
@@ -355,11 +374,11 @@ export function bandAngleAt(
     return a0 * (1 - t) + a1 * t
   }
 
-  if ((band.elevations[idx0] === -Infinity || band.elevations[idx0] <= 0) &&
-      (band.elevations[idx1] === -Infinity || band.elevations[idx1] <= 0)) return -Math.PI / 2
+  if ((band.elevations[idx0] === -Infinity || band.elevations[idx0] < OCEAN_ELEV_M) &&
+      (band.elevations[idx1] === -Infinity || band.elevations[idx1] < OCEAN_ELEV_M)) return -Math.PI / 2
 
   const computeAngle = (idx: number) => {
-    if (band.elevations[idx] === -Infinity || band.elevations[idx] <= 0) return -Math.PI / 2
+    if (band.elevations[idx] === -Infinity || band.elevations[idx] < OCEAN_ELEV_M) return -Math.PI / 2
     const dist = band.distances[idx]
     const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
     return Math.atan2(band.elevations[idx] - curvDrop - skyline.computedAt.elev, dist)
@@ -454,12 +473,12 @@ export interface BandStyle {
 }
 
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],
-  [4.5, 3.5],
-  [3.5, 3],
-  [3, 2.5],
-  [2.5, 2],
-  [2, 1],
+  [5.5, 5],     // immediate
+  [5, 4.5],     // ultra-near
+  [4.5, 3.5],   // near
+  [3.5, 2.5],   // mid
+  [2.5, 2],     // mid-far
+  [2, 1],       // far
 ]
 
 export function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -467,10 +486,10 @@ export function bandStyleForIndex(bandIndex: number, bandCount: number): BandSty
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,   8, 16],   // immediate — deepest void
     [2,  12, 20],   // ultra-near — near void
     [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
+    [8,  36, 56],   // mid — 40% toward deep
     [14, 62, 90],   // mid-far — 80% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]
@@ -504,7 +523,7 @@ export function renderTerrain(
   for (let bi = 0; bi < numBands; bi++) {
     const elev = skyline.bands[bi].elevations
     for (let i = 0; i < elev.length; i++) {
-      if (elev[i] === -Infinity || elev[i] <= 0) continue
+      if (elev[i] === -Infinity || elev[i] < OCEAN_ELEV_M) continue
       if (elev[i] < globalElevMin) globalElevMin = elev[i]
       if (elev[i] > globalElevMax) globalElevMax = elev[i]
     }

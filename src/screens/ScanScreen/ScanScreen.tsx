@@ -201,6 +201,8 @@ function buildContourStrands(
 ): PrebuiltContourStrand[] {
   const completed: PrebuiltContourStrand[] = []
 
+  // Process bands far→near (bi = band index: 0=immediate, 1=ultra-near,
+  // 2=near, 3=mid, 4=mid-far, 5=far)
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
     const bandAz = band.numAzimuths
@@ -213,12 +215,13 @@ function buildContourStrands(
 
     const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
 
-    // Active strands keyed by snapped-level + direction
+    // Active strands keyed by snapped-level + direction.
+    // Now tracks lastAngle (elevation angle in radians) for angle-based matching.
     const activeStrands = new Map<string, Array<{
-      lastAi:   number
-      lastDist: number
-      level:    number
-      points:   Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
+      lastAi:    number
+      lastAngle: number
+      level:     number
+      points:    Array<{ bearingDeg: number; elevAngleRad: number; dist: number }>
     }>>()
 
     for (let ai = 0; ai < bandAz; ai++) {
@@ -234,15 +237,14 @@ function buildContourStrands(
         }
         azCrossings.sort((a, b) => a.dist - b.dist)
 
-        // Occlusion sweep: skip crossings hidden behind nearer terrain.
-        // For near bands (0–2), disable within-band occlusion — these bands span
-        // wide depth ranges (e.g. 0–4.5km) where a hillside at 200m would wrongly
-        // occlude all contours out to 4.5km. Painter's order rendering handles
-        // visual overlap correctly without data-level occlusion.
-        // For far bands (3+), within-band occlusion remains useful since crossings
-        // are at similar depths where true occlusion is meaningful.
+        // Within-band occlusion: sweep near→far within the band, tracking
+        // max elevation angle. Crossings at lower angles than already-seen
+        // terrain are hidden behind it. Enabled for bi >= 1 (all bands
+        // except immediate/band 0, which has sparse Phase 4b azimuth data
+        // that could create false occlusion). Cross-band occlusion is
+        // handled separately by painter's order rendering (far→near).
         let runningMaxAngle = -Math.PI / 2
-        const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
+        const useOcclusion = bi >= 1
         for (const c of azCrossings) {
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
           const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
@@ -263,22 +265,19 @@ function buildContourStrands(
             activeStrands.set(levelKey, strands)
           }
 
-          // Match to closest strand by distance proximity
-          // Per-band tolerance: tight for close bands (prevents jumpy connections),
-          // looser for far bands where large gaps are natural
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
-            : bi === 2
-            ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
-            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
+          // Match to closest strand by ELEVATION ANGLE proximity.
+          // Screen Y = horizonY - angle * pxPerRad, so matching by angle
+          // ensures connected points are at similar screen positions.
+          // Threshold: ~0.3° (0.005 rad) — about 15-25px at typical FOV.
+          const maxAngleDiff = 0.005  // ~0.3° in radians
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
             const s = strands[si]
             if (s.lastAi === ai) continue          // Already matched this azimuth
-            if (ai - s.lastAi > maxAzGap) continue // Too old
-            const diff = Math.abs(c.dist - s.lastDist)
-            if (diff < bestDiff && diff < maxDistDiff) {
+            if (ai - s.lastAi > maxAzGap) continue // Too old — expired
+            const diff = Math.abs(angle - s.lastAngle)
+            if (diff < bestDiff && diff < maxAngleDiff) {
               bestIdx = si
               bestDiff = diff
             }
@@ -286,12 +285,12 @@ function buildContourStrands(
 
           if (bestIdx >= 0) {
             strands[bestIdx].lastAi = ai
-            strands[bestIdx].lastDist = c.dist
+            strands[bestIdx].lastAngle = angle
             strands[bestIdx].points.push({ bearingDeg, elevAngleRad: angle, dist: c.dist })
           } else {
             strands.push({
               lastAi: ai,
-              lastDist: c.dist,
+              lastAngle: angle,
               level: snappedLevel,
               points: [{ bearingDeg, elevAngleRad: angle, dist: c.dist }],
             })
@@ -686,9 +685,9 @@ function bandGpsAt(
  *  Near terrain has tight radius (ridge points are close together),
  *  far terrain needs wider radius (ridge points are spread far apart). */
 const BAND_GPS_RADIUS: number[] = [
+  200,     // immediate:  0.2 km
   500,     // ultra-near: 0.5 km
   2_000,   // near:       2 km
-  5_000,   // mid-near:   5 km
   10_000,  // mid:        10 km
   10_000,  // mid-far:    10 km
   15_000,  // far:        15 km
@@ -737,15 +736,14 @@ interface BandStyle {
 }
 
 /** Per-band line widths: edges match at boundaries so adjacent bands are seamless.
- *  ultra-near 5→4.5, near 4.5→3.5, mid-near 3.5→3, mid 3→2.5, mid-far 2.5→2, far 2→1.
- *  Thinner lines let elevation color and terrain shape show through. */
+ *  immediate 5.5→5, ultra-near 5→4.5, near 4.5→3.5, mid 3.5→2.5, mid-far 2.5→2, far 2→1. */
 const BAND_LINE_WIDTHS: [number, number][] = [
-  [5, 4.5],  // ultra-near: 5px at 0km → 4.5px at 4.5km
-  [4.5, 3.5],// near:       4.5px at 4km → 3.5px at 10.5km
-  [3.5, 3],  // mid-near:   3.5px at 10km → 3px at 31km
-  [3, 2.5],  // mid:        3px at 30km → 2.5px at 81km
-  [2.5, 2],  // mid-far:    2.5px at 80km → 2px at 152km
-  [2, 1],    // far:        2px at 150km → 1px at 400km
+  [5.5, 5],   // immediate:  5.5px at 0km → 5px at 1km
+  [5, 4.5],   // ultra-near: 5px at 1km → 4.5px at 5km
+  [4.5, 3.5], // near:       4.5px at 5km → 3.5px at 15km
+  [3.5, 2.5], // mid:        3.5px at 15km → 2.5px at 70km
+  [2.5, 2],   // mid-far:    2.5px at 70km → 2px at 152km
+  [2, 1],     // far:        2px at 152km → 1px at 400km
 ]
 
 function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
@@ -754,10 +752,10 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
 
   // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
   const FILL_COLORS: [number, number, number][] = [
+    [1,   8, 16],   // immediate — deepest void
     [2,  12, 20],   // ultra-near — near void
     [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
+    [8,  36, 56],   // mid — 40% toward deep
     [14, 62, 90],   // mid-far — 80% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]

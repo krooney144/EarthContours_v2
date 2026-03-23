@@ -54,6 +54,7 @@ const TILE_PX       = 256
 const EARTH_R       = 6_371_000   // metres
 const REFRACTION_K  = 0.13
 const DEG_TO_RAD    = Math.PI / 180
+const OCEAN_ELEV_M  = 5           // Elevations below this are treated as ocean (Terrarium tiles encode sea as ~0–2m)
 // NW-45° sun direction (ENU: x=east, y=up, z=north)
 const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
 
@@ -64,12 +65,12 @@ const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
  *  ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
 const CONTOUR_INTERVALS_M: number[] = [
-  15.24,   // ultra-near: 50ft
-  30.48,   // near:       100ft
-  60.96,   // mid-near:   200ft
-  152.4,   // mid:        500ft
-  304.8,   // mid-far:    1000ft
-  609.6,   // far:        2000ft
+  15.24,   // immediate:  50ft   (0–1 km)
+  15.24,   // ultra-near: 50ft   (1–5 km)
+  30.48,   // near:       100ft  (5–15 km)
+  60.96,   // mid:        200ft  (15–70 km)
+  304.8,   // mid-far:    1000ft (70–152 km)
+  609.6,   // far:        2000ft (152–400 km)
 ]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -94,12 +95,12 @@ interface BandConfig {
 }
 
 const DEPTH_BANDS: BandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
-  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az)
-  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)
-  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)
-  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
+  { label: 'immediate',  minDist: 0,        maxDist: 1_000,   resolution: 8 },  // 0–1 km     (0.125°, 2880 az)
+  { label: 'ultra-near', minDist: 1_000,    maxDist: 5_000,   resolution: 8 },  // 1–5 km     (0.125°, 2880 az)
+  { label: 'near',       minDist: 5_000,    maxDist: 15_000,  resolution: 8 },  // 5–15 km    (0.125°, 2880 az)
+  { label: 'mid',        minDist: 15_000,   maxDist: 70_000,  resolution: 8 },  // 15–70 km   (0.125°, 2880 az)
+  { label: 'mid-far',    minDist: 70_000,   maxDist: 152_000 },                  // 70–152 km  (0.25°, 1440 az)
+  { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
 
 interface SkylineBand {
@@ -129,6 +130,24 @@ interface RefinedArc {
   featureBearing: number
 }
 
+/** Ridge strand point — one detected ridge point along an azimuth. */
+interface RidgeStrandPointW {
+  bearingDeg: number
+  elev:       number
+  dist:       number
+  lat:        number
+  lng:        number
+  sharpness:  number
+}
+
+/** Connected sequence of ridge points across consecutive azimuths. */
+interface RidgeStrandW {
+  points:    RidgeStrandPointW[]
+  bandIndex: number
+  peakElev:  number
+  peakDist:  number
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -140,6 +159,11 @@ export interface SkylineData {
   bands:       SkylineBand[]
   /** Refined arcs — dense ray-march data around detected ridgeline features */
   refinedArcs: RefinedArc[]
+  /** Per-band detected peaks (local maxima in elevation profile per azimuth).
+   *  Only populated for bands 0–2 (ultra-near through mid-near). */
+  detectedPeaks: BandDetectedPeaksW[]
+  /** Ridge strands — connected sequences of detected ridge points across azimuths. */
+  ridgeStrands: RidgeStrandW[]
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -211,11 +235,10 @@ function tileTopLeft(x: number, y: number, zoom: number): { lat: number; lng: nu
 }
 
 function distToZoom(distM: number): number {
-  if (distM < 1_000)   return 15   // ultra-near detail — ~4.8 m/px, 50ft contours
-  if (distM < 4_500)   return 14   // ultra-near outer — ~9.5 m/px
-  if (distM < 10_500)  return 13   // near — ~19 m/px
-  if (distM < 31_000)  return 11   // mid-near — ~76 m/px
-  if (distM < 81_000)  return 10   // mid — ~152 m/px
+  if (distM < 1_000)   return 15   // immediate — ~4.8 m/px, 50ft contours
+  if (distM < 5_000)   return 14   // ultra-near — ~9.5 m/px
+  if (distM < 15_000)  return 13   // near — ~19 m/px
+  if (distM < 70_000)  return 11   // mid — ~76 m/px
   if (distM < 152_000) return 9    // mid-far — ~305 m/px
   return 8                         // far — ~610 m/px
 }
@@ -254,11 +277,12 @@ function sampleTileGrid(
 }
 
 /** Best-available elevation: tile cache first, sea-level fallback.
- *  Clamps to 0 — ocean/negative elevations are treated as sea level. */
+ *  Allows negative elevations (Death Valley -86m, Dead Sea -430m).
+ *  Only values below -500m indicate tile decode errors — those are clamped. */
 function sampleBest(lat: number, lng: number, zoom: number): number {
   const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
   const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
-  if (grid) return Math.max(0, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
+  if (grid) return Math.max(-500, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
   return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
 }
 
@@ -297,9 +321,10 @@ function detectCrossings(
   crossings: number[],  // output: push [elev, dist, lat, lng, dir] tuples
 ): void {
   if (prevElev === -Infinity || currElev === -Infinity) return
-  // Skip crossings involving ocean/sea-level on EITHER side — avoids coastline spike artifacts.
-  // Ocean-to-land transitions generate many spurious crossings that render as vertical columns.
-  if (prevElev <= 0 || currElev <= 0) return
+  // Skip crossings where BOTH points are deep subsea — indicates open ocean.
+  // Single zero-crossings (coastline transitions) are valid and detected normally.
+  // Negative elevations like Death Valley (-86m) are valid terrain.
+  if (prevElev < -10 && currElev < -10) return
 
   const dElev = currElev - prevElev
   if (Math.abs(dElev) < 0.01) return  // Flat — no crossings
@@ -339,6 +364,26 @@ interface PeakRefineItem {
   bandIndex: number
   /** Peak name (for debug logging) */
   name: string
+}
+
+/** Detected peak — local maximum in elevation profile along one azimuth. */
+interface DetectedPeakW {
+  azimuthIdx: number
+  azimuthDeg: number
+  distance: number
+  elevation: number
+  angle: number
+  lat: number
+  lng: number
+  terrainType: 'land' | 'water' | 'ocean'
+  bandIndex: number
+}
+
+/** Per-band collection of detected peaks with azimuth offset index. */
+interface BandDetectedPeaksW {
+  peaks: DetectedPeakW[]
+  peakOffsets: Uint32Array
+  bandIndex: number
 }
 
 // ─── Peak Refinement Handler ─────────────────────────────────────────────────
@@ -581,27 +626,27 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
-  // Short-range log steps for the high-res near pass (extends to 31km for mid-near band)
-  const HIRES_MAX_DIST = 31_000
+  // Hi-res log steps for near+mid pass (extends to 70km — covers all hi-res bands)
+  const HIRES_MAX_DIST = 70_000
   const hiresLogDists: number[] = []
   let d2 = 200  // Start closer for near detail
   while (d2 <= HIRES_MAX_DIST) {
     hiresLogDists.push(d2)
-    d2 *= 1.01  // Finer distance steps for near bands
+    d2 *= 1.005  // Fine distance steps — ~195m at 39km vs ~390m at 1.01×
   }
   hiresLogDists.reverse()
 
-  // Ultra-near log steps: 20m → 200m at 1.005× step (very fine for cliff faces)
+  // Immediate-range log steps: 20m → 1000m at 1.005× step (very fine for cliff faces)
   // Uses 360 azimuths (1° per step) — sufficient for close terrain
-  const ULTRA_NEAR_MAX_DIST = 200
-  const ultraNearLogDists: number[] = []
+  const IMMEDIATE_MAX_DIST = 1_000
+  const immediateLogDists: number[] = []
   let d3 = 20
-  while (d3 <= ULTRA_NEAR_MAX_DIST) {
-    ultraNearLogDists.push(d3)
+  while (d3 <= IMMEDIATE_MAX_DIST) {
+    immediateLogDists.push(d3)
     d3 *= 1.005
   }
-  ultraNearLogDists.reverse()
-  const ULTRA_NEAR_AZIMUTHS = 360  // 1° per step for 20–200m range
+  immediateLogDists.reverse()
+  const IMMEDIATE_AZIMUTHS = 360  // 1° per step for 20–1000m range
 
   // Determine which bands are high-res vs standard
   const HIRES_RESOLUTION = 8  // 0.125° per step
@@ -690,21 +735,22 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
       if (elevAngle > Math.PI / 3) continue
 
-      // Overall maximum
-      if (elevAngle > maxAngle) {
+      // Overall maximum (skip ocean)
+      if (rawElev >= OCEAN_ELEV_M && elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
         ridgeLat  = sLat
         ridgeLng  = sLng
       }
 
-      // Per-band: ridgeline tracking + crossing detection (standard-res bands only)
+      // Per-band: ridgeline tracking + crossing detection
+      // (standard-res bands only: bi 4=mid-far, bi 5=far)
       for (const bi of standardBandIndices) {
         const band = DEPTH_BANDS[bi]
         if (dist < band.minDist || dist > band.maxDist) continue
 
-        // Ridgeline: track maximum elevation angle
-        if (elevAngle > bandMaxAngles[bi]) {
+        // Ridgeline: track maximum elevation angle (skip ocean)
+        if (rawElev >= OCEAN_ELEV_M && elevAngle > bandMaxAngles[bi]) {
           bandMaxAngles[bi] = elevAngle
           bandRidgeDist[bi] = dist
           bandRidgeLat[bi]  = sLat
@@ -750,7 +796,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
   }
 
-  // ── Phase 4: High-res pass (2880 azimuths, 0–31km) for near bands ────────
+  // ── Phase 4: High-res pass (2880 azimuths, 200m–70km) for near bands ──────
 
   if (hiresBandIndices.length > 0) {
     for (let ai = 0; ai < hiresNumAzimuths; ai++) {
@@ -792,12 +838,13 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
         if (elevAngle > Math.PI / 3) continue
 
+        // Hi-res bands: bi 0=immediate, 1=ultra-near, 2=near, 3=mid
         for (const bi of hiresBandIndices) {
           const band = DEPTH_BANDS[bi]
           if (dist < band.minDist || dist > band.maxDist) continue
 
-          // Ridgeline: track maximum elevation angle
-          if (elevAngle > bandMaxAngles[bi]) {
+          // Ridgeline: track maximum elevation angle (skip ocean)
+          if (rawElev >= OCEAN_ELEV_M && elevAngle > bandMaxAngles[bi]) {
             bandMaxAngles[bi] = elevAngle
             bandRidgeDist[bi] = dist
             bandRidgeLat[bi]  = sLat
@@ -836,17 +883,17 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
   }
 
-  // ── Phase 4b: Ultra-near pass (360 azimuths, 20–200m) ─────────────────────
-  // Fills the ultra-near band (index 0) with close-range terrain that the
+  // ── Phase 4b: Immediate pass (360 azimuths, 20–1000m) ──────────────────────
+  // Fills the immediate band (index 0) with close-range terrain that the
   // hi-res pass (starting at 200m) would miss.  Uses coarser 1° azimuth
-  // resolution since features at 20–200m subtend large angular spans.
+  // resolution since features at 20–1000m subtend large angular spans.
   // Results are merged into every 8th slot of the 2880-element band arrays.
 
-  if (ultraNearLogDists.length > 0 && DEPTH_BANDS[0].maxDist > 0) {
-    const ultraBandIdx = 0  // ultra-near is always band 0
-    const band = bands[ultraBandIdx]
+  if (immediateLogDists.length > 0 && DEPTH_BANDS[0].maxDist > 0) {
+    const immediateBandIdx = 0  // immediate is always band 0
+    const band = bands[immediateBandIdx]
 
-    for (let uai = 0; uai < ULTRA_NEAR_AZIMUTHS; uai++) {
+    for (let uai = 0; uai < IMMEDIATE_AZIMUTHS; uai++) {
       const azDeg = uai  // 1° steps
       const azRad = azDeg * DEG_TO_RAD
       const sinA  = Math.sin(azRad)
@@ -870,7 +917,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       let prevLat  = viewerLat
       let prevLng  = viewerLng
 
-      for (const dist of ultraNearLogDists) {
+      for (const dist of immediateLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
@@ -883,7 +930,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
         if (elevAngle > Math.PI / 3) continue
 
-        if (elevAngle > bestAngle) {
+        if (rawElev >= OCEAN_ELEV_M && elevAngle > bestAngle) {
           bestAngle = elevAngle
           bestDist  = dist
           bestLat   = sLat
@@ -891,14 +938,14 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           bestElev  = rawElev
         }
 
-        // Crossing detection for ultra-near band
-        const interval = CONTOUR_INTERVALS_M[ultraBandIdx] || 15.24
+        // Crossing detection for immediate band
+        const interval = CONTOUR_INTERVALS_M[immediateBandIdx] || 7.62
         if (prevElev !== -Infinity) {
           detectCrossings(
             prevElev, prevDist, prevLat, prevLng,
             rawElev, dist, sLat, sLng,
             interval,
-            bandCrossingsTemp[ultraBandIdx][bandAi],
+            bandCrossingsTemp[immediateBandIdx][bandAi],
           )
         }
         prevElev = rawElev
@@ -907,7 +954,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         prevLng  = sLng
       }
 
-      // Only update if ultra-near pass found a higher ridgeline than hi-res pass
+      // Only update if immediate pass found a higher ridgeline than hi-res pass
       if (bestElev > -Infinity && bestAngle > (band.elevations[bandAi] > -Infinity
         ? Math.atan2(band.elevations[bandAi] - (band.distances[bandAi] * band.distances[bandAi]) / (2 * EARTH_R) * (1 - REFRACTION_K) - correctedViewerElev, band.distances[bandAi])
         : -Math.PI / 2)) {
@@ -918,7 +965,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       }
     }
 
-    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.95 })
+    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.93 })
   }
 
   // ── Phase 5: Pack crossing data into flat arrays ──────────────────────────
@@ -950,7 +997,247 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands[bi].crossingOffsets = offsets
   }
 
-  // Phase 6 removed — refined arcs now computed on-demand via 'refine-peaks' message.
+  // ── Phase 6: Peak detection pass (local maxima in elevation profile) ────────
+  // For bands 0–2 (ultra-near through mid-near, 0–31km), scan each azimuth's
+  // elevation profile for local maxima: elevation goes up then down.
+  // These "detected peaks" are terrain ridges visible from the viewer, used by
+  // the depth renderer for peak polygons and layered occlusion.
+
+  const MAX_PEAK_DETECT_BAND = 4  // bands 0–3 (immediate, ultra-near, near, mid)
+
+  const detectedPeaks: BandDetectedPeaksW[] = []
+
+  for (let bi = 0; bi < Math.min(MAX_PEAK_DETECT_BAND, DEPTH_BANDS.length); bi++) {
+    const band = bands[bi]
+    const bandAz = band.numAzimuths
+    const bandRes = band.resolution
+    const bandCfg = DEPTH_BANDS[bi]
+    const allPeaks: DetectedPeakW[] = []
+    const peakOffsets = new Uint32Array(bandAz + 1)
+
+    for (let ai = 0; ai < bandAz; ai++) {
+      peakOffsets[ai] = allPeaks.length
+
+      // Collect elevation samples along this azimuth within band range
+      // We use crossing data + band ridgeline to reconstruct profile
+      // But more efficiently: re-march this azimuth using cached tiles
+      const azDeg = ai / bandRes
+      const azRad = azDeg * DEG_TO_RAD
+      const sinA = Math.sin(azRad)
+      const cosA = Math.cos(azRad)
+
+      // Choose the right distance step array for this band
+      const isHires = bandCfg.resolution && bandCfg.resolution > resolution
+      const distSteps = isHires ? hiresLogDists : logDists
+
+      // Collect samples within band range (near → far order for peak detection)
+      const samples: Array<{ dist: number; elev: number; lat: number; lng: number; angle: number }> = []
+      for (let di = distSteps.length - 1; di >= 0; di--) {
+        const dist = distSteps[di]
+        if (dist < bandCfg.minDist || dist > bandCfg.maxDist) continue
+        const sLat = viewerLat + (cosA * dist) / 111_132
+        const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+        const zoom = distToZoom(dist)
+        const rawElev = sampleBest(sLat, sLng, zoom)
+        // Skip tile-decode errors (< -500m) but allow valid below-sea-level terrain
+        if (rawElev < -500) continue
+
+        const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const effElev = rawElev - curvDrop
+        const elevAngle = Math.atan2(effElev - correctedViewerElev, dist)
+        samples.push({ dist, elev: rawElev, lat: sLat, lng: sLng, angle: elevAngle })
+      }
+
+      if (samples.length < 3) continue
+
+      // Detect local maxima: elevation goes up then down
+      let prevSlope = 0  // -1 falling, 0 flat, +1 rising
+      for (let si = 1; si < samples.length; si++) {
+        const slope = Math.sign(samples[si].elev - samples[si - 1].elev)
+        if (slope === 0) continue  // Flat — keep last direction
+
+        if (prevSlope === 1 && slope === -1) {
+          // Peak at samples[si - 1]
+          const pk = samples[si - 1]
+          const terrainType: 'land' | 'water' | 'ocean' = pk.elev < OCEAN_ELEV_M ? 'ocean' : 'land'
+          allPeaks.push({
+            azimuthIdx: ai,
+            azimuthDeg: azDeg,
+            distance: pk.dist,
+            elevation: pk.elev,
+            angle: pk.angle,
+            lat: pk.lat,
+            lng: pk.lng,
+            terrainType,
+            bandIndex: bi,
+          })
+        }
+        prevSlope = slope
+      }
+    }
+    peakOffsets[bandAz] = allPeaks.length
+
+    detectedPeaks.push({
+      peaks: allPeaks,
+      peakOffsets,
+      bandIndex: bi,
+    })
+  }
+
+  // ── Phase 6b: Group detected peaks into ridge strands ──────────────────────
+  //
+  // Step 1: Group peaks into connected strands (sharpness = placeholder 0.5).
+  // Step 2: Compute sharpness from actual strand neighbors (not band maxima).
+  //         This prevents the jumpiness caused by comparing a detected peak
+  //         at one distance with a band-max ridgeline at a completely different
+  //         distance in the neighboring azimuth.
+
+  const ridgeStrands: RidgeStrandW[] = []
+
+  for (let bi = 0; bi < Math.min(MAX_PEAK_DETECT_BAND, DEPTH_BANDS.length); bi++) {
+    const bandPeaks = detectedPeaks[bi]
+    if (!bandPeaks || bandPeaks.peaks.length === 0) continue
+
+    const bandCfg = DEPTH_BANDS[bi]
+
+    // Distance tolerance scales with band range
+    const distTolerance = Math.max(500, bandCfg.maxDist * 0.04)
+    // Max azimuth gap allowed within a strand (in azimuth indices)
+    const bandRes = bands[bi].resolution
+    const maxAzGap = Math.ceil(bandRes * 1.5)
+
+    // Active strands being built — multiple parallel ridges possible
+    const activeStrands: Array<{
+      lastAzIdx:  number
+      lastDist:   number
+      peakElev:   number
+      peakDist:   number
+      points:     RidgeStrandPointW[]
+    }> = []
+
+    // Sort peaks by azimuth index (left to right)
+    const sortedPeaks = [...bandPeaks.peaks].sort((a, b) => a.azimuthIdx - b.azimuthIdx)
+
+    // Step 1: Group peaks into strands with placeholder sharpness
+    for (const peak of sortedPeaks) {
+      const ai = peak.azimuthIdx
+
+      const point: RidgeStrandPointW = {
+        bearingDeg: peak.azimuthDeg,
+        elev:       peak.elevation,
+        dist:       peak.distance,
+        lat:        peak.lat,
+        lng:        peak.lng,
+        sharpness:  0.5,  // placeholder — computed from strand neighbors below
+      }
+
+      // Try to attach to an existing active strand
+      let bestIdx  = -1
+      let bestDiff = Infinity
+
+      for (let si = 0; si < activeStrands.length; si++) {
+        const s = activeStrands[si]
+        if (ai - s.lastAzIdx > maxAzGap) continue
+        const diff = Math.abs(peak.distance - s.lastDist)
+        if (diff < distTolerance && diff < bestDiff) {
+          bestIdx  = si
+          bestDiff = diff
+        }
+      }
+
+      if (bestIdx >= 0) {
+        const s = activeStrands[bestIdx]
+        s.points.push(point)
+        s.lastAzIdx = ai
+        s.lastDist  = peak.distance
+        if (peak.elevation > s.peakElev) {
+          s.peakElev = peak.elevation
+          s.peakDist = peak.distance
+        }
+      } else {
+        activeStrands.push({
+          lastAzIdx: ai,
+          lastDist:  peak.distance,
+          peakElev:  peak.elevation,
+          peakDist:  peak.distance,
+          points:    [point],
+        })
+      }
+
+      // Periodically flush stale strands
+      if (ai % 20 === 0) {
+        for (let si = activeStrands.length - 1; si >= 0; si--) {
+          if (ai - activeStrands[si].lastAzIdx > maxAzGap) {
+            const s = activeStrands[si]
+            if (s.points.length >= 3) {
+              ridgeStrands.push({
+                points:    s.points,
+                bandIndex: bi,
+                peakElev:  s.peakElev,
+                peakDist:  s.peakDist,
+              })
+            }
+            activeStrands.splice(si, 1)
+          }
+        }
+      }
+    }
+
+    // Flush remaining strands
+    for (const s of activeStrands) {
+      if (s.points.length >= 3) {
+        ridgeStrands.push({
+          points:    s.points,
+          bandIndex: bi,
+          peakElev:  s.peakElev,
+          peakDist:  s.peakDist,
+        })
+      }
+    }
+  }
+
+  // Step 2: Compute sharpness from actual strand neighbors.
+  // For each point, compute elevation angle curvature using the previous
+  // and next points IN THE SAME STRAND — not band maxima which may be at
+  // completely different distances.
+  for (const strand of ridgeStrands) {
+    const pts = strand.points
+    for (let i = 0; i < pts.length; i++) {
+      const curr = pts[i]
+      const prev = i > 0           ? pts[i - 1] : curr
+      const next = i < pts.length - 1 ? pts[i + 1] : curr
+
+      const cDropC = (curr.dist * curr.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const cDropP = (prev.dist * prev.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const cDropN = (next.dist * next.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+
+      const angleC = Math.atan2(curr.elev - cDropC - correctedViewerElev, curr.dist)
+      const angleP = prev === curr ? angleC : Math.atan2(prev.elev - cDropP - correctedViewerElev, prev.dist)
+      const angleN = next === curr ? angleC : Math.atan2(next.elev - cDropN - correctedViewerElev, next.dist)
+
+      // Second derivative — magnitude indicates sharpness of angular peak
+      const curvature = angleP + angleN - 2 * angleC
+      // Normalize: curvature of -0.003 rad ≈ sharpness 1.0 (gentler threshold)
+      pts[i].sharpness = Math.min(1, Math.max(0.1, Math.abs(curvature) / 0.003))
+    }
+
+    // Smooth sharpness with 3-point moving average to eliminate single-azimuth spikes
+    if (pts.length >= 3) {
+      const smoothed = new Float64Array(pts.length)
+      smoothed[0] = pts[0].sharpness
+      smoothed[pts.length - 1] = pts[pts.length - 1].sharpness
+      for (let i = 1; i < pts.length - 1; i++) {
+        smoothed[i] = pts[i - 1].sharpness * 0.25 +
+                      pts[i].sharpness     * 0.50 +
+                      pts[i + 1].sharpness * 0.25
+      }
+      for (let i = 0; i < pts.length; i++) {
+        pts[i].sharpness = smoothed[i]
+      }
+    }
+  }
+
+  // Phase 7 (old 6) removed — refined arcs now computed on-demand via 'refine-peaks' message.
   // See handleRefinePeaks() below.
 
   self.postMessage({ type: 'progress', phase: 'skyline', progress: 1.0 })
@@ -969,6 +1256,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     shading,
     bands,
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
+    detectedPeaks,
+    ridgeStrands,
     resolution,
     numAzimuths,
     computedAt: {

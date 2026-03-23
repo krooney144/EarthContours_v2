@@ -305,16 +305,16 @@ export interface DepthBandConfig {
   resolution?: number
 }
 
-/** 6-band configuration: ultra-near through far, with scaled overlaps.
- *  Bands 0–2 are high-res (8 steps/°, 2880 azimuths).
- *  Bands 3–5 are standard-res (4 steps/°, 1440 azimuths). */
+/** 6-band configuration: immediate through far, non-overlapping distance ranges.
+ *  Bands 0–3 are high-res (8 steps/°, 2880 azimuths).
+ *  Bands 4–5 are standard-res (4 steps/°, 1440 azimuths). */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az) — 0.5 km overlap into near
-  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az) — 0.5 km overlap into mid-near
-  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az) — 1 km overlap into mid
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)  — 1 km overlap into med-far
-  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)  — 2 km overlap into far
-  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
+  { label: 'immediate',  minDist: 0,        maxDist: 1_000,   resolution: 8 },  // 0–1 km     (0.125°, 2880 az)
+  { label: 'ultra-near', minDist: 1_000,    maxDist: 5_000,   resolution: 8 },  // 1–5 km     (0.125°, 2880 az)
+  { label: 'near',       minDist: 5_000,    maxDist: 15_000,  resolution: 8 },  // 5–15 km    (0.125°, 2880 az)
+  { label: 'mid',        minDist: 15_000,   maxDist: 70_000,  resolution: 8 },  // 15–70 km   (0.125°, 2880 az)
+  { label: 'mid-far',    minDist: 70_000,   maxDist: 152_000 },                  // 70–152 km  (0.25°, 1440 az)
+  { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
 ]
 
 /**
@@ -344,6 +344,39 @@ export interface SkylineBand {
   resolution: number
   /** Number of azimuth samples in this band's arrays = 360 × resolution */
   numAzimuths: number
+}
+
+// ─── SCAN — Ridge Strand Types ───────────────────────────────────────────────
+
+/** One point along a ridge strand — detected during ray march via rolling-window
+ *  slope analysis. Ready to project to screen coordinates. */
+export interface RidgeStrandPoint {
+  /** Azimuth bearing in degrees (0=N, 90=E) — maps to screen X */
+  bearingDeg:  number
+  /** Raw ground elevation in metres — for color mapping */
+  elev:        number
+  /** Distance from viewer in metres — for thickness + atmospheric haze */
+  dist:        number
+  /** GPS latitude of the ridge point */
+  lat:         number
+  /** GPS longitude of the ridge point */
+  lng:         number
+  /** Angular curvature sharpness 0–1 (1 = knife-edge, 0.05 = gentle hill).
+   *  Controls stroke weight: sharp ridges get bold lines, gentle slopes thin/fade. */
+  sharpness:   number
+}
+
+/** A connected sequence of ridge points across consecutive azimuths.
+ *  Built in the worker by grouping detected peaks at similar distances. */
+export interface RidgeStrand {
+  /** Ordered points along this ridge, one per azimuth where detected */
+  points:    RidgeStrandPoint[]
+  /** Depth band index where this ridge was found */
+  bandIndex: number
+  /** Highest elevation on this strand (metres) */
+  peakElev:  number
+  /** Distance to the highest point (metres) */
+  peakDist:  number
 }
 
 // ─── SCAN — Refined Arc (Dense Peak Ridgeline Data) ─────────────────────────
@@ -429,6 +462,14 @@ export interface SkylineData {
   /** Refined arcs — dense ray-march data around detected ridgeline features.
    *  Used for high-resolution peak ridgeline rendering. Empty if no features detected. */
   refinedArcs: RefinedArc[]
+  /** Per-band detected peaks (local maxima in elevation profile per azimuth).
+   *  Only populated for bands 0–2 (ultra-near through mid-near, 0–31km).
+   *  Used by depth renderer for peak polygon and occlusion system. */
+  detectedPeaks: BandDetectedPeaks[]
+  /** Ridge strands — connected sequences of detected ridge points across azimuths.
+   *  Built by grouping per-azimuth peak detections at similar distances.
+   *  Used by renderRidgeStrands for variable-weight ridgeline rendering. */
+  ridgeStrands: RidgeStrand[]
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
@@ -447,4 +488,50 @@ export interface SkylineRequest {
   viewerHeightM:  number
   resolution:     number
   maxRange:       number
+}
+
+// ─── SCAN — Detected Peak (elevation profile local maximum) ──────────────────
+
+/** Terrain classification for a detected peak point. */
+export type TerrainType = 'land' | 'water' | 'ocean'
+
+/**
+ * A local maximum in the elevation profile along a single azimuth ray.
+ * Detected after the ray march completes by scanning for elevation-goes-up-then-down patterns.
+ * Used by the depth renderer to build peak polygons for layered terrain rendering.
+ */
+export interface DetectedPeak {
+  /** Azimuth index in the band's coordinate system */
+  azimuthIdx: number
+  /** Azimuth angle in degrees (0=N, 90=E) */
+  azimuthDeg: number
+  /** Distance from viewer (metres) */
+  distance: number
+  /** Raw ground elevation (metres) */
+  elevation: number
+  /** Elevation angle from viewer (radians) */
+  angle: number
+  /** GPS latitude of the peak point */
+  lat: number
+  /** GPS longitude of the peak point */
+  lng: number
+  /** Terrain classification at this point */
+  terrainType: TerrainType
+  /** Depth band index this peak was found in */
+  bandIndex: number
+}
+
+/**
+ * Per-azimuth array of detected peaks for a single depth band.
+ * Packed format: detectedPeaks[bandIndex] contains all peaks found in that band,
+ * grouped by azimuth via peakOffsets.
+ */
+export interface BandDetectedPeaks {
+  /** All detected peaks for this band, sorted by azimuth then distance */
+  peaks: DetectedPeak[]
+  /** Per-azimuth offset into peaks array (length = numAzimuths + 1).
+   *  Azimuth ai's peaks are at indices peakOffsets[ai]..peakOffsets[ai+1]. */
+  peakOffsets: Uint32Array
+  /** Band index */
+  bandIndex: number
 }
