@@ -1,1 +1,1 @@
-export { default } from './Scan2Screen'
+export { default } from './ScanScreen'

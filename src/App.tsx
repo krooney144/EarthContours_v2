@@ -6,33 +6,25 @@
  * 2. Manages the preview layout (desktop) vs single-screen (mobile)
  * 3. Renders the active screen with transition animations
  * 4. Wraps each screen in an ErrorBoundary (so crashes are isolated)
- * 5. Shows the Nav bar at the bottom (except in preview mode)
+ * 5. Shows the Nav bar at the bottom (except in preview mode and home screen)
  *
  * The routing system uses Zustand (uiStore) instead of URL routing because:
  * - Native app feel — no URL changes
  * - Custom zoom transitions between screens
  * - Complex state (e.g., 3D camera) persists between screen visits
- *
- * React Router is used ONLY for the 4 B2/dev pages (/b2-wrap, /b2-wrap-v2,
- * /b2-map, /scan2) which need real URLs for venue projection access.
- * The root / route renders the existing Zustand-based app unchanged.
  */
 
 import React, { useEffect } from 'react'
-import { Routes, Route } from 'react-router-dom'
 import { useUIStore, useSettingsStore } from './store'
 import SplashScreen from './components/SplashScreen'
 import Nav from './components/Nav'
 import ErrorBoundary from './components/ErrorBoundary'
 import PreviewLayout from './components/PreviewLayout'
+import HomeScreen from './screens/HomeScreen'
 import ScanScreen from './screens/ScanScreen'
 import ExploreScreen from './screens/ExploreScreen'
 import MapScreen from './screens/MapScreen'
 import SettingsScreen from './screens/SettingsScreen'
-import B2WrapScreen from './screens/B2WrapScreen'
-import B2WrapV2Screen from './screens/B2WrapV2Screen'
-import B2MapScreen from './screens/B2MapScreen'
-import Scan2Screen from './screens/Scan2Screen'
 import { createLogger, appLog } from './core/logger'
 import styles from './App.module.css'
 
@@ -43,9 +35,9 @@ const log = createLogger('APP')
 /**
  * Map of screen ID → component.
  * All screens are imported statically (not lazy-loaded) for the MVP.
- * In Session 2, we may use React.lazy() for code-splitting.
  */
 const SCREENS: Record<string, React.ReactNode> = {
+  home:     <HomeScreen />,
   scan:     <ScanScreen />,
   explore:  <ExploreScreen />,
   map:      <MapScreen />,
@@ -62,7 +54,7 @@ const MainApp: React.FC = () => {
     transitionState,
   } = useUIStore()
 
-  const { reduceMotion } = useSettingsStore()
+  const { reduceMotion, darkMode } = useSettingsStore()
 
   // ── Side Effects ────────────────────────────────────────────────────────────
 
@@ -77,7 +69,6 @@ const MainApp: React.FC = () => {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Apply reduce-motion class to body when setting is on
-  // (enables the CSS reduce-motion override in global.css)
   useEffect(() => {
     if (reduceMotion) {
       document.body.classList.add('reduce-motion')
@@ -87,6 +78,18 @@ const MainApp: React.FC = () => {
     }
   }, [reduceMotion])
 
+  // Apply dark/light theme class to root
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.remove('theme-light')
+      document.documentElement.classList.add('theme-dark')
+    } else {
+      document.documentElement.classList.remove('theme-dark')
+      document.documentElement.classList.add('theme-light')
+    }
+    log.info('Theme applied', { darkMode })
+  }, [darkMode])
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
   log.debug('App render', {
@@ -95,6 +98,9 @@ const MainApp: React.FC = () => {
     splashComplete,
     transitionState,
   })
+
+  // Hide nav bar on home screen — home has its own navigation
+  const showNav = activeScreen !== 'home'
 
   return (
     <div className={styles.app}>
@@ -112,8 +118,8 @@ const MainApp: React.FC = () => {
           ) : (
             /* Single-screen mode: one active screen with transitions */
             <>
-              {/* Screen container — offset by nav height */}
-              <div className={`${styles.screenContainer}`}>
+              {/* Screen container — offset by nav height when nav is visible */}
+              <div className={`${styles.screenContainer} ${!showNav ? styles.noNav : ''}`}>
                 {/* Transition wrapper applies zoom-in/zoom-out animations */}
                 <div className={`${styles.screenWrapper} ${styles[transitionState]}`}>
                   <ErrorBoundary
@@ -131,8 +137,8 @@ const MainApp: React.FC = () => {
                 aria-hidden="true"
               />
 
-              {/* Navigation bar — always visible in single-screen mode */}
-              <Nav />
+              {/* Navigation bar — visible in single-screen mode (hidden on home) */}
+              {showNav && <Nav />}
             </>
           )}
         </>
@@ -141,21 +147,10 @@ const MainApp: React.FC = () => {
   )
 }
 
-// ─── App Component (Router shell) ────────────────────────────────────────────
+// ─── App Component ───────────────────────────────────────────────────────────
 
 const App: React.FC = () => {
-  return (
-    <Routes>
-      {/* B2/Dev pages — fullscreen, no nav, no splash */}
-      <Route path="/b2-wrap" element={<B2WrapScreen />} />
-      <Route path="/b2-wrap-v2" element={<B2WrapV2Screen />} />
-      <Route path="/b2-map" element={<B2MapScreen />} />
-      <Route path="/scan2" element={<Scan2Screen />} />
-
-      {/* Root — existing Zustand-based app (splash, nav, transitions) */}
-      <Route path="/*" element={<MainApp />} />
-    </Routes>
-  )
+  return <MainApp />
 }
 
 export default App

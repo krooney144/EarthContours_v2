@@ -10,8 +10,8 @@
 
 // ─── Screen Navigation ───────────────────────────────────────────────────────
 
-/** The four main screens of the app */
-export type ScreenId = 'scan' | 'explore' | 'map' | 'settings'
+/** The five screens of the app — home is the landing page */
+export type ScreenId = 'home' | 'scan' | 'explore' | 'map' | 'settings'
 
 /** Transition states used for the zoom animation between screens */
 export type TransitionState = 'idle' | 'exit' | 'black' | 'enter'
@@ -227,6 +227,7 @@ export interface AppSettings {
   verticalExaggeration: VerticalExaggeration
 
   // Appearance
+  darkMode: boolean
   colorTheme: ColorTheme
   labelSize: LabelSize
   reduceMotion: boolean

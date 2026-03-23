@@ -18,7 +18,6 @@
 
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { setupGlobalErrorLogging, appLog } from './core/logger'
 import './styles/global.css'
@@ -27,7 +26,7 @@ import './styles/global.css'
 setupGlobalErrorLogging()
 
 appLog.info('EarthContours starting...', {
-  version: '1.0.0-mvp',
+  version: '2.3.0',
   env: import.meta.env.MODE,
   buildTime: new Date().toISOString(),
   platform: navigator.platform,
@@ -48,16 +47,8 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement)
 
 root.render(
-  /**
-   * StrictMode:
-   * - In development: effects run twice to detect side effect bugs
-   * - In production: no-op (StrictMode is stripped at build time)
-   * - We keep it on because it catches real bugs early
-   */
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <App />
   </React.StrictMode>,
 )
 

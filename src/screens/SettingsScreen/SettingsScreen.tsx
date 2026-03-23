@@ -1,13 +1,13 @@
 /**
  * EarthContours — SETTINGS Screen
  *
- * 7 sections of app configuration:
- * 1. Units & Measurements
- * 2. Map & Terrain Display
- * 3. Appearance
- * 4. Location & Sensors
- * 5. Performance & Battery
- * 6. Data & Downloads
+ * App configuration organized into sections:
+ * 1. About (brief overview)
+ * 2. Appearance (dark/light mode, label size, reduce motion)
+ * 3. Units & Measurements
+ * 4. Map & Terrain Display
+ * 5. Location & Sensors
+ * 6. Performance & Battery
  * 7. Feedback & Support
  *
  * All settings persist to localStorage via the settingsStore.
@@ -15,7 +15,6 @@
  */
 
 import React, { useCallback, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useSettingsStore, useLocationStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import { submitFeedback } from '../../data/feedbackService'
@@ -116,20 +115,12 @@ const SettingsScreen: React.FC = () => {
   const [feedbackIssueUrl, setFeedbackIssueUrl] = useState<string | null>(null)
   const [resetConfirm, setResetConfirm] = useState(false)
   const [showLocationHelp, setShowLocationHelp] = useState(false)
-  const navigate = useNavigate()
 
   log.debug('SettingsScreen render', {
     units: settings.units,
-    verticalExaggeration: settings.verticalExaggeration,
+    darkMode: settings.darkMode,
   })
 
-  /**
-   * Submit feedback as a GitHub Issue in krooney144/EarthContours_v1.
-   * Requires VITE_GITHUB_TOKEN in .env.local (see feedbackService.ts for setup).
-   * Shows success with a link to the created issue, or an error message.
-   * TODO: Add category selector (bug / feature / general feedback).
-   * TODO: Allow attaching screenshots.
-   */
   const handleFeedbackSubmit = useCallback(async () => {
     if (!feedbackText.trim()) return
 
@@ -145,7 +136,6 @@ const SettingsScreen: React.FC = () => {
       setFeedbackStatus('sent')
       setFeedbackIssueUrl(result.issueUrl ?? null)
       setFeedbackText('')
-      // Reset status after 5s so user can submit more feedback
       setTimeout(() => {
         setFeedbackStatus('idle')
         setFeedbackIssueUrl(null)
@@ -189,7 +179,6 @@ const SettingsScreen: React.FC = () => {
     }
   }, [requestGPS])
 
-  // 1× = physically correct metres; higher = artistic exaggeration of real elevation
   const EXAGGERATION_OPTIONS: VerticalExaggeration[] = [1, 2, 4, 10, 20]
 
   return (
@@ -203,156 +192,27 @@ const SettingsScreen: React.FC = () => {
       {/* Scrollable content */}
       <div className={styles.scrollArea} role="main">
 
-        {/* ── Section 1: Units & Measurements ── */}
-        <Section icon="⊡" title="Units & Measurements">
-          <Row label="Unit System" description="Feet and miles, or meters and km">
-            <Segmented<UnitSystem>
-              options={[
-                { value: 'imperial', label: 'Imperial' },
-                { value: 'metric',   label: 'Metric' },
-              ]}
-              value={settings.units}
-              onChange={(v) => { log.info('Units changed', { to: v }); settings.setUnits(v) }}
-              ariaLabel="Unit system"
-            />
-          </Row>
-          <Row label="Coordinate Format" description="How GPS coordinates are displayed">
-            <Segmented<CoordFormat>
-              options={[
-                { value: 'decimal', label: 'Dec' },
-                { value: 'dms',     label: 'DMS' },
-                { value: 'utm',     label: 'UTM' },
-              ]}
-              value={settings.coordFormat}
-              onChange={(v) => { log.info('Coord format changed', { to: v }); settings.setCoordFormat(v) }}
-              ariaLabel="Coordinate format"
-            />
-          </Row>
+        {/* ── About ── */}
+        <Section icon="\u25C8" title="About Earth Contours">
+          <div className={styles.aboutText}>
+            Earth Contours visualizes real terrain elevation data on your phone.
+            Use the Map to browse topographic tiles and select locations, Explore
+            to view 3D terrain with contour lines, and Scan for a first-person
+            360° panoramic skyline with ridgeline rendering and peak identification.
+            All elevation data comes from AWS Terrarium DEM tiles.
+          </div>
         </Section>
 
-        {/* ── Section 2: Map & Terrain ── */}
-        <Section icon="◭" title="Map & Terrain">
-          <Row label="Peak Labels" description="Show mountain name labels on terrain">
+        {/* ── Appearance ── */}
+        <Section icon="\u25C8" title="Appearance">
+          <Row label="Dark Mode" description="Switch between dark and light theme for sunlight readability">
             <Toggle
-              id="toggle-peaks"
-              label="Toggle peak labels"
-              checked={settings.showPeakLabels}
-              onChange={settings.togglePeakLabels}
+              id="toggle-darkmode"
+              label="Toggle dark mode"
+              checked={settings.darkMode}
+              onChange={settings.toggleDarkMode}
             />
           </Row>
-          <Row label="Rivers" description="Show rivers and streams on map">
-            <Toggle
-              id="toggle-rivers"
-              label="Toggle rivers"
-              checked={settings.showRivers}
-              onChange={settings.toggleRivers}
-            />
-          </Row>
-          <Row label="Lakes" description="Show lakes and reservoirs on map">
-            <Toggle
-              id="toggle-lakes"
-              label="Toggle lakes"
-              checked={settings.showLakes}
-              onChange={settings.toggleLakes}
-            />
-          </Row>
-          <Row label="Glaciers" description="Show glaciated areas on map">
-            <Toggle
-              id="toggle-glaciers"
-              label="Toggle glaciers"
-              checked={settings.showGlaciers}
-              onChange={settings.toggleGlaciers}
-            />
-          </Row>
-          <Row label="Coastlines" description="Show coastline outlines on map">
-            <Toggle
-              id="toggle-coastlines"
-              label="Toggle coastlines"
-              checked={settings.showCoastlines}
-              onChange={settings.toggleCoastlines}
-            />
-          </Row>
-          <Row label="Town Labels" description="Show cities and towns (off by default)">
-            <Toggle
-              id="toggle-towns"
-              label="Toggle town labels"
-              checked={settings.showTownLabels}
-              onChange={settings.toggleTownLabels}
-            />
-          </Row>
-          <Row label="Contour Lines" description="Show elevation contour lines on terrain">
-            <Toggle
-              id="toggle-contours"
-              label="Toggle contour lines"
-              checked={settings.showContourLines}
-              onChange={settings.toggleContourLines}
-            />
-          </Row>
-          <Row label="Solid Terrain" description="Show solid 3D mesh in EXPLORE (off = contour lines only)">
-            <Toggle
-              id="toggle-solid-terrain"
-              label="Toggle solid terrain"
-              checked={settings.solidTerrain}
-              onChange={settings.toggleSolidTerrain}
-            />
-          </Row>
-          <Row label="Band Lines" description="Show depth band ridgeline strokes in SCAN view">
-            <Toggle
-              id="toggle-bandlines"
-              label="Toggle band lines"
-              checked={settings.showBandLines}
-              onChange={settings.toggleBandLines}
-            />
-          </Row>
-          <Row label="Terrain Fill" description="Show solid fill below ridgelines in SCAN view">
-            <Toggle
-              id="toggle-fill"
-              label="Toggle terrain fill"
-              checked={settings.showFill}
-              onChange={settings.toggleFill}
-            />
-          </Row>
-          <Row label="Contour Animation" description="Slow pulsing glow on contour lines">
-            <Toggle
-              id="toggle-contour-anim"
-              label="Toggle contour animation"
-              checked={settings.contourAnimation}
-              onChange={settings.toggleContourAnimation}
-            />
-          </Row>
-          <Row label="Debug Panel" description="Show diagnostics overlay on SCAN screen">
-            <Toggle
-              id="toggle-debug-panel"
-              label="Toggle debug panel"
-              checked={settings.showDebugPanel}
-              onChange={settings.toggleDebugPanel}
-            />
-          </Row>
-          <Row
-            label="Vertical Exaggeration"
-            description="Multiply terrain heights for dramatic effect"
-          >
-            <div className={styles.exagOptions}>
-              {EXAGGERATION_OPTIONS.map((v) => (
-                <button
-                  key={v}
-                  className={`${styles.exagBtn} ${settings.verticalExaggeration === v ? styles.active : ''}`}
-                  onClick={() => {
-                    log.info('Vertical exaggeration changed', { to: v })
-                    settings.setVerticalExaggeration(v)
-                  }}
-                  aria-pressed={settings.verticalExaggeration === v}
-                  aria-label={`${v}× vertical exaggeration`}
-                >
-                  {v}×
-                </button>
-              ))}
-            </div>
-          </Row>
-        </Section>
-
-        {/* ── Section 3: Appearance ── */}
-        <Section icon="◈" title="Appearance">
           <Row label="Label Size" description="Size of peak and terrain labels">
             <Segmented<'small' | 'medium' | 'large'>
               options={[
@@ -361,10 +221,7 @@ const SettingsScreen: React.FC = () => {
                 { value: 'large',  label: 'L' },
               ]}
               value={settings.labelSize}
-              onChange={(v) => {
-                log.info('Label size changed', { to: v })
-                settings.setLabelSize(v)
-              }}
+              onChange={(v) => settings.setLabelSize(v)}
               ariaLabel="Label size"
             />
           </Row>
@@ -378,13 +235,80 @@ const SettingsScreen: React.FC = () => {
           </Row>
         </Section>
 
-        {/* ── Section 4: Location & Sensors ── */}
-        <Section icon="◎" title="Location & Sensors">
+        {/* ── Units & Measurements ── */}
+        <Section icon="\u22A1" title="Units & Measurements">
+          <Row label="Unit System" description="Feet and miles, or meters and km">
+            <Segmented<UnitSystem>
+              options={[
+                { value: 'imperial', label: 'Imperial' },
+                { value: 'metric',   label: 'Metric' },
+              ]}
+              value={settings.units}
+              onChange={(v) => settings.setUnits(v)}
+              ariaLabel="Unit system"
+            />
+          </Row>
+          <Row label="Coordinate Format" description="How GPS coordinates are displayed">
+            <Segmented<CoordFormat>
+              options={[
+                { value: 'decimal', label: 'Dec' },
+                { value: 'dms',     label: 'DMS' },
+                { value: 'utm',     label: 'UTM' },
+              ]}
+              value={settings.coordFormat}
+              onChange={(v) => settings.setCoordFormat(v)}
+              ariaLabel="Coordinate format"
+            />
+          </Row>
+        </Section>
+
+        {/* ── Map & Terrain ── */}
+        <Section icon="\u25ED" title="Map & Terrain">
+          <Row label="Peak Labels" description="Show mountain name labels on terrain">
+            <Toggle id="toggle-peaks" label="Toggle peak labels" checked={settings.showPeakLabels} onChange={settings.togglePeakLabels} />
+          </Row>
+          <Row label="Lakes" description="Show lakes and reservoirs on map">
+            <Toggle id="toggle-lakes" label="Toggle lakes" checked={settings.showLakes} onChange={settings.toggleLakes} />
+          </Row>
+          <Row label="Contour Lines" description="Show elevation contour lines on terrain">
+            <Toggle id="toggle-contours" label="Toggle contour lines" checked={settings.showContourLines} onChange={settings.toggleContourLines} />
+          </Row>
+          <Row label="Solid Terrain" description="Show solid 3D mesh in Explore (off = contour lines only)">
+            <Toggle id="toggle-solid-terrain" label="Toggle solid terrain" checked={settings.solidTerrain} onChange={settings.toggleSolidTerrain} />
+          </Row>
+          <Row label="Terrain Fill" description="Show solid fill below ridgelines in Scan view">
+            <Toggle id="toggle-fill" label="Toggle terrain fill" checked={settings.showFill} onChange={settings.toggleFill} />
+          </Row>
+          <Row label="Debug Panel" description="Show diagnostics overlay on Scan screen">
+            <Toggle id="toggle-debug-panel" label="Toggle debug panel" checked={settings.showDebugPanel} onChange={settings.toggleDebugPanel} />
+          </Row>
+          <Row
+            label="Vertical Exaggeration"
+            description="Multiply terrain heights for dramatic effect"
+          >
+            <div className={styles.exagOptions}>
+              {EXAGGERATION_OPTIONS.map((v) => (
+                <button
+                  key={v}
+                  className={`${styles.exagBtn} ${settings.verticalExaggeration === v ? styles.active : ''}`}
+                  onClick={() => settings.setVerticalExaggeration(v)}
+                  aria-pressed={settings.verticalExaggeration === v}
+                  aria-label={`${v}\u00D7 vertical exaggeration`}
+                >
+                  {v}\u00D7
+                </button>
+              ))}
+            </div>
+          </Row>
+        </Section>
+
+        {/* ── Location & Sensors ── */}
+        <Section icon="\u25CE" title="Location & Sensors">
           <Row
             label="GPS Permission"
             description={
               gpsPermission === 'denied'
-                ? 'Location was denied — tap HOW TO ENABLE for instructions'
+                ? 'Location was denied \u2014 tap HOW TO ENABLE for instructions'
                 : 'Required for real-time position tracking'
             }
           >
@@ -394,9 +318,9 @@ const SettingsScreen: React.FC = () => {
                 gpsPermission === 'denied'      ? styles.statusDenied  :
                                                   styles.statusUnknown
               }`}>
-                {gpsPermission === 'granted'     ? '● GRANTED' :
-                 gpsPermission === 'denied'      ? '✕ DENIED'  :
-                 gpsPermission === 'unavailable' ? '— N/A'     :
+                {gpsPermission === 'granted'     ? '\u25CF GRANTED' :
+                 gpsPermission === 'denied'      ? '\u2715 DENIED'  :
+                 gpsPermission === 'unavailable' ? '\u2014 N/A'     :
                                                    '? UNKNOWN' }
               </span>
               {gpsPermission === 'denied' ? (
@@ -419,16 +343,8 @@ const SettingsScreen: React.FC = () => {
               <div className={styles.locationHelpBody}>
                 <p><strong>iPhone (Safari):</strong></p>
                 <p>Settings &gt; Privacy &amp; Security &gt; Location Services &gt; Safari Websites &gt; While Using the App</p>
-                <p><strong>iPhone (Chrome):</strong></p>
-                <p>Settings &gt; Chrome &gt; Location &gt; While Using the App</p>
                 <p><strong>Android (Chrome):</strong></p>
                 <p>Tap the lock icon in the address bar &gt; Permissions &gt; Location &gt; Allow</p>
-                <p><strong>Desktop Chrome:</strong></p>
-                <p>Click the lock icon left of the URL &gt; Site settings &gt; Location &gt; Allow</p>
-                <p><strong>Desktop Safari:</strong></p>
-                <p>Safari &gt; Settings &gt; Websites &gt; Location &gt; Allow</p>
-                <p><strong>Desktop Firefox:</strong></p>
-                <p>Click the lock icon left of the URL &gt; Clear permission &gt; Reload page</p>
               </div>
               <button
                 className={styles.actionBtn}
@@ -450,26 +366,15 @@ const SettingsScreen: React.FC = () => {
                 { value: 'low',    label: 'Low' },
               ]}
               value={settings.locationAccuracy}
-              onChange={(v) => {
-                log.info('GPS accuracy changed', { to: v })
-                settings.setLocationAccuracy(v)
-              }}
+              onChange={(v) => settings.setLocationAccuracy(v)}
               ariaLabel="GPS accuracy"
-            />
-          </Row>
-          <Row label="Auto-Detect Region" description="Switch terrain data when you travel to a new region">
-            <Toggle
-              id="toggle-autoregion"
-              label="Toggle auto-detect region"
-              checked={settings.autoDetectRegion}
-              onChange={settings.toggleAutoDetectRegion}
             />
           </Row>
         </Section>
 
-        {/* ── Section 5: Performance & Battery ── */}
-        <Section icon="⬡" title="Performance & Battery">
-          <Row label="Battery Saver" description="Reduces 3D rendering quality to save power">
+        {/* ── Performance & Battery ── */}
+        <Section icon="\u2B21" title="Performance & Battery">
+          <Row label="Battery Saver" description="Reduces rendering quality to save power">
             <Segmented<BatteryMode>
               options={[
                 { value: 'auto', label: 'Auto' },
@@ -477,14 +382,11 @@ const SettingsScreen: React.FC = () => {
                 { value: 'off',  label: 'Off' },
               ]}
               value={settings.batteryMode}
-              onChange={(v) => {
-                log.info('Battery mode changed', { to: v })
-                settings.setBatteryMode(v)
-              }}
+              onChange={(v) => settings.setBatteryMode(v)}
               ariaLabel="Battery saver mode"
             />
           </Row>
-          <Row label="Frame Rate" description="Target render frame rate for 3D screens">
+          <Row label="Frame Rate" description="Target render frame rate">
             <Segmented<TargetFPS>
               options={[
                 { value: 'auto', label: 'Auto' },
@@ -492,61 +394,14 @@ const SettingsScreen: React.FC = () => {
                 { value: 30,     label: '30fps' },
               ]}
               value={settings.targetFPS}
-              onChange={(v) => {
-                log.info('Target FPS changed', { to: v })
-                settings.setTargetFPS(v)
-              }}
+              onChange={(v) => settings.setTargetFPS(v)}
               ariaLabel="Target frame rate"
             />
           </Row>
         </Section>
 
-        {/* ── Section 6: Data & Downloads ── */}
-        <Section icon="⊕" title="Data & Downloads">
-          <Row label="WiFi Only Downloads" description="Only download terrain data on WiFi (recommended)">
-            <Toggle
-              id="toggle-wifi"
-              label="Toggle WiFi only downloads"
-              checked={settings.downloadOnWifiOnly}
-              onChange={settings.toggleDownloadOnWifiOnly}
-            />
-          </Row>
-          <Row label="Data Resolution" description="Higher resolution = more detail, larger download">
-            <Segmented<'10m' | '30m' | '90m'>
-              options={[
-                { value: '10m', label: '10m' },
-                { value: '30m', label: '30m' },
-                { value: '90m', label: '90m' },
-              ]}
-              value={settings.dataResolution}
-              onChange={(v) => {
-                log.info('Data resolution changed', { to: v })
-                settings.setDataResolution(v)
-              }}
-              ariaLabel="Data resolution"
-            />
-          </Row>
-          <Row
-            label="Downloaded Regions"
-            description="Terrain data from AWS Terrarium DEM tiles, cached locally"
-          >
-            <button className={styles.actionBtn} onClick={() => log.info('Download region tapped')}>
-              + ADD
-            </button>
-          </Row>
-          <Row label="Colorado Rockies" description="~220 × 250 km · AWS Terrarium tiles">
-            <span className={`${styles.statusBadge} ${styles.statusGranted}`}>✓ LOADED</span>
-          </Row>
-          <Row label="Alaska Range — Denali" description="~255 × 220 km · AWS Terrarium tiles">
-            <span className={`${styles.statusBadge} ${styles.statusGranted}`}>✓ LOADED</span>
-          </Row>
-        </Section>
-
-        {/* ── Section 7: Feedback & Support ── */}
-        {/* Feedback is submitted as a GitHub Issue via /api/feedback serverless function.
-            TODO: Add category picker (bug, feature request, general).
-            TODO: Support screenshot attachment via paste or file picker. */}
-        <Section icon="✉" title="Feedback & Support">
+        {/* ── Feedback & Support ── */}
+        <Section icon="\u2709" title="Feedback & Support">
           <div className={styles.feedbackArea}>
             <textarea
               className={styles.textarea}
@@ -565,7 +420,7 @@ const SettingsScreen: React.FC = () => {
                 aria-label="Submit feedback as GitHub issue"
               >
                 {feedbackStatus === 'sending' ? 'SENDING...' :
-                 feedbackStatus === 'sent'    ? '✓ SENT' :
+                 feedbackStatus === 'sent'    ? '\u2713 SENT' :
                  feedbackStatus === 'error'   ? 'RETRY' :
                                                 'SUBMIT'}
               </button>
@@ -578,7 +433,6 @@ const SettingsScreen: React.FC = () => {
               </button>
             </div>
 
-            {/* Success message with link to the created GitHub issue */}
             {feedbackStatus === 'sent' && feedbackIssueUrl && (
               <div className={styles.feedbackSuccess} role="status">
                 Feedback submitted!{' '}
@@ -593,7 +447,6 @@ const SettingsScreen: React.FC = () => {
               </div>
             )}
 
-            {/* Error message */}
             {feedbackStatus === 'error' && feedbackError && (
               <div className={styles.feedbackErrorMsg} role="alert">
                 {feedbackError}
@@ -611,36 +464,12 @@ const SettingsScreen: React.FC = () => {
           </Row>
         </Section>
 
-        {/* ── Section 8: Dev Pages ── */}
-        <Section icon="⚙" title="Dev Pages">
-          <Row label="B2 Wrap" description="360° cylindrical projection — Scan V1">
-            <button className={styles.actionBtn} onClick={() => navigate('/b2-wrap')}>
-              OPEN
-            </button>
-          </Row>
-          <Row label="B2 Wrap V2" description="360° cylindrical projection — Scan V2">
-            <button className={styles.actionBtn} onClick={() => navigate('/b2-wrap-v2')}>
-              OPEN
-            </button>
-          </Row>
-          <Row label="B2 Map" description="Top-down table projection — 1920×1920">
-            <button className={styles.actionBtn} onClick={() => navigate('/b2-map')}>
-              OPEN
-            </button>
-          </Row>
-          <Row label="Scan 2" description="First-person terrain test environment">
-            <button className={styles.actionBtn} onClick={() => navigate('/scan2')}>
-              OPEN
-            </button>
-          </Row>
-        </Section>
-
         {/* Version info */}
         <div className={styles.versionInfo}>
-          <div className={styles.logoMark}>◈</div>
-          <div className={styles.versionText}>Earth Contours v1.0 MVP</div>
+          <div className={styles.logoMark}>{'\u25C8'}</div>
+          <div className={styles.versionText}>Earth Contours v2.3</div>
           <div className={styles.versionText}>Built with React + Vite + Zustand</div>
-          <div className={styles.versionText}>Map tiles © OpenTopoMap contributors</div>
+          <div className={styles.versionText}>Map tiles \u00A9 OpenTopoMap contributors</div>
         </div>
 
       </div>

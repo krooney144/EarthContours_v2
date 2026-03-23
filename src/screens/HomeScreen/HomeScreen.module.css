@@ -1,0 +1,182 @@
+/**
+ * HomeScreen — Landing page with 3 vertical screen cards
+ */
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--ec-bg-primary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.header {
+  flex-shrink: 0;
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.brandIcon {
+  font-size: 20px;
+  color: var(--ec-glow);
+}
+
+.brandName {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+}
+
+.settingsBtn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--ec-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.settingsBtn:hover {
+  background: var(--ec-glow-soft);
+  color: var(--ec-glow);
+  border-color: var(--ec-border-active);
+}
+
+/* ── Cards Area ───────────────────────────────────────────────────────────── */
+
+.cardsArea {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+}
+
+/* ── Screen Card ──────────────────────────────────────────────────────────── */
+
+.card {
+  flex: 1;
+  min-height: 100px;
+  border: 1px solid var(--ec-border);
+  border-radius: var(--radius-lg);
+  background: var(--ec-bg-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  transition: background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.card:hover {
+  background: var(--ec-bg-elevated);
+  border-color: var(--ec-border-active);
+  box-shadow: var(--shadow-glow);
+}
+
+.card:active {
+  background: var(--ec-glow-soft);
+}
+
+.cardIcon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 22px;
+}
+
+.cardIconMap {
+  background: rgba(47, 109, 135, 0.2);
+  color: var(--ec-reef);
+  border: 1px solid rgba(47, 109, 135, 0.35);
+}
+
+.cardIconExplore {
+  background: rgba(132, 209, 219, 0.12);
+  color: var(--ec-glow);
+  border: 1px solid rgba(132, 209, 219, 0.25);
+}
+
+.cardIconScan {
+  background: rgba(167, 221, 229, 0.12);
+  color: var(--ec-foam);
+  border: 1px solid rgba(167, 221, 229, 0.25);
+}
+
+.cardContent {
+  flex: 1;
+  min-width: 0;
+}
+
+.cardTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--ec-white);
+  text-transform: uppercase;
+}
+
+.cardDescription {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--ec-text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+.cardArrow {
+  flex-shrink: 0;
+  color: var(--ec-text-muted);
+  font-size: 18px;
+  transition: transform var(--transition-fast), color var(--transition-fast);
+}
+
+.card:hover .cardArrow {
+  transform: translateX(3px);
+  color: var(--ec-glow);
+}
+
+/* ── Version footer ──────────────────────────────────────────────────────── */
+
+.footer {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-5) var(--space-3);
+  text-align: center;
+}
+
+.footerText {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}

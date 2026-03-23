@@ -113,7 +113,54 @@
   --z-transition: 60;  /* Screen transition overlay */
 }
 
-/* Dark theme adjustments (future: add light theme override here) */
-@media (prefers-color-scheme: dark) {
-  /* Already dark — no changes needed */
+/* ── Light Theme ── */
+/* Optimized for outdoor sunlight readability on mobile.
+   Applied when user toggles light mode in Settings. */
+.theme-light {
+  /* Backgrounds — light warm grey */
+  --ec-bg-primary:    #f0f2f5;
+  --ec-bg-secondary:  #e4e7ec;
+  --ec-bg-elevated:   #ffffff;
+  --ec-bg-overlay:    rgba(240, 242, 245, 0.92);
+
+  /* Text — high contrast for sunlight */
+  --ec-text-primary:   #1a2332;
+  --ec-text-secondary: #3a5068;
+  --ec-text-muted:     #6b8299;
+  --ec-text-accent:    #1a6b7a;
+
+  /* Core palette adjustments */
+  --ec-white:   #1a2332;
+  --ec-void:    #f5f7fa;
+
+  /* UI elements */
+  --ec-border:         rgba(26, 35, 50, 0.15);
+  --ec-border-active:  rgba(26, 107, 122, 0.45);
+  --ec-glow-soft:      rgba(26, 107, 122, 0.08);
+  --ec-glow-medium:    rgba(26, 107, 122, 0.18);
+  --ec-glow-strong:    rgba(26, 107, 122, 0.35);
+
+  /* Accent colors stay similar but saturated for daylight */
+  --ec-glow:    #1a7a8a;
+  --ec-foam:    #0d5a66;
+  --ec-reef:    #2a8899;
+  --ec-mid:     #3a94a5;
+  --ec-ocean:   #2a7a8a;
+
+  /* Nav bar */
+  --ec-nav-bg:     rgba(228, 231, 236, 0.95);
+
+  /* Compass / HUD */
+  --ec-compass-bg: rgba(240, 242, 245, 0.92);
+  --ec-hud-bg:     rgba(228, 231, 236, 0.92);
+
+  /* Shadows — subtle for light mode */
+  --shadow-glow:        0 0 8px rgba(26, 107, 122, 0.15);
+  --shadow-glow-strong: 0 0 16px rgba(26, 107, 122, 0.25);
+  --shadow-card:        0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* Dark theme class (explicit, same as default :root) */
+.theme-dark {
+  /* All values inherited from :root — no overrides needed */
 }
