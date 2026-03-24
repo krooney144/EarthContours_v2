@@ -226,9 +226,6 @@ function buildSilhouetteLayers(
       // Skip ocean candidates — no terrain fill for ocean
       if (isOcean) continue
 
-      // Skip very low elevation candidates — likely coast/sea artifacts
-      if (rawElev < 5) continue
-
       // Visible only if this candidate peeks above all nearer terrain
       if (peakAngle > maxAngle) {
         // Base angle: either the valley floor angle or the current running max
@@ -394,18 +391,22 @@ function matchSilhouetteStrands(
 // ─── Silhouette Renderer ─────────────────────────────────────────────────────
 
 /**
- * Render silhouette strands: layer-major fill + curvature-based stroke.
+ * Render silhouette fills and strokes.
  *
- * Key fixes (v2):
- *  - Break fill polygons at azimuth gaps to prevent rectangular artifacts
- *  - Clamp base angles to prevent fills extending below screen
- *  - Only draw strands with enough segments for meaningful visual contribution
- *  - Reduce stroke density for far strands
+ * Strategy: draw opaque terrain fills that actually block the background,
+ * then draw silhouette edge strokes on top.  Fills use painter's order
+ * (far layers first, near layers paint over them).
  *
- * Strands arrive sorted far→near — painter's order handles occlusion.
+ * Instead of strand-based polygon fills (which create rectangular artifacts
+ * at azimuth gaps), we use a COLUMN-MAJOR approach: for each screen column,
+ * look up the silhouette layers at that bearing and draw vertical fills.
+ * This is simpler and avoids the cross-azimuth matching problem entirely.
+ *
+ * Strokes still use strand matching for continuous lines across azimuths.
  */
 function renderSilhouettes(
   ctx: CanvasRenderingContext2D,
+  silhouetteLayers: SilhouetteLayer[][],
   strands: SilhouetteStrand[],
   cam: CameraParams,
   globalElevMin: number,
@@ -417,113 +418,104 @@ function renderSilhouettes(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
   const maxDist = 400_000
+  const numAzimuths = silResolution * 360
 
-  // Minimum strand length: short strands are noise, not terrain features
-  const MIN_STRAND_SEGS = 8
+  // ── Phase 1: Column-major opaque fills ──────────────────────────────────
+  // For each screen column, look up the silhouette layers at that bearing.
+  // Draw each layer as a filled rectangle from peakAngle-Y to baseAngle-Y.
+  // Painter's order: draw farthest layers first (they get painted over by nearer ones).
+  // The NEAREST layer's fill extends to screen bottom (it's the ground you're on).
 
-  // Maximum azimuth gap (in azimuth indices) before breaking a polygon.
-  // A gap > 2 indices means the strand skipped azimuths → would draw a vertical line.
-  const MAX_AZ_GAP_FOR_POLY = 3
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+    const normBearing = ((bearingDeg % 360) + 360) % 360
+    const fracIdx = normBearing * silResolution
+    const ai = Math.round(fracIdx) % numAzimuths
+
+    const layers = silhouetteLayers[ai]
+    if (!layers || layers.length === 0) continue
+
+    // Draw layers: layers are sorted near→far in the array,
+    // so iterate BACKWARDS (far→near) for painter's order
+    for (let li = layers.length - 1; li >= 0; li--) {
+      const layer = layers[li]
+      if (layer.isOcean) continue
+
+      const peakPos = project(bearingDeg, layer.peakAngle, cam)
+      const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
+
+      // Base Y: for the nearest layer (li=0), extend to screen bottom.
+      // For other layers, use the baseAngle.
+      let baseY: number
+      if (li === 0) {
+        baseY = H  // Nearest terrain fills to bottom
+      } else {
+        const clampedBase = Math.max(layer.baseAngle, -0.35)  // ~-20°
+        const basePos = project(bearingDeg, clampedBase, cam)
+        baseY = Math.max(0, Math.min(H, Math.round(basePos.y)))
+      }
+
+      // Skip if no visible height
+      if (baseY <= peakY) continue
+
+      // Opaque fill color: distance-based depth cue
+      const distT = Math.min(1, layer.dist / maxDist)
+      if (darkMode) {
+        // Ocean-depth palette: nearer = darker, farther = slightly lighter
+        const r = Math.round(3 + distT * 10)
+        const g = Math.round(14 + distT * 40)
+        const b = Math.round(22 + distT * 55)
+        ctx.fillStyle = `rgb(${r},${g},${b})`
+      } else {
+        const base = Math.round(180 + distT * 60)
+        ctx.fillStyle = `rgb(${base},${Math.round(base * 1.02)},${Math.round(base * 0.96)})`
+      }
+
+      ctx.fillRect(col, peakY, 1, baseY - peakY)
+    }
+  }
+
+  // ── Phase 2: Silhouette edge strokes (strand-based for smooth lines) ────
+  // Only draw strokes for strands with enough segments.
+  // Use curvature-based line tapering for natural appearance.
+
+  const MIN_STRAND_SEGS = 12  // Only draw longer, more meaningful strands
+  const MAX_AZ_GAP_FOR_STROKE = 3
 
   for (const strand of strands) {
     const segs = strand.segments
     if (segs.length < MIN_STRAND_SEGS) continue
 
-    const distT = Math.min(1, strand.avgDist / maxDist)  // 0=near, 1=far
+    const distT = Math.min(1, strand.avgDist / maxDist)
 
-    // ── Fill: break into sub-runs at azimuth gaps to prevent rectangles ──
-    // Split segments into contiguous runs (no azimuth gaps)
+    const angles: number[] = segs.map(s => s.layer.peakAngle)
+    const baseOpacity = 0.20 + (1 - distT) * 0.60    // near: 0.80, far: 0.20
+    const maxWidth    = 0.6 + (1 - distT) * 2.4       // near: 3.0px, far: 0.6px
+    const minWidth    = 0.2 + (1 - distT) * 0.3       // near: 0.5px, far: 0.2px
+    const CURVATURE_THRESHOLD = 0.005
+
+    ctx.lineCap  = 'round'
+    ctx.lineJoin = 'round'
+
+    // Break into contiguous runs
     const runs: Array<{ start: number; end: number }> = []
     let runStart = 0
     for (let i = 1; i < segs.length; i++) {
       const prevAi = segs[i - 1].ai
       const currAi = segs[i].ai
-      // Handle wrap-around (azimuth 2879 → 0)
       const gap = currAi >= prevAi
         ? currAi - prevAi
-        : (silResolution * 360 - prevAi + currAi)
-      if (gap > MAX_AZ_GAP_FOR_POLY) {
-        if (i - runStart >= 4) {  // Only draw runs with ≥4 segments
-          runs.push({ start: runStart, end: i })
-        }
+        : (numAzimuths - prevAi + currAi)
+      if (gap > MAX_AZ_GAP_FOR_STROKE) {
+        if (i - runStart >= 6) runs.push({ start: runStart, end: i })
         runStart = i
       }
     }
-    if (segs.length - runStart >= 4) {
-      runs.push({ start: runStart, end: segs.length })
-    }
+    if (segs.length - runStart >= 6) runs.push({ start: runStart, end: segs.length })
 
-    // Fill color
-    const fillOpacity = darkMode
-      ? 0.06 + (1 - distT) * 0.25   // near: 0.31, far: 0.06
-      : 0.04 + (1 - distT) * 0.15
-    let fillColor: string
-    if (darkMode) {
-      const r = Math.round(2 + distT * 14)
-      const g = Math.round(10 + distT * 50)
-      const b = Math.round(18 + distT * 70)
-      fillColor = `rgba(${r},${g},${b},${fillOpacity})`
-    } else {
-      const gray = Math.round(225 + distT * 30)
-      fillColor = `rgba(${gray},${gray},${Math.round(gray * 0.95)},${fillOpacity})`
-    }
-
-    // Draw each contiguous run as a separate fill polygon
     for (const run of runs) {
-      ctx.beginPath()
-      let hasPoints = false
-
-      // Forward pass: peak edge
-      for (let i = run.start; i < run.end; i++) {
-        const { ai, layer } = segs[i]
-        const bearing = ai / silResolution
-        const pos = project(bearing, layer.peakAngle, cam)
-        const clampedY = Math.max(0, Math.min(H, pos.y))
-        if (!hasPoints) {
-          ctx.moveTo(pos.x, clampedY)
-          hasPoints = true
-        } else {
-          ctx.lineTo(pos.x, clampedY)
-        }
-      }
-
-      if (!hasPoints) continue
-
-      // Reverse pass: base edge — clamp to screen bottom, not beyond
-      for (let i = run.end - 1; i >= run.start; i--) {
-        const { ai, layer } = segs[i]
-        const bearing = ai / silResolution
-        // Clamp base angle: don't go more than 15° below horizon (prevents fills extending to infinity)
-        const clampedBaseAngle = Math.max(layer.baseAngle, -0.26)  // ~-15° in radians
-        const basePos = project(bearing, clampedBaseAngle, cam)
-        const clampedBaseY = Math.max(0, Math.min(H, basePos.y))
-        ctx.lineTo(basePos.x, clampedBaseY)
-      }
-
-      ctx.closePath()
-      ctx.fillStyle = fillColor
-      ctx.fill()
-    }
-
-    // ── Stroke: curvature-based line taper along the peak edge ──
-    // Only stroke strands that are visually significant
-    if (segs.length < MIN_STRAND_SEGS) continue
-
-    const angles: number[] = segs.map(s => s.layer.peakAngle)
-    const baseOpacity = 0.15 + (1 - distT) * 0.65     // near: 0.80, far: 0.15
-    const maxWidth    = 0.8 + (1 - distT) * 3.0        // near: 3.8px, far: 0.8px
-    const minWidth    = 0.2 + (1 - distT) * 0.4        // near: 0.6px, far: 0.2px
-    const CURVATURE_THRESHOLD = 0.006
-
-    ctx.lineCap  = 'round'
-    ctx.lineJoin = 'round'
-
-    // Draw stroke per contiguous run (same gap-breaking as fill)
-    for (const run of runs) {
-      if (run.end - run.start < 4) continue
-
       let pathStarted = false
-      const STROKE_SEG_SIZE = 5
+      const STROKE_SEG_SIZE = 6
 
       for (let i = run.start; i < run.end; i++) {
         const { ai, layer } = segs[i]
@@ -539,10 +531,8 @@ function renderSilhouettes(
         if (!pathStarted || relIdx % STROKE_SEG_SIZE === 0) {
           if (pathStarted) ctx.stroke()
 
-          // Compute curvature
           let curvature = 0
-          const li = i - run.start
-          if (li > 0 && li < angles.length - 1 && i > 0 && i < segs.length - 1) {
+          if (i > 0 && i < segs.length - 1) {
             curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
           }
           const tCurvature = Math.min(1, curvature / CURVATURE_THRESHOLD)
@@ -564,7 +554,6 @@ function renderSilhouettes(
       }
       if (pathStarted) ctx.stroke()
     }
-
     ctx.globalAlpha = 1.0
   }
 }
@@ -1864,22 +1853,10 @@ function drawScanCanvas(
     ctx.restore()
   }
 
-  // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
-  // Each band draws: fill → contours → stroke (new rendering order).
-  // Contours are integrated into renderTerrain so they sit naturally in the
-  // visual stack — on top of their own band's fill, below next nearer band's fill.
-  if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
-      contourStrands, showContourLines, darkMode)
-  }
-
-  // ── 2b. Silhouette layers — depth-peeled terrain profiles ──────────────────
-  // Draws every visible mountain outline with curvature-tapered strokes,
-  // layered far→near with proper painter's order.  Renders ON TOP of the
-  // existing band fills — silhouettes add detail that bands can't represent
-  // (multiple mountains per azimuth, proper occlusion at varying AGL).
+  // ── 2a. Silhouette fills — opaque column-major terrain occlusion ─────────
+  // Draws BEFORE band fills. Column-major opaque fills block background
+  // terrain correctly. Silhouette strokes go on top for visual edge definition.
   if (silhouetteLayers && skylineData?.silhouette) {
-    // Compute global elevation range for color mapping
     let silElevMin = Infinity, silElevMax = -Infinity
     for (const azLayers of silhouetteLayers) {
       for (const layer of azLayers) {
@@ -1895,11 +1872,17 @@ function drawScanCanvas(
       cam,
     )
 
-    if (strands.length > 0) {
-      console.log(`[SILHOUETTE-RENDER] ${strands.length} strands, elevRange: ${silElevMin.toFixed(0)}-${silElevMax.toFixed(0)}m`)
-      renderSilhouettes(ctx, strands, cam, silElevMin, silElevMax,
-        skylineData.silhouette.resolution, darkMode)
-    }
+    renderSilhouettes(ctx, silhouetteLayers, strands, cam, silElevMin, silElevMax,
+      skylineData.silhouette.resolution, darkMode)
+  }
+
+  // ── 2b. Terrain — depth-layered rendering (far→near painter's order) ─────────
+  // Each band draws: fill → contours → stroke (new rendering order).
+  // Contours are integrated into renderTerrain so they sit naturally in the
+  // visual stack — on top of their own band's fill, below next nearer band's fill.
+  if (skylineData) {
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
+      contourStrands, showContourLines, darkMode)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
