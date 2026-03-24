@@ -211,6 +211,9 @@ function buildContourStrands(
     const data = band.crossingData
     const interval = CONTOUR_INTERVALS_M[bi] || 152.4
 
+    // DEBUG: Log crossing data availability per band
+    console.log(`[CONTOUR-DEBUG] Band ${bi} (${bandAz}az, res=${bandRes}): crossingData=${data?.length ?? 0} floats, crossings≈${data ? Math.floor(data.length / 5) : 0}, offsets=${offsets?.length ?? 0}`)
+
     if (!data || data.length === 0) continue
 
     const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
@@ -328,6 +331,11 @@ function buildContourStrands(
         }
       }
     }
+
+    // DEBUG: Count strands for this band
+    const bandStrandCount = completed.filter(s => s.bandIdx === bi).length
+    const bandPointCount = completed.filter(s => s.bandIdx === bi).reduce((sum, s) => sum + s.points.length, 0)
+    console.log(`[CONTOUR-DEBUG] Band ${bi}: ${bandStrandCount} strands, ${bandPointCount} total points`)
   }
 
   return completed
