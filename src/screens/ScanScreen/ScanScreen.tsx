@@ -1576,7 +1576,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     applyARDrag, setHeightFromSlider, applyFovScale, setFov,
   } = useCameraStore()
-  const { activeLat, activeLng }               = useLocationStore()
+  const { activeLat, activeLng, mode, gpsLat, requestGPS, switchToGPS } = useLocationStore()
   const { peaks } = useTerrainStore()
   const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, darkMode } = useSettingsStore()
 
@@ -1850,6 +1850,22 @@ const ScanScreen: React.FC = () => {
     setIsGyroActive(true)
   }, [isGyroActive])
 
+  // ── GPS location button handler ──────────────────────────────────────────
+  // Requests GPS permission if needed, then switches to GPS mode which
+  // updates activeLat/activeLng across all screens (map, scan, explore).
+  const handleGPSClick = useCallback(async () => {
+    if (mode === 'gps' && gpsLat !== null) {
+      // Already in GPS mode with a fix — switch back to refresh position
+      switchToGPS()
+      log.info('GPS location refreshed')
+      return
+    }
+    // Request GPS (asks for permission if needed), then switch to GPS mode
+    await requestGPS()
+    switchToGPS()
+    log.info('Switched to GPS location')
+  }, [mode, gpsLat, requestGPS, switchToGPS])
+
   // ── Second pass: trigger peak refinement when skyline + peaks are ready ───
   // Sends visible peak bearings/distances to the worker for dense ray-march
   // with higher-zoom tiles.  Stale-while-revalidate: old arcs stay until new ones arrive.
@@ -2092,7 +2108,7 @@ const ScanScreen: React.FC = () => {
   // ── Zoom slider (FOV) ──────────────────────────────────────────────────────
   // Drag up = zoom in (smaller FOV), drag down = zoom out (larger FOV)
 
-  const MIN_FOV = 15
+  const MIN_FOV = 12
   const MAX_FOV = 100
 
   const handleZoomPointerDown = useCallback((e: React.PointerEvent) => {
@@ -2413,29 +2429,50 @@ const ScanScreen: React.FC = () => {
           ← Drag to look around — Pinch to zoom →
         </div>
 
-        {/* Gyroscope toggle button — activates device orientation tracking.
-            When active (highlighted), heading + pitch follow the phone's sensors.
-            Dragging automatically disables gyro; tap button to re-enable.
-            TODO: Show compass indicator when gyro is active.
-            TODO: Add smooth transition when switching between drag and gyro input.
-            TODO: Eventually integrate with GPS altitude for automatic AGL. */}
-        <button
-          className={`${styles.gyroBtn} ${isGyroActive ? styles.gyroBtnActive : ''}`}
-          onClick={toggleGyro}
-          aria-label={isGyroActive ? 'Disable gyroscope control' : 'Enable gyroscope control'}
-          title={isGyroActive ? 'Gyro ON — drag to disable' : 'Enable Gyroscope'}
-        >
-          {/* Compass/gyro icon */}
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <circle cx="10" cy="10" r="7" />
-            <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
-            <line x1="10" y1="1" x2="10" y2="5" />
-            <line x1="10" y1="15" x2="10" y2="19" />
-            <line x1="1" y1="10" x2="5" y2="10" />
-            <line x1="15" y1="10" x2="19" y2="10" />
-          </svg>
-          {isGyroActive && <span className={styles.gyroBtnLabel}>GYRO</span>}
-        </button>
+        {/* ── Bottom-right action buttons (gyro + GPS) ─────────────────── */}
+        <div className={styles.actionButtons}>
+          {/* Gyroscope toggle — activates device orientation tracking */}
+          <button
+            className={`${styles.gyroBtn} ${isGyroActive ? styles.gyroBtnActive : ''}`}
+            onClick={toggleGyro}
+            aria-label={isGyroActive ? 'Disable gyroscope control' : 'Enable gyroscope control'}
+            title={isGyroActive ? 'Gyro ON — drag to disable' : 'Enable Gyroscope'}
+          >
+            {/* 3D gyroscope icon — three nested gimbal rings */}
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+              {/* Outer ring (yaw) */}
+              <ellipse cx="12" cy="12" rx="10" ry="10" opacity="0.5" />
+              {/* Middle ring (pitch) — tilted */}
+              <ellipse cx="12" cy="12" rx="10" ry="5" opacity="0.7" />
+              {/* Inner ring (roll) — perpendicular */}
+              <ellipse cx="12" cy="12" rx="3.5" ry="10" opacity="0.7" />
+              {/* Center sphere */}
+              <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" opacity="0.9" />
+            </svg>
+            <span className={styles.gyroBtnLabel}>{isGyroActive ? 'GYRO' : 'GYRO'}</span>
+          </button>
+
+          {/* Current location (GPS) button */}
+          <button
+            className={`${styles.gpsBtn} ${mode === 'gps' && gpsLat !== null ? styles.gpsBtnActive : ''}`}
+            onClick={handleGPSClick}
+            aria-label="Use current GPS location"
+            title={mode === 'gps' && gpsLat !== null ? 'GPS active' : 'Go to my location'}
+          >
+            {/* GPS/location pin icon */}
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+              {/* Crosshair circle */}
+              <circle cx="12" cy="12" r="8" />
+              <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" opacity="0.9" />
+              {/* Crosshair lines */}
+              <line x1="12" y1="1" x2="12" y2="4" />
+              <line x1="12" y1="20" x2="12" y2="23" />
+              <line x1="1" y1="12" x2="4" y2="12" />
+              <line x1="20" y1="12" x2="23" y2="12" />
+            </svg>
+            <span className={styles.gyroBtnLabel}>GPS</span>
+          </button>
+        </div>
       </div>
 
       {/* ── Height Slider ──────────────────────────────────────────────────── */}
@@ -2547,8 +2584,8 @@ const ZoomSlider: React.FC<{
   onPointerMove: (e: React.PointerEvent) => void
   onPointerUp:   (e: React.PointerEvent) => void
 }> = ({ fov, sliderRef, onPointerDown, onPointerMove, onPointerUp }) => {
-  // Map FOV 15°–100° → marker position: 15° (zoomed in) = top, 100° (zoomed out) = bottom
-  const pct = ((fov - 15) / (100 - 15)) * 100
+  // Map FOV 12°–100° → marker position: 12° (zoomed in) = top, 100° (zoomed out) = bottom
+  const pct = ((fov - 12) / (100 - 12)) * 100
   // Zoom multiplier relative to default 60° FOV
   const zoomX = (60 / fov).toFixed(1)
 
@@ -2564,7 +2601,7 @@ const ZoomSlider: React.FC<{
         onPointerCancel={onPointerUp}
         role="slider"
         aria-label="Zoom level"
-        aria-valuemin={15}
+        aria-valuemin={12}
         aria-valuemax={100}
         aria-valuenow={Math.round(fov)}
       >
