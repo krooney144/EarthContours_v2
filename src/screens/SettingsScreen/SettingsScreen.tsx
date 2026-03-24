@@ -193,7 +193,7 @@ const SettingsScreen: React.FC = () => {
       <div className={styles.scrollArea} role="main">
 
         {/* ── About ── */}
-        <Section icon="\u25C8" title="About Earth Contours">
+        <Section icon="◈" title="About Earth Contours">
           <div className={styles.aboutText}>
             Earth Contours visualizes real terrain elevation data on your phone.
             Use the Map to browse topographic tiles and select locations, Explore
@@ -204,7 +204,7 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Appearance ── */}
-        <Section icon="\u25C8" title="Appearance">
+        <Section icon="◈" title="Appearance">
           <Row label="Dark Mode" description="Switch between dark and light theme for sunlight readability">
             <Toggle
               id="toggle-darkmode"
@@ -236,7 +236,7 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Units & Measurements ── */}
-        <Section icon="\u22A1" title="Units & Measurements">
+        <Section icon="⊡" title="Units & Measurements">
           <Row label="Unit System" description="Feet and miles, or meters and km">
             <Segmented<UnitSystem>
               options={[
@@ -263,7 +263,7 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Map & Terrain ── */}
-        <Section icon="\u25ED" title="Map & Terrain">
+        <Section icon="◭" title="Map & Terrain">
           <Row label="Peak Labels" description="Show mountain name labels on terrain">
             <Toggle id="toggle-peaks" label="Toggle peak labels" checked={settings.showPeakLabels} onChange={settings.togglePeakLabels} />
           </Row>
@@ -293,9 +293,9 @@ const SettingsScreen: React.FC = () => {
                   className={`${styles.exagBtn} ${settings.verticalExaggeration === v ? styles.active : ''}`}
                   onClick={() => settings.setVerticalExaggeration(v)}
                   aria-pressed={settings.verticalExaggeration === v}
-                  aria-label={`${v}\u00D7 vertical exaggeration`}
+                  aria-label={`${v}× vertical exaggeration`}
                 >
-                  {v}\u00D7
+                  {v}×
                 </button>
               ))}
             </div>
@@ -303,12 +303,12 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Location & Sensors ── */}
-        <Section icon="\u25CE" title="Location & Sensors">
+        <Section icon="◎" title="Location & Sensors">
           <Row
             label="GPS Permission"
             description={
               gpsPermission === 'denied'
-                ? 'Location was denied \u2014 tap HOW TO ENABLE for instructions'
+                ? 'Location was denied — tap HOW TO ENABLE for instructions'
                 : 'Required for real-time position tracking'
             }
           >
@@ -318,9 +318,9 @@ const SettingsScreen: React.FC = () => {
                 gpsPermission === 'denied'      ? styles.statusDenied  :
                                                   styles.statusUnknown
               }`}>
-                {gpsPermission === 'granted'     ? '\u25CF GRANTED' :
-                 gpsPermission === 'denied'      ? '\u2715 DENIED'  :
-                 gpsPermission === 'unavailable' ? '\u2014 N/A'     :
+                {gpsPermission === 'granted'     ? '● GRANTED' :
+                 gpsPermission === 'denied'      ? '✕ DENIED'  :
+                 gpsPermission === 'unavailable' ? '— N/A'     :
                                                    '? UNKNOWN' }
               </span>
               {gpsPermission === 'denied' ? (
@@ -373,7 +373,7 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Performance & Battery ── */}
-        <Section icon="\u2B21" title="Performance & Battery">
+        <Section icon="⬡" title="Performance & Battery">
           <Row label="Battery Saver" description="Reduces rendering quality to save power">
             <Segmented<BatteryMode>
               options={[
@@ -401,7 +401,7 @@ const SettingsScreen: React.FC = () => {
         </Section>
 
         {/* ── Feedback & Support ── */}
-        <Section icon="\u2709" title="Feedback & Support">
+        <Section icon="✉" title="Feedback & Support">
           <div className={styles.feedbackArea}>
             <textarea
               className={styles.textarea}
@@ -420,7 +420,7 @@ const SettingsScreen: React.FC = () => {
                 aria-label="Submit feedback as GitHub issue"
               >
                 {feedbackStatus === 'sending' ? 'SENDING...' :
-                 feedbackStatus === 'sent'    ? '\u2713 SENT' :
+                 feedbackStatus === 'sent'    ? '✓ SENT' :
                  feedbackStatus === 'error'   ? 'RETRY' :
                                                 'SUBMIT'}
               </button>
@@ -466,10 +466,10 @@ const SettingsScreen: React.FC = () => {
 
         {/* Version info */}
         <div className={styles.versionInfo}>
-          <div className={styles.logoMark}>{'\u25C8'}</div>
+          <div className={styles.logoMark}>◈</div>
           <div className={styles.versionText}>Earth Contours v2.3</div>
           <div className={styles.versionText}>Built with React + Vite + Zustand</div>
-          <div className={styles.versionText}>Map tiles \u00A9 OpenTopoMap contributors</div>
+          <div className={styles.versionText}>Map tiles © OpenTopoMap contributors</div>
         </div>
 
       </div>

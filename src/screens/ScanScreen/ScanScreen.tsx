@@ -1,141 +1,4 @@
-/**
- * EarthContours — SCAN Screen (Placeholder)
- *
- * First-person panoramic skyline view with 360° ridgeline rendering.
- * This is a placeholder pending the scan rework in the next phase.
- * Includes current location button and AGL height slider.
- */
-
-import React, { useCallback, useState, useRef } from 'react'
-import { useCameraStore, useLocationStore, useSettingsStore } from '../../store'
-import { createLogger } from '../../core/logger'
-import { metersToFeet, feetToMeters } from '../../core/utils'
-import { MIN_HEIGHT_M, MAX_HEIGHT_M } from '../../core/constants'
-import styles from './ScanScreen.module.css'
-
-const log = createLogger('SCREEN:SCAN')
-
-const ScanScreen: React.FC = () => {
-  const { height_m, setHeightFromSlider, getHeightFt } = useCameraStore()
-  const { gpsPermission, gpsLat, requestGPS, switchToGPS, activeLat, activeLng } = useLocationStore()
-  const { units } = useSettingsStore()
-
-  const [gpsPrompt, setGpsPrompt] = useState<string | null>(null)
-
-  // ── AGL Slider (debounced) ───────────────────────────────────────────────
-
-  const sliderDebounceRef = useRef<number | null>(null)
-  const SLIDER_STEP_FT = 10  // Minimum step size in feet
-
-  const handleSliderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const rawFt = Number(e.target.value)
-    // Snap to step
-    const snappedFt = Math.round(rawFt / SLIDER_STEP_FT) * SLIDER_STEP_FT
-
-    // Debounce the actual store update
-    if (sliderDebounceRef.current !== null) {
-      cancelAnimationFrame(sliderDebounceRef.current)
-    }
-    sliderDebounceRef.current = requestAnimationFrame(() => {
-      setHeightFromSlider(snappedFt)
-      sliderDebounceRef.current = null
-    })
-  }, [setHeightFromSlider])
-
-  // ── Current Location ───────────────────────────────────────────────────────
-
-  const handleMyLocation = useCallback(async () => {
-    if (gpsPermission === 'denied') {
-      setGpsPrompt('Location access denied. Enable in device settings.')
-      setTimeout(() => setGpsPrompt(null), 4000)
-      return
-    }
-    if (gpsPermission === 'unavailable') {
-      setGpsPrompt('GPS not available on this device.')
-      setTimeout(() => setGpsPrompt(null), 4000)
-      return
-    }
-    if (gpsPermission === 'unknown') {
-      setGpsPrompt('Requesting location access...')
-      await requestGPS()
-      setTimeout(() => setGpsPrompt(null), 3000)
-      return
-    }
-    // Granted — switch to GPS mode
-    switchToGPS()
-    log.info('Scan: switched to GPS location')
-  }, [gpsPermission, requestGPS, switchToGPS])
-
-  const heightFt = getHeightFt()
-  const minFt = Math.round(metersToFeet(MIN_HEIGHT_M))
-  const maxFt = Math.round(metersToFeet(MAX_HEIGHT_M))
-
-  return (
-    <div className={styles.screen}>
-      {/* Header */}
-      <div className={styles.header}>
-        <div className={styles.headerTitle}>SCAN</div>
-        <div className={styles.headerSubtitle}>
-          {activeLat.toFixed(4)}°, {activeLng.toFixed(4)}°
-        </div>
-      </div>
-
-      {/* Placeholder content */}
-      <div className={styles.placeholder}>
-        <div className={styles.placeholderIcon}>◉</div>
-        <div className={styles.placeholderTitle}>Scan View</div>
-        <div className={styles.placeholderText}>
-          360° panoramic skyline with ridgeline rendering.
-          Full implementation coming in next phase.
-        </div>
-      </div>
-
-      {/* AGL Height Slider (vertical) */}
-      <div className={styles.aglSlider}>
-        <div className={styles.aglLabel}>AGL</div>
-        <input
-          type="range"
-          className={styles.aglRange}
-          min={minFt}
-          max={maxFt}
-          step={SLIDER_STEP_FT}
-          value={heightFt}
-          onChange={handleSliderChange}
-          aria-label="Eye height above ground"
-        />
-        <div className={styles.aglValue}>
-          {units === 'imperial' ? `${heightFt} ft` : `${Math.round(height_m)} m`}
-        </div>
-      </div>
-
-      {/* Current Location Button */}
-      <button
-        className={`${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
-        onClick={handleMyLocation}
-        aria-label="Center on my GPS location"
-        title="My Location"
-      >
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <circle cx="9" cy="9" r="4" />
-          <circle cx="9" cy="9" r="1.5" fill="currentColor" />
-          <line x1="9" y1="1" x2="9" y2="4" />
-          <line x1="9" y1="14" x2="9" y2="17" />
-          <line x1="1" y1="9" x2="4" y2="9" />
-          <line x1="14" y1="9" x2="17" y2="9" />
-        </svg>
-      </button>
-
-      {/* GPS Prompt */}
-      {gpsPrompt && (
-        <div className={styles.gpsPrompt} role="status">
-          {gpsPrompt}
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default ScanScreen
+// Placeholder removed — full SCAN implementation below.
 
 /**
  * EarthContours — SCAN Screen  (v2.2)
@@ -887,12 +750,13 @@ const BAND_LINE_WIDTHS: [number, number][] = [
   [2, 1],    // far:        2px at 150km → 1px at 400km
 ]
 
-function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
+function bandStyleForIndex(bandIndex: number, bandCount: number, darkMode: boolean = true): BandStyle {
   // t = 0 (far) → 1 (near)
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
 
-  // Fill: void (#000810) → deep (#124B6B), on the ocean-depth palette
-  const FILL_COLORS: [number, number, number][] = [
+  // Dark mode fill: void (#000810) → deep (#124B6B), on the ocean-depth palette.
+  // Light mode fill: warm earth tones — light sandy beige (far) → deeper olive (near).
+  const FILL_COLORS_DARK: [number, number, number][] = [
     [2,  12, 20],   // ultra-near — near void
     [5,  24, 38],   // near — 20% toward deep
     [8,  36, 56],   // mid-near — 40% toward deep
@@ -900,24 +764,151 @@ function bandStyleForIndex(bandIndex: number, bandCount: number): BandStyle {
     [14, 62, 90],   // mid-far — 80% toward deep
     [18, 75, 107],  // far — exactly ec-deep
   ]
+  const FILL_COLORS_LIGHT: [number, number, number][] = [
+    [85, 100, 80],   // ultra-near — deep olive green
+    [110, 125, 100],  // near
+    [140, 150, 125],  // mid-near
+    [165, 175, 150],  // mid
+    [190, 195, 175],  // mid-far
+    [210, 215, 195],  // far — pale sage
+  ]
+  const FILL_COLORS = darkMode ? FILL_COLORS_DARK : FILL_COLORS_LIGHT
   const bandIdx = bandCount <= 1 ? 0 : Math.round((1 - t) * (FILL_COLORS.length - 1))
   const [fillR, fillG, fillB] = FILL_COLORS[Math.min(bandIdx, FILL_COLORS.length - 1)]
   const fillColor = `rgb(${fillR},${fillG},${fillB})`
 
-  const strokeColor = `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`
+  const strokeColor = darkMode
+    ? `rgba(132, 209, 219, ${(0.15 + t * 0.65).toFixed(2)})`
+    : `rgba(40, 60, 50, ${(0.20 + t * 0.55).toFixed(2)})`
 
   const widths = BAND_LINE_WIDTHS[bandIndex] || [1 + t * 4, 1 + t * 4]
 
   return { fillColor, strokeColor, lineWidthNear: widths[0], lineWidthFar: widths[1] }
 }
 
+// ─── Per-Band Contour Renderer ───────────────────────────────────────────────
+//
+// Renders contour strands for a SINGLE band. Called between fill and stroke
+// in the per-band painter's order loop. No cross-band occlusion needed because
+// the next nearer band's fill will paint over any contours that should be hidden.
+//
+// Uses LOGARITHMIC distance scaling for line width:
+//   tDist = log10(1 + dist_km) / log10(401)   // 0 at 0km, 1 at 400km
+//   width = 0.5 + 4.5 * (1 - tDist)           // 5px near, 0.5px far
+//
+// The log scale distributes width variation evenly across the full range,
+// unlike the old power curve (0.2 exponent) which compressed 90% of variation
+// into the first 10km and was essentially flat from 10-400km.
+
+/** Per-band opacity for contour lines (near=vivid, far=faint).
+ *  Index matches DEPTH_BANDS: [ultra-near, near, mid-near, mid, mid-far, far]. */
+const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
+
+function renderBandContours(
+  ctx: CanvasRenderingContext2D,
+  strands: PrebuiltContourStrand[],
+  cam: CameraParams,
+  globalElevMin: number,
+  globalElevMax: number,
+  darkMode: boolean = true,
+): void {
+  const { W, H } = cam
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1
+
+  // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
+  // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
+  const LOG_DENOM = Math.log10(401)
+
+  // Width change threshold: flush path when width differs by >20%
+  const WIDTH_FLUSH_RATIO = 0.2
+
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  for (const strand of strands) {
+    if (strand.points.length < 2) continue
+
+    const bi = strand.bandIdx
+    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
+
+    // Elevation-based color through the palette
+    const tElev = hasElevRange
+      ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
+      : 0.5
+    const baseColor = elevToRidgeColor(tElev)
+    const rgbMatch = baseColor.match(/\d+/g)
+    if (!rgbMatch) continue
+
+    // In light mode, darken contour lines for visibility on light backgrounds
+    if (darkMode) {
+      ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
+    } else {
+      // Darken the RGB values for light mode visibility
+      const dr = Math.max(0, Math.round(parseInt(rgbMatch[0]) * 0.5))
+      const dg = Math.max(0, Math.round(parseInt(rgbMatch[1]) * 0.5))
+      const db = Math.max(0, Math.round(parseInt(rgbMatch[2]) * 0.5))
+      ctx.strokeStyle = `rgba(${dr},${dg},${db},${opacity + 0.15})`
+    }
+
+    // Draw as continuous path, flushing only on significant width change
+    let pathStarted = false
+    let currentWidth = 0
+
+    for (let i = 0; i < strand.points.length; i++) {
+      const pt = strand.points[i]
+
+      const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
+      const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
+
+      if (!onScreen) {
+        if (pathStarted) { ctx.stroke(); pathStarted = false }
+        continue
+      }
+
+      // Logarithmic width: distributes variation evenly across 0–400km
+      // instead of compressing 90% into the first 10km (old power curve)
+      const tDist = Math.log10(1 + pt.dist / 1000) / LOG_DENOM
+      const lw = 0.5 + 4.5 * (1 - tDist)
+
+      if (!pathStarted) {
+        ctx.lineWidth = lw
+        currentWidth = lw
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        pathStarted = true
+      } else if (Math.abs(lw - currentWidth) > currentWidth * WIDTH_FLUSH_RATIO) {
+        // Width changed significantly — flush and restart from same point
+        ctx.lineTo(x, y)
+        ctx.stroke()
+        ctx.lineWidth = lw
+        currentWidth = lw
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+      } else {
+        ctx.lineTo(x, y)
+      }
+    }
+
+    if (pathStarted) ctx.stroke()
+  }
+}
+
 /**
  * Layered terrain renderer — draws depth bands in painter's order (far→near).
- * Each band gets its own fill (flat) + ridgeline stroke with:
- *   - Distance-based line width (edges match at band boundaries)
- *   - Per-azimuth color from elevation (high=reef/bright → low=abyss/dark)
- *   - All bands render all segments (no fill gaps)
- * All projection goes through project() — single camera source of truth.
+ *
+ * NEW RENDERING ORDER (per-band):
+ *   1. Band fill (solid color below ridgeline)
+ *   2. Contour lines for this band (sit ON TOP of own fill, BELOW next nearer fill)
+ *   3. Ridgeline stroke (colored line at the top edge of the band)
+ *
+ * This order means contours are naturally occluded by nearer bands' fills,
+ * eliminating the need for explicit cross-band occlusion checks. Each band's
+ * visual elements are drawn together — philosophically cleaner and the contour
+ * lines naturally meet the ridgeline at the top edge.
+ *
+ * @param contourStrands - Pre-built contour strands to render per-band (between fill and stroke)
+ * @param darkMode - Whether dark mode is active (affects colors)
  */
 function renderTerrain(
   ctx: CanvasRenderingContext2D,
@@ -926,6 +917,9 @@ function renderTerrain(
   projected: ProjectedBands | null,
   showBandLines: boolean = true,
   showFill: boolean = true,
+  contourStrands: PrebuiltContourStrand[] = [],
+  showContourLines: boolean = true,
+  darkMode: boolean = true,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -951,7 +945,7 @@ function renderTerrain(
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
   for (let bi = numBands - 1; bi >= 0; bi--) {
-    const style = bandStyleForIndex(bi, numBands)
+    const style = bandStyleForIndex(bi, numBands, darkMode)
     const bandCfg = DEPTH_BANDS[bi]
     const segSize = SEGMENT_SIZES[bi] ?? 24
 
@@ -986,6 +980,19 @@ function renderTerrain(
     if (hasVisiblePixels && showFill) {
       ctx.fillStyle = style.fillColor
       ctx.fill()
+    }
+
+    // ── Contour lines for THIS band (drawn between fill and stroke) ─────
+    // Contours sit on top of their own band's fill but below the next nearer
+    // band's fill. Painter's order handles occlusion automatically — no need
+    // for explicit cross-band angle checks. The contour naturally meets the
+    // ridgeline stroke which is drawn next.
+    if (hasVisiblePixels && showContourLines && contourStrands.length > 0) {
+      // Filter strands belonging to this band
+      const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
+      if (bandStrands.length > 0) {
+        renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax, darkMode)
+      }
     }
 
     // ── Ridgeline stroke — continuous paths with periodic color updates ──
@@ -1059,124 +1066,12 @@ function renderTerrain(
 
 // ─── Contour Line Renderer ────────────────────────────────────────────────────
 
-/**
- * Renders pre-built contour strands by projecting them to screen space.
- *
- * Depth cues:
- *   - Per-point distance-based line width: thick near (5px), thin far (0.5px)
- *     using compressed power curve: width = 0.5 + 4.5 × (1 - (d/maxDist)^0.2)
- *   - Per-band opacity (near=vivid, far=faint)
- *
- * Strands are drawn as continuous paths, flushing only when line width changes
- * by more than 20% to avoid the dotty appearance of per-segment strokes.
- */
-function renderContours(
-  ctx: CanvasRenderingContext2D,
-  strands: PrebuiltContourStrand[],
-  cam: CameraParams,
-  globalElevMin: number,
-  globalElevMax: number,
-  skyline?: SkylineData,
-  projected?: ProjectedBands | null,
-): void {
-  const { W, H } = cam
-  const elevRange = globalElevMax - globalElevMin
-  const hasElevRange = elevRange > 1
-
-  // Distance-based width: 0.5px at 400km, 5px at ~0m
-  const MAX_DIST = 400_000
-  const WIDTH_MIN = 0.5
-  const WIDTH_MAX = 5
-  const WIDTH_RANGE = WIDTH_MAX - WIDTH_MIN
-  const WIDTH_POWER = 0.2
-
-  // Per-band opacity (near=vivid, far=faint)
-  const CONTOUR_OPACITIES = [0.65, 0.55, 0.45, 0.35, 0.25, 0.15]
-
-  // Width change threshold: flush path when width differs by >20%
-  const WIDTH_FLUSH_RATIO = 0.2
-
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-
-  for (const strand of strands) {
-    if (strand.points.length < 2) continue
-
-    const bi = strand.bandIdx
-    const opacity = CONTOUR_OPACITIES[bi] ?? 0.15
-
-    const tElev = hasElevRange
-      ? Math.max(0, Math.min(1, (strand.level - globalElevMin) / elevRange))
-      : 0.5
-    const baseColor = elevToRidgeColor(tElev)
-    const rgbMatch = baseColor.match(/\d+/g)
-    if (!rgbMatch) continue
-
-    ctx.strokeStyle = `rgba(${rgbMatch[0]},${rgbMatch[1]},${rgbMatch[2]},${opacity})`
-
-    // Draw as continuous path, flushing only on significant width change or gap
-    let pathStarted = false
-    let currentWidth = 0
-
-    for (let i = 0; i < strand.points.length; i++) {
-      const pt = strand.points[i]
-
-      // ── Occlusion check: skip points hidden behind nearer bands ──
-      // For each strand point, check if any band closer than this strand's band
-      // has a ridgeline angle above this point's angle at this bearing.
-      // This works at all AGL values because projected band angles are already
-      // re-projected for the current viewer elevation.
-      if (skyline && bi > 0) {
-        let occluded = false
-        for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
-          const nearerAngle = bandAngleAt(skyline, nearerBi, pt.bearingDeg, projected ?? null)
-          if (nearerAngle > -Math.PI / 2 + 0.001 && nearerAngle >= pt.elevAngleRad) {
-            occluded = true
-            break
-          }
-        }
-        if (occluded) {
-          if (pathStarted) { ctx.stroke(); pathStarted = false }
-          continue
-        }
-      }
-
-      const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
-      const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
-
-      if (!onScreen) {
-        // Off-screen: flush and reset
-        if (pathStarted) { ctx.stroke(); pathStarted = false }
-        continue
-      }
-
-      // Compute width for this point
-      const tDist = Math.min(1, pt.dist / MAX_DIST)
-      const lw = WIDTH_MIN + WIDTH_RANGE * (1 - Math.pow(tDist, WIDTH_POWER))
-
-      if (!pathStarted) {
-        // Start new path
-        ctx.lineWidth = lw
-        currentWidth = lw
-        ctx.beginPath()
-        ctx.moveTo(x, y)
-        pathStarted = true
-      } else if (Math.abs(lw - currentWidth) > currentWidth * WIDTH_FLUSH_RATIO) {
-        // Width changed significantly — flush and start new sub-path from same point
-        ctx.lineTo(x, y)
-        ctx.stroke()
-        ctx.lineWidth = lw
-        currentWidth = lw
-        ctx.beginPath()
-        ctx.moveTo(x, y)
-      } else {
-        ctx.lineTo(x, y)
-      }
-    }
-
-    if (pathStarted) ctx.stroke()
-  }
-}
+// NOTE: Old renderContours() removed — contour rendering is now integrated into
+// renderTerrain() via renderBandContours(). This gives the correct painter's order:
+//   fill → contours → stroke (per band, far to near)
+// The explicit cross-band occlusion check was eliminated because nearer band fills
+// naturally paint over farther contours. The contour line width now uses a logarithmic
+// distance scale instead of the old 0.2-power curve (see renderBandContours).
 
 // ─── Peak Ridgeline Profiles ──────────────────────────────────────────────────
 //
@@ -1503,6 +1398,8 @@ function drawScanCanvas(
   showBandLines: boolean = true,
   showFill: boolean = true,
   showPeakLabels: boolean = true,
+  showContourLines: boolean = true,
+  darkMode: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -1522,62 +1419,70 @@ function drawScanCanvas(
   const horizonY = getHorizonY(cam)
 
   // ── 1. Sky gradient ─────────────────────────────────────────────────────────
+  // Dark mode: deep ocean-void gradient. Light mode: daylight sky gradient.
   const skyGrad = ctx.createLinearGradient(0, 0, 0, H)
-  skyGrad.addColorStop(0,    '#000810')
-  skyGrad.addColorStop(0.20, '#020c18')
-  skyGrad.addColorStop(0.50, '#051520')
-  skyGrad.addColorStop(0.78, '#071a2a')
-  skyGrad.addColorStop(0.90, '#0c2235')
-  skyGrad.addColorStop(1.0,  '#0f2c42')
+  if (darkMode) {
+    skyGrad.addColorStop(0,    '#000810')
+    skyGrad.addColorStop(0.20, '#020c18')
+    skyGrad.addColorStop(0.50, '#051520')
+    skyGrad.addColorStop(0.78, '#071a2a')
+    skyGrad.addColorStop(0.90, '#0c2235')
+    skyGrad.addColorStop(1.0,  '#0f2c42')
+  } else {
+    // Light mode: bright sky gradient (pale blue → warmer horizon)
+    skyGrad.addColorStop(0,    '#87CEEB')
+    skyGrad.addColorStop(0.30, '#A8D8EA')
+    skyGrad.addColorStop(0.60, '#C5E3F0')
+    skyGrad.addColorStop(0.85, '#DDE8EB')
+    skyGrad.addColorStop(1.0,  '#E8EDE0')
+  }
   ctx.fillStyle = skyGrad
   ctx.fillRect(0, 0, W, H)
 
-  // Subtle star field
-  ctx.save()
-  ctx.globalAlpha = 0.35
-  const starRng = { seed: 42 }
-  const rand = () => { starRng.seed = (starRng.seed * 16807 + 0) & 0x7fffffff; return starRng.seed / 0x7fffffff }
-  const starLimit = Math.round(H * 0.45)
-  for (let s = 0; s < 80; s++) {
-    const sx = rand() * W
-    const sy = rand() * starLimit
-    const sr = rand() * 0.8 + 0.3
-    ctx.fillStyle = `rgba(167, 221, 229, ${0.3 + rand() * 0.5})`
-    ctx.beginPath()
-    ctx.arc(sx, sy, sr, 0, Math.PI * 2)
-    ctx.fill()
+  // Subtle star field (dark mode only)
+  if (darkMode) {
+    ctx.save()
+    ctx.globalAlpha = 0.35
+    const starRng = { seed: 42 }
+    const rand = () => { starRng.seed = (starRng.seed * 16807 + 0) & 0x7fffffff; return starRng.seed / 0x7fffffff }
+    const starLimit = Math.round(H * 0.45)
+    for (let s = 0; s < 80; s++) {
+      const sx = rand() * W
+      const sy = rand() * starLimit
+      const sr = rand() * 0.8 + 0.3
+      ctx.fillStyle = `rgba(167, 221, 229, ${0.3 + rand() * 0.5})`
+      ctx.beginPath()
+      ctx.arc(sx, sy, sr, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.restore()
   }
-  ctx.restore()
 
   // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
+  // Each band draws: fill → contours → stroke (new rendering order).
+  // Contours are integrated into renderTerrain so they sit naturally in the
+  // visual stack — on top of their own band's fill, below next nearer band's fill.
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill)
-  }
-
-  // ── 2b. Contour lines — pre-built strands projected to screen ───────────────
-  if (contourStrands.length > 0 && skylineData) {
-    // Compute global elevation range (same as renderTerrain uses)
-    let cElevMin = Infinity, cElevMax = -Infinity
-    for (let bi = 0; bi < skylineData.bands.length; bi++) {
-      const elev = skylineData.bands[bi].elevations
-      for (let i = 0; i < elev.length; i++) {
-        if (elev[i] === -Infinity) continue
-        if (elev[i] < cElevMin) cElevMin = elev[i]
-        if (elev[i] > cElevMax) cElevMax = elev[i]
-      }
-    }
-    renderContours(ctx, contourStrands, cam, cElevMin, cElevMax, skylineData, projectedBands)
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
+      contourStrands, showContourLines, darkMode)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
+  // Dark mode: teal glow. Light mode: subtle warm horizon haze.
   const glowGrad = ctx.createLinearGradient(0, horizonY - 12, 0, horizonY + 12)
-  glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
-  glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')
-  glowGrad.addColorStop(1,   'rgba(132, 209, 219, 0)')
+  if (darkMode) {
+    glowGrad.addColorStop(0,   'rgba(132, 209, 219, 0)')
+    glowGrad.addColorStop(0.5, 'rgba(132, 209, 219, 0.22)')
+    glowGrad.addColorStop(1,   'rgba(132, 209, 219, 0)')
+  } else {
+    glowGrad.addColorStop(0,   'rgba(100, 130, 160, 0)')
+    glowGrad.addColorStop(0.5, 'rgba(100, 130, 160, 0.15)')
+    glowGrad.addColorStop(1,   'rgba(100, 130, 160, 0)')
+  }
   ctx.fillStyle = glowGrad
   ctx.fillRect(0, Math.round(horizonY - 12), W, 24)
 
-  ctx.fillStyle = 'rgba(132, 209, 219, 0.18)'
+  ctx.fillStyle = darkMode ? 'rgba(132, 209, 219, 0.18)' : 'rgba(80, 100, 120, 0.12)'
   ctx.fillRect(0, Math.round(horizonY), W, 1)
 
   // ── 4. Peak placement — all through project() ─────────────────────────────
@@ -1673,7 +1578,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng }               = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, darkMode } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -2051,6 +1956,7 @@ const ScanScreen: React.FC = () => {
       fov, skylineData, projectedBands,
       contourStrands, projectedArcs,
       showBandLines, showFill, showPeakLabels,
+      showContourLines, darkMode,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -2063,7 +1969,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs,
-    showBandLines, showFill, showPeakLabels,
+    showBandLines, showFill, showPeakLabels, showContourLines, darkMode,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame

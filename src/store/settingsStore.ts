@@ -45,8 +45,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   showCoastlines: true,
   showTownLabels: false,        // Off by default per briefing
   showContourLines: true,
-  showBandLines: false,           // Depth band ridgeline strokes in SCAN
-  showFill: false,                // Terrain fill below ridgelines in SCAN
+  showBandLines: true,            // Depth band ridgeline strokes in SCAN
+  showFill: true,                 // Terrain fill below ridgelines in SCAN
   solidTerrain: true,            // Solid terrain mesh in EXPLORE (off = contour lines only)
   contourAnimation: true,       // Slow pulse on by default
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
