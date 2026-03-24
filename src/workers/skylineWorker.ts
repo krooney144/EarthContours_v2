@@ -62,14 +62,14 @@ const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
 /** Contour interval in metres for each depth band index.
  *  Progressive density: dense where visible (near), sparse where faded (far).
  *  ultra-near = 50ft, near = 100ft, mid-near = 200ft,
- *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
+ *  mid = 200ft, mid-far = 500ft, far = 1000ft. */
 const CONTOUR_INTERVALS_M: number[] = [
   15.24,   // ultra-near: 50ft
   30.48,   // near:       100ft
   60.96,   // mid-near:   200ft
-  152.4,   // mid:        500ft
-  304.8,   // mid-far:    1000ft
-  609.6,   // far:        2000ft
+  60.96,   // mid:        200ft
+  152.4,   // mid-far:    500ft
+  304.8,   // far:        1000ft
 ]
 
 // ─── Types ────────────────────────────────────────────────────────────────────

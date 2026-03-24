@@ -178,7 +178,7 @@ function reprojectRefinedArcs(
 /** Contour interval in metres for each depth band index.
  *  Progressive density: ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 152.4, 304.8, 609.6]
+const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 60.96, 152.4, 304.8]
 
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
