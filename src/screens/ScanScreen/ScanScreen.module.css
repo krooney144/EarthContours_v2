@@ -330,10 +330,11 @@
   text-transform: uppercase;
 }
 
-/* Vertical connector line — bright at card end, fades toward dot */
+/* Vertical connector line — bright at card end, fades toward dot.
+   Height is set dynamically via inline style (38/72/106px) for staggered labels. */
 .peakLine {
   width: 1px;
-  height: 38px;
+  height: 38px;  /* fallback; overridden by inline style for staggered labels */
   background: linear-gradient(to bottom, rgba(132, 209, 219, 0.6), rgba(132, 209, 219, 0.08));
   box-shadow: 0 0 4px rgba(132, 209, 219, 0.3);
 }
