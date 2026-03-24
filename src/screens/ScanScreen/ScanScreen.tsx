@@ -226,6 +226,9 @@ function buildSilhouetteLayers(
       // Skip ocean candidates — no terrain fill for ocean
       if (isOcean) continue
 
+      // Skip very low elevation candidates — likely coast/sea artifacts
+      if (rawElev < 5) continue
+
       // Visible only if this candidate peeks above all nearer terrain
       if (peakAngle > maxAngle) {
         // Base angle: either the valley floor angle or the current running max
@@ -315,7 +318,12 @@ function matchSilhouetteStrands(
       // Find closest active strand by distance
       let bestIdx = -1
       let bestDiff = Infinity
-      const distTol = Math.max(200, layer.dist * 0.30)  // 30% or 200m minimum
+      // Tighter tolerance for near terrain, looser for far
+      const distTol = layer.dist < 5_000
+        ? Math.max(100, layer.dist * 0.15)   // near: 15%, floor 100m
+        : layer.dist < 40_000
+        ? Math.max(300, layer.dist * 0.20)   // mid: 20%, floor 300m
+        : Math.max(500, layer.dist * 0.25)   // far: 25%, floor 500m
 
       for (let si = 0; si < active.length; si++) {
         if (matched.has(si)) continue
@@ -387,9 +395,12 @@ function matchSilhouetteStrands(
 
 /**
  * Render silhouette strands: layer-major fill + curvature-based stroke.
- * Each strand is a continuous mountain silhouette edge drawn as:
- *   1. Fill polygon (peak edge → base edge, closed)
- *   2. Curvature-tapered stroke along the peak edge
+ *
+ * Key fixes (v2):
+ *  - Break fill polygons at azimuth gaps to prevent rectangular artifacts
+ *  - Clamp base angles to prevent fills extending below screen
+ *  - Only draw strands with enough segments for meaningful visual contribution
+ *  - Reduce stroke density for far strands
  *
  * Strands arrive sorted far→near — painter's order handles occlusion.
  */
@@ -405,119 +416,155 @@ function renderSilhouettes(
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
-  const maxDist = 400_000  // for distance-based style interpolation
+  const maxDist = 400_000
+
+  // Minimum strand length: short strands are noise, not terrain features
+  const MIN_STRAND_SEGS = 8
+
+  // Maximum azimuth gap (in azimuth indices) before breaking a polygon.
+  // A gap > 2 indices means the strand skipped azimuths → would draw a vertical line.
+  const MAX_AZ_GAP_FOR_POLY = 3
 
   for (const strand of strands) {
     const segs = strand.segments
-    if (segs.length < 3) continue
+    if (segs.length < MIN_STRAND_SEGS) continue
 
     const distT = Math.min(1, strand.avgDist / maxDist)  // 0=near, 1=far
 
-    // ── Fill polygon: peak edge left→right, then base edge right→left ──
-    ctx.beginPath()
-    let hasPoints = false
-
-    // Forward pass: peak edge (top of silhouette)
-    for (let i = 0; i < segs.length; i++) {
-      const { ai, layer } = segs[i]
-      const bearingDeg = ai / (cam.W > 0 ? 1 : 1)  // Need to convert ai back to bearing
-      const bearing = ai / silResolution
-      const pos = project(bearing, layer.peakAngle, cam)
-      if (pos.y >= H) { continue }  // Below screen
-      const clampedY = Math.max(0, Math.min(H, pos.y))
-      if (!hasPoints) {
-        ctx.moveTo(pos.x, clampedY)
-        hasPoints = true
-      } else {
-        ctx.lineTo(pos.x, clampedY)
+    // ── Fill: break into sub-runs at azimuth gaps to prevent rectangles ──
+    // Split segments into contiguous runs (no azimuth gaps)
+    const runs: Array<{ start: number; end: number }> = []
+    let runStart = 0
+    for (let i = 1; i < segs.length; i++) {
+      const prevAi = segs[i - 1].ai
+      const currAi = segs[i].ai
+      // Handle wrap-around (azimuth 2879 → 0)
+      const gap = currAi >= prevAi
+        ? currAi - prevAi
+        : (silResolution * 360 - prevAi + currAi)
+      if (gap > MAX_AZ_GAP_FOR_POLY) {
+        if (i - runStart >= 4) {  // Only draw runs with ≥4 segments
+          runs.push({ start: runStart, end: i })
+        }
+        runStart = i
       }
     }
-
-    if (!hasPoints) continue
-
-    // Reverse pass: base edge (bottom of silhouette) — right to left
-    for (let i = segs.length - 1; i >= 0; i--) {
-      const { ai, layer } = segs[i]
-      const bearing = ai / silResolution
-      const basePos = project(bearing, layer.baseAngle, cam)
-      const clampedBaseY = Math.max(0, Math.min(H, basePos.y))
-      ctx.lineTo(basePos.x, clampedBaseY)
+    if (segs.length - runStart >= 4) {
+      runs.push({ start: runStart, end: segs.length })
     }
 
-    ctx.closePath()
-
-    // Fill color: distance-based opacity, elevation-based hue
+    // Fill color
     const fillOpacity = darkMode
-      ? 0.08 + (1 - distT) * 0.35   // near: 0.43, far: 0.08
-      : 0.05 + (1 - distT) * 0.20   // near: 0.25, far: 0.05
+      ? 0.06 + (1 - distT) * 0.25   // near: 0.31, far: 0.06
+      : 0.04 + (1 - distT) * 0.15
+    let fillColor: string
     if (darkMode) {
-      // Ocean-depth palette: darker for nearer terrain
-      const r = Math.round(2 + distT * 16)
-      const g = Math.round(12 + distT * 63)
-      const b = Math.round(20 + distT * 87)
-      ctx.fillStyle = `rgba(${r},${g},${b},${fillOpacity})`
+      const r = Math.round(2 + distT * 14)
+      const g = Math.round(10 + distT * 50)
+      const b = Math.round(18 + distT * 70)
+      fillColor = `rgba(${r},${g},${b},${fillOpacity})`
     } else {
-      const gray = Math.round(220 + distT * 35)
-      ctx.fillStyle = `rgba(${gray},${gray},${Math.round(gray * 0.95)},${fillOpacity})`
+      const gray = Math.round(225 + distT * 30)
+      fillColor = `rgba(${gray},${gray},${Math.round(gray * 0.95)},${fillOpacity})`
     }
-    ctx.fill()
+
+    // Draw each contiguous run as a separate fill polygon
+    for (const run of runs) {
+      ctx.beginPath()
+      let hasPoints = false
+
+      // Forward pass: peak edge
+      for (let i = run.start; i < run.end; i++) {
+        const { ai, layer } = segs[i]
+        const bearing = ai / silResolution
+        const pos = project(bearing, layer.peakAngle, cam)
+        const clampedY = Math.max(0, Math.min(H, pos.y))
+        if (!hasPoints) {
+          ctx.moveTo(pos.x, clampedY)
+          hasPoints = true
+        } else {
+          ctx.lineTo(pos.x, clampedY)
+        }
+      }
+
+      if (!hasPoints) continue
+
+      // Reverse pass: base edge — clamp to screen bottom, not beyond
+      for (let i = run.end - 1; i >= run.start; i--) {
+        const { ai, layer } = segs[i]
+        const bearing = ai / silResolution
+        // Clamp base angle: don't go more than 15° below horizon (prevents fills extending to infinity)
+        const clampedBaseAngle = Math.max(layer.baseAngle, -0.26)  // ~-15° in radians
+        const basePos = project(bearing, clampedBaseAngle, cam)
+        const clampedBaseY = Math.max(0, Math.min(H, basePos.y))
+        ctx.lineTo(basePos.x, clampedBaseY)
+      }
+
+      ctx.closePath()
+      ctx.fillStyle = fillColor
+      ctx.fill()
+    }
 
     // ── Stroke: curvature-based line taper along the peak edge ──
-    // Compute angles array for curvature calculation
-    const angles: number[] = segs.map(s => s.layer.peakAngle)
+    // Only stroke strands that are visually significant
+    if (segs.length < MIN_STRAND_SEGS) continue
 
-    // Distance-based base parameters (from the reference image)
-    const baseOpacity = 0.2 + (1 - distT) * 0.7     // near: 0.9, far: 0.2
-    const maxWidth    = 1.0 + (1 - distT) * 3.5      // near: 4.5px, far: 1.0px
-    const minWidth    = 0.3 + (1 - distT) * 0.5      // near: 0.8px, far: 0.3px
-    const CURVATURE_THRESHOLD = 0.008  // radians — tune for visual quality
+    const angles: number[] = segs.map(s => s.layer.peakAngle)
+    const baseOpacity = 0.15 + (1 - distT) * 0.65     // near: 0.80, far: 0.15
+    const maxWidth    = 0.8 + (1 - distT) * 3.0        // near: 3.8px, far: 0.8px
+    const minWidth    = 0.2 + (1 - distT) * 0.4        // near: 0.6px, far: 0.2px
+    const CURVATURE_THRESHOLD = 0.006
 
     ctx.lineCap  = 'round'
     ctx.lineJoin = 'round'
 
-    // Draw stroke in segments, updating width per section
-    const STROKE_SEG_SIZE = 4  // update color/width every 4 points
-    let segStart = 0
+    // Draw stroke per contiguous run (same gap-breaking as fill)
+    for (const run of runs) {
+      if (run.end - run.start < 4) continue
 
-    for (let i = 0; i < segs.length; i++) {
-      const { ai, layer } = segs[i]
-      const bearing = ai / silResolution
-      const pos = project(bearing, layer.peakAngle, cam)
-      if (pos.y >= H) continue
-      const clampedY = Math.max(0, Math.min(H, pos.y))
+      let pathStarted = false
+      const STROKE_SEG_SIZE = 5
 
-      if (i === segStart || (i - segStart) >= STROKE_SEG_SIZE) {
-        // Flush previous segment
-        if (i > segStart && segStart >= 0) ctx.stroke()
-
-        // Compute curvature at this point
-        let curvature = 0
-        if (i > 0 && i < angles.length - 1) {
-          curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
+      for (let i = run.start; i < run.end; i++) {
+        const { ai, layer } = segs[i]
+        const bearing = ai / silResolution
+        const pos = project(bearing, layer.peakAngle, cam)
+        if (pos.y >= H) {
+          if (pathStarted) { ctx.stroke(); pathStarted = false }
+          continue
         }
+        const clampedY = Math.max(0, Math.min(H, pos.y))
+        const relIdx = i - run.start
 
-        // Combined altitude + curvature taper
-        const tCurvature = Math.min(1, curvature / CURVATURE_THRESHOLD)
-        const lineWidth = minWidth + (maxWidth - minWidth) * (0.3 + 0.7 * tCurvature)
+        if (!pathStarted || relIdx % STROKE_SEG_SIZE === 0) {
+          if (pathStarted) ctx.stroke()
 
-        // Elevation-based color
-        const tElev = hasElevRange && layer.rawElev > 0
-          ? Math.max(0, Math.min(1, (layer.rawElev - globalElevMin) / elevRange))
-          : 0.5
-        const color = elevToRidgeColor(tElev)
+          // Compute curvature
+          let curvature = 0
+          const li = i - run.start
+          if (li > 0 && li < angles.length - 1 && i > 0 && i < segs.length - 1) {
+            curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
+          }
+          const tCurvature = Math.min(1, curvature / CURVATURE_THRESHOLD)
+          const lineWidth = minWidth + (maxWidth - minWidth) * (0.3 + 0.7 * tCurvature)
 
-        ctx.beginPath()
-        ctx.lineWidth = lineWidth
-        ctx.globalAlpha = baseOpacity
-        ctx.strokeStyle = color
-        ctx.moveTo(pos.x, clampedY)
-        segStart = i
-      } else {
-        ctx.lineTo(pos.x, clampedY)
+          const tElev = hasElevRange && layer.rawElev > 0
+            ? Math.max(0, Math.min(1, (layer.rawElev - globalElevMin) / elevRange))
+            : 0.5
+
+          ctx.beginPath()
+          ctx.lineWidth = lineWidth
+          ctx.globalAlpha = baseOpacity
+          ctx.strokeStyle = elevToRidgeColor(tElev)
+          ctx.moveTo(pos.x, clampedY)
+          pathStarted = true
+        } else {
+          ctx.lineTo(pos.x, clampedY)
+        }
       }
+      if (pathStarted) ctx.stroke()
     }
-    // Flush final segment
-    if (segStart < segs.length) ctx.stroke()
+
     ctx.globalAlpha = 1.0
   }
 }
