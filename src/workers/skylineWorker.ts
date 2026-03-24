@@ -543,6 +543,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     { zoom: 14, radiusM: 4_500 },
     { zoom: 13, radiusM: 10_500 },
     { zoom: 11, radiusM: 31_000 },
+    { zoom: 10, radiusM: 81_000 },
     { zoom:  9, radiusM: 152_000 },
     { zoom:  8, radiusM: maxRange },
   ]
