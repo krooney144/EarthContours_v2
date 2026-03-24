@@ -299,14 +299,14 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
   },
 
   setFov: (fov) => {
-    const clamped = clamp(fov, 15, 100)
+    const clamped = clamp(fov, 12, 100)
     log.debug('FOV set', { fov: clamped.toFixed(1) })
     set({ fov: clamped })
   },
 
   applyFovScale: (scale) => {
     const { fov } = get()
-    const newFov = clamp(fov * scale, 15, 100)
+    const newFov = clamp(fov * scale, 12, 100)
     log.debug('FOV scaled', { scale: scale.toFixed(3), oldFov: fov.toFixed(1), newFov: newFov.toFixed(1) })
     set({ fov: newFov })
   },
