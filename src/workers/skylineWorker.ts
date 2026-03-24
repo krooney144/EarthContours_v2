@@ -1084,7 +1084,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         // Previous step was a local maximum — insert into bin heap
         const binIdx = distToBin(prevDist)
         if (binIdx >= 0) {
-          const isOcean = prevRawElev <= 0.01 && prevRawElev >= -0.01  // Terrarium ocean = exactly 0
+          const isOcean = prevRawElev < 2.0  // sampleBest clamps ocean to 0; coast interpolation can yield 0-2m
           binHeaps[binIdx].insert({
             effElev:     prevEffElev,
             rawElev:     prevRawElev,
@@ -1126,7 +1126,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     if (wasRising && prevEffElev > -Infinity) {
       const binIdx = distToBin(prevDist)
       if (binIdx >= 0) {
-        const isOcean = prevRawElev <= 0.01 && prevRawElev >= -0.01
+        const isOcean = prevRawElev < 2.0
         binHeaps[binIdx].insert({
           effElev: prevEffElev, rawElev: prevRawElev, dist: prevDist,
           lat: prevLat, lng: prevLng,
