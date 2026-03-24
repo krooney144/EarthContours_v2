@@ -1853,18 +1853,9 @@ function drawScanCanvas(
     ctx.restore()
   }
 
-  // ── 2. Terrain — depth-layered rendering (far→near painter's order) ─────────
-  // Band system draws first: fills, contours, ridgeline strokes for all 6 bands.
-  if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
-      contourStrands, showContourLines, darkMode)
-  }
-
-  // ── 2b. Silhouette fills — opaque column-major terrain occlusion ──────────
-  // Draws AFTER band system. Opaque column fills block background terrain that
-  // the single-ridgeline band system can't represent (multiple mountains per
-  // azimuth). Band contours/strokes are already down, silhouettes paint over
-  // them where terrain should be solid. Silhouette strokes add edge definition.
+  // ── 2a. Silhouette fills — opaque column-major terrain occlusion ─────────
+  // Draws BEFORE band fills. Column-major opaque fills block background
+  // terrain correctly. Silhouette strokes go on top for visual edge definition.
   if (silhouetteLayers && skylineData?.silhouette) {
     let silElevMin = Infinity, silElevMax = -Infinity
     for (const azLayers of silhouetteLayers) {
@@ -1883,6 +1874,15 @@ function drawScanCanvas(
 
     renderSilhouettes(ctx, silhouetteLayers, strands, cam, silElevMin, silElevMax,
       skylineData.silhouette.resolution, darkMode)
+  }
+
+  // ── 2b. Terrain — depth-layered rendering (far→near painter's order) ─────────
+  // Each band draws: fill → contours → stroke (new rendering order).
+  // Contours are integrated into renderTerrain so they sit naturally in the
+  // visual stack — on top of their own band's fill, below next nearer band's fill.
+  if (skylineData) {
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
+      contourStrands, showContourLines, darkMode)
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
