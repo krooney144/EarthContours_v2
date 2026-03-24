@@ -53,7 +53,7 @@ import {
   MAX_HEIGHT_M, MIN_HEIGHT_M,
 } from '../../core/constants'
 import {
-  formatElevation, calculateBearing,
+  formatElevation, formatDistance, calculateBearing,
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
@@ -357,6 +357,7 @@ interface PeakScreenPos {
   lng:         number
   screenX:     number
   screenY:     number
+  stemHeight:  number  // Variable stem height for staggered labels (avoids overlap)
 }
 
 // ─── The Camera — Single Source of Truth ──────────────────────────────────────
@@ -1537,9 +1538,6 @@ function drawScanCanvas(
       }
     }
 
-    const minSpacing = W * 0.06
-    if (peakPositions.some(p => Math.abs(p.screenX - screenX) < minSpacing)) continue
-
     peakPositions.push({
       id:          peak.id,
       name:        peak.name,
@@ -1550,8 +1548,65 @@ function drawScanCanvas(
       lng:         peak.lng,
       screenX,
       screenY,
+      stemHeight:  38,  // default, resolved below
     })
   }
+
+  // ── 4b. Resolve peak label overlaps — staggered stem heights ────────────────
+  // Sort by screenX so we can detect horizontal neighbors. Use rect-based
+  // overlap detection: each label card is ~120×52 CSS-px, stem 38–76px, dot 8px.
+  // When two labels would overlap, stagger the nearer peak's stem taller.
+  // DPR conversion happens later (line ~1981), so work in physical pixels here
+  // and use physical-pixel estimates for card sizes.
+  const dprEst = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1
+  const CARD_W  = 120 * dprEst   // approximate card width in physical px
+  const CARD_H  = 52 * dprEst    // approximate card height in physical px
+  const STEM_SHORT = 38 * dprEst // default stem
+  const STEM_MED   = 72 * dprEst // medium stagger
+  const STEM_TALL  = 106 * dprEst // tall stagger
+  const STEMS = [STEM_SHORT, STEM_MED, STEM_TALL]
+
+  // Sort by elevation descending so highest peaks get priority placement
+  peakPositions.sort((a, b) => b.elevation_m - a.elevation_m)
+
+  // Limit to 8 labels max, then resolve overlaps with rect collision
+  const resolved: PeakScreenPos[] = []
+  interface LabelRect { left: number; right: number; top: number; bottom: number }
+  const placedRects: LabelRect[] = []
+
+  for (const pos of peakPositions) {
+    if (resolved.length >= 8) break
+
+    // Try each stem height, pick the first that doesn't overlap
+    let placed = false
+    for (const stem of STEMS) {
+      const halfW = CARD_W / 2
+      const left = pos.screenX - halfW
+      const right = pos.screenX + halfW
+      // Card extends upward from dot: dot at screenY, stem above, card above stem
+      const top = pos.screenY - stem - CARD_H
+      const bottom = pos.screenY
+
+      const overlaps = placedRects.some(r =>
+        left < r.right && right > r.left && top < r.bottom && bottom > r.top
+      )
+
+      if (!overlaps) {
+        pos.stemHeight = stem / dprEst  // store in CSS pixels
+        resolved.push(pos)
+        placedRects.push({ left, right, top, bottom })
+        placed = true
+        break
+      }
+    }
+    // If all stem heights overlap, skip this peak entirely
+    if (!placed) continue
+  }
+
+  // Re-sort by screenX for consistent left-to-right rendering
+  resolved.sort((a, b) => a.screenX - b.screenX)
+  peakPositions.length = 0
+  peakPositions.push(...resolved)
 
   // ── 5. Peak ridgeline profiles — wedge-shaped terrain profiles around peaks ──
   if (showPeakLabels && peakPositions.length > 0 && skylineData) {
@@ -2534,15 +2589,22 @@ const PeakLabel: React.FC<{
   const distFade  = Math.max(0.25, 1 - Math.pow(pos.dist_km / (MAX_PEAK_DIST / 1000), 0.5))
   const isNearTop = pos.screenY < canvasH * 0.22
 
+  // Format distance respecting unit preference
+  const distStr = formatDistance(pos.dist_km, units)
+
   const card = (
     <div className={styles.peakCard} aria-hidden="true">
       <span className={styles.peakName}>{pos.name}</span>
       <span className={styles.peakElev}>{formatElevation(pos.elevation_m, units)}</span>
       <span className={styles.peakBearing}>
-        {headingToCompass(pos.bearing)} · {pos.dist_km.toFixed(0)} km
+        {headingToCompass(pos.bearing)} · {distStr}
       </span>
     </div>
   )
+
+  // Variable stem height from overlap resolver (default 38px, staggered 72/106px)
+  const stemH = pos.stemHeight || 38
+  const stemStyle: React.CSSProperties = { height: `${stemH}px` }
 
   // Anchor the dot center at pos.screenY regardless of card content height.
   // Normal (dot at bottom): use `bottom` so card+line grow upward naturally.
@@ -2557,18 +2619,18 @@ const PeakLabel: React.FC<{
       className={`${styles.peakLabel} ${isNearTop ? styles.peakLabelFlipped : ''}`}
       style={posStyle}
       role="img"
-      aria-label={`${pos.name}, ${formatElevation(pos.elevation_m, units)}, ${pos.dist_km.toFixed(0)} km`}
+      aria-label={`${pos.name}, ${formatElevation(pos.elevation_m, units)}, ${distStr}`}
     >
       {isNearTop ? (
         <>
           <div className={styles.peakDot}              aria-hidden="true" />
-          <div className={`${styles.peakLine} ${styles.peakLineDown}`} aria-hidden="true" />
+          <div className={`${styles.peakLine} ${styles.peakLineDown}`} style={stemStyle} aria-hidden="true" />
           {card}
         </>
       ) : (
         <>
           {card}
-          <div className={styles.peakLine}  aria-hidden="true" />
+          <div className={styles.peakLine} style={stemStyle} aria-hidden="true" />
           <div className={styles.peakDot}   aria-hidden="true" />
         </>
       )}
