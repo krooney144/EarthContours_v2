@@ -57,8 +57,8 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem } from '../../core/types'
-import { DEPTH_BANDS } from '../../core/types'
+import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData } from '../../core/types'
+import { DEPTH_BANDS, SILHOUETTE_FLOATS_PER_CANDIDATE } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -171,6 +171,355 @@ function reprojectRefinedArcs(
     }
     return { angles, arc }
   })
+}
+
+// ─── Silhouette Layer Builder (AGL-dependent, runs on every height change) ───
+
+/**
+ * Build visible silhouette layers from the worker's AGL-independent candidate data.
+ * For each azimuth, sweeps candidates front-to-back (near→far), computing elevation
+ * angles at the current viewerElev.  A candidate is visible if its angle exceeds
+ * the running maximum from all nearer terrain.
+ *
+ * Returns SilhouetteLayers[azimuthIdx][layerIdx] — layers sorted near→far within
+ * each azimuth.  Typically 2–12 layers per azimuth in mountainous terrain.
+ *
+ * Cost: ~26 candidates × 2880 azimuths = ~75K atan2 calls.  Sub-millisecond.
+ */
+function buildSilhouetteLayers(
+  skyline: SkylineData,
+  viewerElev: number,
+): SilhouetteLayer[][] | null {
+  const sil = skyline.silhouette
+  if (!sil || !sil.candidateData || sil.candidateData.length === 0) return null
+
+  const { candidateData, candidateOffsets, numAzimuths } = sil
+  const FPC = 8  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
+  const result: SilhouetteLayer[][] = new Array(numAzimuths)
+
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    const start = candidateOffsets[ai]
+    const end   = candidateOffsets[ai + 1]
+
+    if (start >= end) {
+      result[ai] = []
+      continue
+    }
+
+    const layers: SilhouetteLayer[] = []
+    let maxAngle = -Math.PI / 2
+
+    // Candidates are sorted near→far by distance
+    for (let off = start; off < end; off += FPC) {
+      const effElev     = candidateData[off]
+      const rawElev     = candidateData[off + 1]
+      const dist        = candidateData[off + 2]
+      const lat         = candidateData[off + 3]
+      const lng         = candidateData[off + 4]
+      const baseEffElev = candidateData[off + 5]
+      const baseDist    = candidateData[off + 6]
+      const flags       = candidateData[off + 7]
+
+      const peakAngle = Math.atan2(effElev - viewerElev, dist)
+      const isOcean   = (flags & 1) !== 0
+
+      // Skip ocean candidates — no terrain fill for ocean
+      if (isOcean) continue
+
+      // Visible only if this candidate peeks above all nearer terrain
+      if (peakAngle > maxAngle) {
+        // Base angle: either the valley floor angle or the current running max
+        // (whichever is higher — we can't see below the running max)
+        const rawBaseAngle = baseDist > 0
+          ? Math.atan2(baseEffElev - viewerElev, baseDist)
+          : -Math.PI / 2
+        const baseAngle = Math.max(rawBaseAngle, maxAngle)
+
+        layers.push({
+          peakAngle,
+          baseAngle,
+          rawElev,
+          dist,
+          lat,
+          lng,
+          effElev,
+          isOcean,
+        })
+
+        maxAngle = peakAngle
+      }
+    }
+
+    result[ai] = layers
+  }
+
+  return result
+}
+
+// ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
+
+/** A matched silhouette strand: a continuous silhouette edge across azimuths.
+ *  Built by matching layers at adjacent azimuths by distance proximity. */
+interface SilhouetteStrand {
+  /** Per-azimuth data for this strand, indexed by screen column position.
+   *  Each entry has the azimuth index and the layer from that azimuth. */
+  segments: Array<{ ai: number; layer: SilhouetteLayer }>
+  /** Average distance of this strand (for depth-based styling) */
+  avgDist: number
+}
+
+/**
+ * Match silhouette layers across adjacent azimuths into continuous strands.
+ * Uses distance proximity (within 30% tolerance) to connect layers.
+ * Returns strands sorted far→near (for painter's order fill rendering).
+ */
+function matchSilhouetteStrands(
+  layers: SilhouetteLayer[][],
+  numAzimuths: number,
+  resolution: number,
+  cam: CameraParams,
+): SilhouetteStrand[] {
+  const { heading_deg, hfov, W } = cam
+
+  // Determine visible azimuth range
+  const bearingStart = heading_deg - hfov * 0.5
+  const bearingEnd   = heading_deg + hfov * 0.5
+
+  const aiStart = Math.floor(((bearingStart % 360 + 360) % 360) * resolution)
+  const aiEnd   = Math.ceil(((bearingEnd % 360 + 360) % 360) * resolution)
+
+  // Active strands being built
+  interface ActiveStrand {
+    segments: Array<{ ai: number; layer: SilhouetteLayer }>
+    lastAi:   number
+    lastDist: number
+    distSum:  number
+  }
+  const active: ActiveStrand[] = []
+  const completed: SilhouetteStrand[] = []
+  const MAX_AZ_GAP = Math.ceil(resolution * 3)  // Max 3° gap before expiring
+
+  // Sweep through visible azimuths
+  const totalVisible = aiEnd >= aiStart
+    ? aiEnd - aiStart + 1
+    : (numAzimuths - aiStart) + aiEnd + 1
+
+  for (let step = 0; step < totalVisible; step++) {
+    const ai = (aiStart + step) % numAzimuths
+    const azLayers = layers[ai]
+    if (!azLayers || azLayers.length === 0) continue
+
+    const matched = new Set<number>()  // indices into active that got matched
+
+    for (const layer of azLayers) {
+      // Find closest active strand by distance
+      let bestIdx = -1
+      let bestDiff = Infinity
+      const distTol = Math.max(200, layer.dist * 0.30)  // 30% or 200m minimum
+
+      for (let si = 0; si < active.length; si++) {
+        if (matched.has(si)) continue
+        const s = active[si]
+        // Check azimuth gap
+        const azGap = ai >= s.lastAi ? ai - s.lastAi : (numAzimuths - s.lastAi + ai)
+        if (azGap > MAX_AZ_GAP) continue
+
+        const diff = Math.abs(layer.dist - s.lastDist)
+        if (diff < bestDiff && diff < distTol) {
+          bestIdx = si
+          bestDiff = diff
+        }
+      }
+
+      if (bestIdx >= 0) {
+        // Extend existing strand
+        active[bestIdx].segments.push({ ai, layer })
+        active[bestIdx].lastAi   = ai
+        active[bestIdx].lastDist = layer.dist
+        active[bestIdx].distSum += layer.dist
+        matched.add(bestIdx)
+      } else {
+        // Start new strand
+        active.push({
+          segments: [{ ai, layer }],
+          lastAi:   ai,
+          lastDist: layer.dist,
+          distSum:  layer.dist,
+        })
+      }
+    }
+
+    // Expire old strands (check periodically)
+    if (step % MAX_AZ_GAP === 0) {
+      for (let si = active.length - 1; si >= 0; si--) {
+        const s = active[si]
+        const azGap = ai >= s.lastAi ? ai - s.lastAi : (numAzimuths - s.lastAi + ai)
+        if (azGap > MAX_AZ_GAP) {
+          if (s.segments.length >= 3) {
+            completed.push({
+              segments: s.segments,
+              avgDist:  s.distSum / s.segments.length,
+            })
+          }
+          active.splice(si, 1)
+        }
+      }
+    }
+  }
+
+  // Flush remaining active strands
+  for (const s of active) {
+    if (s.segments.length >= 3) {
+      completed.push({
+        segments: s.segments,
+        avgDist:  s.distSum / s.segments.length,
+      })
+    }
+  }
+
+  // Sort far→near for painter's order (far drawn first, near on top)
+  completed.sort((a, b) => b.avgDist - a.avgDist)
+
+  return completed
+}
+
+// ─── Silhouette Renderer ─────────────────────────────────────────────────────
+
+/**
+ * Render silhouette strands: layer-major fill + curvature-based stroke.
+ * Each strand is a continuous mountain silhouette edge drawn as:
+ *   1. Fill polygon (peak edge → base edge, closed)
+ *   2. Curvature-tapered stroke along the peak edge
+ *
+ * Strands arrive sorted far→near — painter's order handles occlusion.
+ */
+function renderSilhouettes(
+  ctx: CanvasRenderingContext2D,
+  strands: SilhouetteStrand[],
+  cam: CameraParams,
+  globalElevMin: number,
+  globalElevMax: number,
+  silResolution: number,
+  darkMode: boolean = true,
+): void {
+  const { W, H } = cam
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1
+  const maxDist = 400_000  // for distance-based style interpolation
+
+  for (const strand of strands) {
+    const segs = strand.segments
+    if (segs.length < 3) continue
+
+    const distT = Math.min(1, strand.avgDist / maxDist)  // 0=near, 1=far
+
+    // ── Fill polygon: peak edge left→right, then base edge right→left ──
+    ctx.beginPath()
+    let hasPoints = false
+
+    // Forward pass: peak edge (top of silhouette)
+    for (let i = 0; i < segs.length; i++) {
+      const { ai, layer } = segs[i]
+      const bearingDeg = ai / (cam.W > 0 ? 1 : 1)  // Need to convert ai back to bearing
+      const bearing = ai / silResolution
+      const pos = project(bearing, layer.peakAngle, cam)
+      if (pos.y >= H) { continue }  // Below screen
+      const clampedY = Math.max(0, Math.min(H, pos.y))
+      if (!hasPoints) {
+        ctx.moveTo(pos.x, clampedY)
+        hasPoints = true
+      } else {
+        ctx.lineTo(pos.x, clampedY)
+      }
+    }
+
+    if (!hasPoints) continue
+
+    // Reverse pass: base edge (bottom of silhouette) — right to left
+    for (let i = segs.length - 1; i >= 0; i--) {
+      const { ai, layer } = segs[i]
+      const bearing = ai / silResolution
+      const basePos = project(bearing, layer.baseAngle, cam)
+      const clampedBaseY = Math.max(0, Math.min(H, basePos.y))
+      ctx.lineTo(basePos.x, clampedBaseY)
+    }
+
+    ctx.closePath()
+
+    // Fill color: distance-based opacity, elevation-based hue
+    const fillOpacity = darkMode
+      ? 0.08 + (1 - distT) * 0.35   // near: 0.43, far: 0.08
+      : 0.05 + (1 - distT) * 0.20   // near: 0.25, far: 0.05
+    if (darkMode) {
+      // Ocean-depth palette: darker for nearer terrain
+      const r = Math.round(2 + distT * 16)
+      const g = Math.round(12 + distT * 63)
+      const b = Math.round(20 + distT * 87)
+      ctx.fillStyle = `rgba(${r},${g},${b},${fillOpacity})`
+    } else {
+      const gray = Math.round(220 + distT * 35)
+      ctx.fillStyle = `rgba(${gray},${gray},${Math.round(gray * 0.95)},${fillOpacity})`
+    }
+    ctx.fill()
+
+    // ── Stroke: curvature-based line taper along the peak edge ──
+    // Compute angles array for curvature calculation
+    const angles: number[] = segs.map(s => s.layer.peakAngle)
+
+    // Distance-based base parameters (from the reference image)
+    const baseOpacity = 0.2 + (1 - distT) * 0.7     // near: 0.9, far: 0.2
+    const maxWidth    = 1.0 + (1 - distT) * 3.5      // near: 4.5px, far: 1.0px
+    const minWidth    = 0.3 + (1 - distT) * 0.5      // near: 0.8px, far: 0.3px
+    const CURVATURE_THRESHOLD = 0.008  // radians — tune for visual quality
+
+    ctx.lineCap  = 'round'
+    ctx.lineJoin = 'round'
+
+    // Draw stroke in segments, updating width per section
+    const STROKE_SEG_SIZE = 4  // update color/width every 4 points
+    let segStart = 0
+
+    for (let i = 0; i < segs.length; i++) {
+      const { ai, layer } = segs[i]
+      const bearing = ai / silResolution
+      const pos = project(bearing, layer.peakAngle, cam)
+      if (pos.y >= H) continue
+      const clampedY = Math.max(0, Math.min(H, pos.y))
+
+      if (i === segStart || (i - segStart) >= STROKE_SEG_SIZE) {
+        // Flush previous segment
+        if (i > segStart && segStart >= 0) ctx.stroke()
+
+        // Compute curvature at this point
+        let curvature = 0
+        if (i > 0 && i < angles.length - 1) {
+          curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
+        }
+
+        // Combined altitude + curvature taper
+        const tCurvature = Math.min(1, curvature / CURVATURE_THRESHOLD)
+        const lineWidth = minWidth + (maxWidth - minWidth) * (0.3 + 0.7 * tCurvature)
+
+        // Elevation-based color
+        const tElev = hasElevRange && layer.rawElev > 0
+          ? Math.max(0, Math.min(1, (layer.rawElev - globalElevMin) / elevRange))
+          : 0.5
+        const color = elevToRidgeColor(tElev)
+
+        ctx.beginPath()
+        ctx.lineWidth = lineWidth
+        ctx.globalAlpha = baseOpacity
+        ctx.strokeStyle = color
+        ctx.moveTo(pos.x, clampedY)
+        segStart = i
+      } else {
+        ctx.lineTo(pos.x, clampedY)
+      }
+    }
+    // Flush final segment
+    if (segStart < segs.length) ctx.stroke()
+    ctx.globalAlpha = 1.0
+  }
 }
 
 // ─── Contour Strand Precomputation ────────────────────────────────────────────
@@ -1404,6 +1753,7 @@ function drawScanCanvas(
   projectedBands: ProjectedBands | null,
   contourStrands: PrebuiltContourStrand[],
   projectedArcs: ProjectedRefinedArc[] | null,
+  silhouetteLayers: SilhouetteLayer[][] | null,
   showBandLines: boolean = true,
   showFill: boolean = true,
   showPeakLabels: boolean = true,
@@ -1474,6 +1824,35 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode)
+  }
+
+  // ── 2b. Silhouette layers — depth-peeled terrain profiles ──────────────────
+  // Draws every visible mountain outline with curvature-tapered strokes,
+  // layered far→near with proper painter's order.  Renders ON TOP of the
+  // existing band fills — silhouettes add detail that bands can't represent
+  // (multiple mountains per azimuth, proper occlusion at varying AGL).
+  if (silhouetteLayers && skylineData?.silhouette) {
+    // Compute global elevation range for color mapping
+    let silElevMin = Infinity, silElevMax = -Infinity
+    for (const azLayers of silhouetteLayers) {
+      for (const layer of azLayers) {
+        if (layer.rawElev > 0 && layer.rawElev < silElevMin) silElevMin = layer.rawElev
+        if (layer.rawElev > silElevMax) silElevMax = layer.rawElev
+      }
+    }
+
+    const strands = matchSilhouetteStrands(
+      silhouetteLayers,
+      skylineData.silhouette.numAzimuths,
+      skylineData.silhouette.resolution,
+      cam,
+    )
+
+    if (strands.length > 0) {
+      console.log(`[SILHOUETTE-RENDER] ${strands.length} strands, elevRange: ${silElevMin.toFixed(0)}-${silElevMax.toFixed(0)}m`)
+      renderSilhouettes(ctx, strands, cam, silElevMin, silElevMax,
+        skylineData.silhouette.resolution, darkMode)
+    }
   }
 
   // ── 3. Horizon glow ──────────────────────────────────────────────────────────
@@ -1714,6 +2093,31 @@ const ScanScreen: React.FC = () => {
     return reprojectRefinedArcs(refinedArcs, viewerElev)
   }, [skylineData, refinedArcs, height_m])
 
+  // ── Build silhouette layers (AGL-dependent, runs on height change) ─────────
+  // Front-to-back sweep over AGL-independent candidates.  ~75K atan2 calls, sub-ms.
+  const silhouetteLayers = useMemo<SilhouetteLayer[][] | null>(() => {
+    if (!skylineData || !skylineData.silhouette) return null
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    const t0 = performance.now()
+    const layers = buildSilhouetteLayers(skylineData, viewerElev)
+    const dt = performance.now() - t0
+    if (layers) {
+      let totalLayers = 0, maxLayers = 0
+      for (const azLayers of layers) {
+        totalLayers += azLayers.length
+        if (azLayers.length > maxLayers) maxLayers = azLayers.length
+      }
+      log.info('Silhouette layers built', {
+        totalLayers,
+        avgPerAz: (totalLayers / layers.length).toFixed(1),
+        maxPerAz: maxLayers,
+        viewerElev: viewerElev.toFixed(0),
+        ms: dt.toFixed(2),
+      })
+    }
+    return layers
+  }, [skylineData, height_m])
+
   // ── Initialise Web Worker ─────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1726,15 +2130,21 @@ const ScanScreen: React.FC = () => {
       const { type, phase, progress, skyline } = e.data
       if (type === 'progress') {
         if (phase === 'tiles') {
-          setSkylineProgress(progress * 0.4)  // tiles = first 40%
+          setSkylineProgress(progress * 0.3)  // tiles = first 30%
         } else if (phase === 'skyline') {
-          setSkylineProgress(0.4 + progress * 0.6)  // skyline = next 60%
+          setSkylineProgress(0.3 + progress * 0.4)  // skyline = next 40%
+        } else if (phase === 'silhouette') {
+          setSkylineProgress(0.7 + progress * 0.3)  // silhouette = last 30%
         }
       } else if (type === 'complete') {
         log.info('Skyline precomputed', {
           azimuths: skyline.numAzimuths,
           lat: skyline.computedAt.lat.toFixed(4),
           lng: skyline.computedAt.lng.toFixed(4),
+          hasSilhouette: !!skyline.silhouette,
+          silCandidates: skyline.silhouette
+            ? (skyline.silhouette.candidateOffsets[skyline.silhouette.numAzimuths] / 8).toFixed(0)
+            : 0,
         })
         const newSkyline = skyline as SkylineData
         setSkylineData(newSkyline)
@@ -2034,6 +2444,7 @@ const ScanScreen: React.FC = () => {
       activeLat, activeLng,
       fov, skylineData, projectedBands,
       contourStrands, projectedArcs,
+      silhouetteLayers,
       showBandLines, showFill, showPeakLabels,
       showContourLines, darkMode,
     )
@@ -2047,7 +2458,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
     activePeaks,
-    skylineData, projectedBands, contourStrands, projectedArcs,
+    skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     showBandLines, showFill, showPeakLabels, showContourLines, darkMode,
   ])
 
@@ -2386,7 +2797,7 @@ const ScanScreen: React.FC = () => {
 
               return (
                 <>
-                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.2.1 DEBUG — Refined Arcs</div>
+                  <div style={{ color: '#A7DDE5', marginBottom: 2 }}>v2.4 DEBUG — Silhouettes + Refined Arcs</div>
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>CAMERA</div>
                   <div>hdg:{heading_deg.toFixed(1)}° pit:{pitch_deg.toFixed(1)}° fov:{fov.toFixed(0)}°</div>
@@ -2458,6 +2869,35 @@ const ScanScreen: React.FC = () => {
                           )
                         })}
                         {refinedArcs.length > 8 && <div style={{ color: '#666', fontSize: 8 }}>...+{refinedArcs.length - 8} more</div>}
+                      </>
+                    )
+                  })()}
+
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>SILHOUETTES</div>
+                  {(() => {
+                    const sil = skylineData.silhouette
+                    if (!sil) return <div style={{ color: '#666' }}>no silhouette data</div>
+                    // Count total candidates
+                    const totalCandidates = sil.candidateOffsets[sil.numAzimuths] / 8  // 8 floats per candidate
+                    const avgPerAz = (totalCandidates / sil.numAzimuths).toFixed(1)
+                    const memKB = ((sil.candidateData.length * 4 + sil.candidateOffsets.length * 4) / 1024).toFixed(0)
+                    // Count visible layers if available
+                    let totalVisibleLayers = 0, maxLayersPerAz = 0, azWithLayers = 0
+                    if (silhouetteLayers) {
+                      for (const azLayers of silhouetteLayers) {
+                        if (azLayers.length > 0) azWithLayers++
+                        totalVisibleLayers += azLayers.length
+                        if (azLayers.length > maxLayersPerAz) maxLayersPerAz = azLayers.length
+                      }
+                    }
+                    const avgVisiblePerAz = silhouetteLayers ? (totalVisibleLayers / sil.numAzimuths).toFixed(1) : '?'
+                    return (
+                      <>
+                        <div>candidates:{totalCandidates.toFixed(0)} avg:{avgPerAz}/az mem:{memKB}KB</div>
+                        <div>res:{sil.resolution} az:{sil.numAzimuths}</div>
+                        {silhouetteLayers && (
+                          <div>visible layers: {totalVisibleLayers} avg:{avgVisiblePerAz}/az max:{maxLayersPerAz} active:{azWithLayers}az</div>
+                        )}
                       </>
                     )
                   })()}

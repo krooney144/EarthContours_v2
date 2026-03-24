@@ -129,6 +129,14 @@ interface RefinedArc {
   featureBearing: number
 }
 
+/** Packed silhouette candidates for depth-peeled terrain layers. */
+interface SilhouetteDataW {
+  candidateData:    Float32Array
+  candidateOffsets: Uint32Array
+  resolution:       number
+  numAzimuths:      number
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -140,11 +148,101 @@ export interface SkylineData {
   bands:       SkylineBand[]
   /** Refined arcs — dense ray-march data around detected ridgeline features */
   refinedArcs: RefinedArc[]
+  /** Depth-peeled silhouette candidates (AGL-independent, all azimuths) */
+  silhouette:  SilhouetteDataW | null
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
   numAzimuths: number
   computedAt: { lat: number; lng: number; elev: number; groundElev: number; timestamp: number }
+}
+
+// ─── Silhouette Distance Bins (mirrors types.ts DISTANCE_BINS) ───────────────
+
+/** [minDist_m, maxDist_m, maxCandidates] — must stay in sync with types.ts */
+const SILHOUETTE_BINS: readonly [number, number, number][] = [
+  [0,        1_000,   5],
+  [1_000,    5_000,   5],
+  [5_000,   15_000,   5],
+  [15_000,  40_000,   4],
+  [40_000, 100_000,   3],
+  [100_000, 250_000,  2],
+  [250_000, 400_000,  2],
+]
+const SILHOUETTE_FLOATS = 8  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags
+const SILHOUETTE_RESOLUTION = 8  // 0.125° per step = 2880 azimuths (matches hi-res bands)
+const SILHOUETTE_NUM_AZIMUTHS = 360 * SILHOUETTE_RESOLUTION  // 2880
+
+/** Map a distance to its bin index. Returns -1 if outside all bins. */
+function distToBin(distM: number): number {
+  for (let i = 0; i < SILHOUETTE_BINS.length; i++) {
+    if (distM >= SILHOUETTE_BINS[i][0] && distM < SILHOUETTE_BINS[i][1]) return i
+  }
+  // Check last bin's upper bound (inclusive)
+  const last = SILHOUETTE_BINS.length - 1
+  if (distM >= SILHOUETTE_BINS[last][0] && distM <= SILHOUETTE_BINS[last][1]) return last
+  return -1
+}
+
+// ─── Silhouette Candidate Heap ───────────────────────────────────────────────
+
+/** A silhouette candidate: a local elevation maximum along an azimuth ray. */
+interface SilCandidate {
+  effElev:     number  // rawElev - curvDrop (AGL-independent)
+  rawElev:     number  // original DEM elevation
+  dist:        number  // distance from viewer (m)
+  lat:         number  // GPS
+  lng:         number
+  baseEffElev: number  // valley floor before this peak
+  baseDist:    number  // distance to valley floor
+  flags:       number  // bit 0 = isOcean
+}
+
+/** Per-bin min-heap keyed on effElev, capped at maxSize. */
+class CandidateHeap {
+  items: SilCandidate[] = []
+  constructor(readonly maxSize: number) {}
+
+  insert(c: SilCandidate): void {
+    if (this.items.length < this.maxSize) {
+      this.items.push(c)
+      // Bubble up
+      this._siftUp(this.items.length - 1)
+    } else if (c.effElev > this.items[0].effElev) {
+      // Replace min
+      this.items[0] = c
+      this._siftDown(0)
+    }
+  }
+
+  /** Return items sorted by distance (near first) for packing. */
+  sortedByDist(): SilCandidate[] {
+    return this.items.slice().sort((a, b) => a.dist - b.dist)
+  }
+
+  private _siftUp(i: number): void {
+    while (i > 0) {
+      const parent = (i - 1) >> 1
+      if (this.items[i].effElev < this.items[parent].effElev) {
+        const tmp = this.items[i]; this.items[i] = this.items[parent]; this.items[parent] = tmp
+        i = parent
+      } else break
+    }
+  }
+
+  private _siftDown(i: number): void {
+    const n = this.items.length
+    while (true) {
+      let smallest = i
+      const l = 2 * i + 1, r = 2 * i + 2
+      if (l < n && this.items[l].effElev < this.items[smallest].effElev) smallest = l
+      if (r < n && this.items[r].effElev < this.items[smallest].effElev) smallest = r
+      if (smallest !== i) {
+        const tmp = this.items[i]; this.items[i] = this.items[smallest]; this.items[smallest] = tmp
+        i = smallest
+      } else break
+    }
+  }
 }
 
 // ─── In-Worker Tile Cache ─────────────────────────────────────────────────────
@@ -919,8 +1017,143 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       }
     }
 
-    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.95 })
+    self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.90 })
   }
+
+  // ── Phase 4c: Silhouette candidate collection (2880 azimuths, 20m–400km) ──
+  //
+  // Dedicated pass that collects terrain samples along each azimuth ray and
+  // detects local elevation maxima (hilltops/ridgetops).  These are stored in
+  // per-bin min-heaps keyed on effElev (AGL-independent).
+  //
+  // The march reuses tiles already in cache — no new fetches.  Marches
+  // NEAR → FAR so we can track valley floors on the viewer side of each peak.
+
+  // Build combined distance steps: ultra-near (20-200m @ 1.005×) + near (200m-31km @ 1.01×) + far (500m-400km @ 1.015×)
+  const silDists: number[] = []
+  {
+    let sd = 20
+    while (sd <= 200) { silDists.push(sd); sd *= 1.005 }
+    sd = 200
+    while (sd <= 31_000) { silDists.push(sd); sd *= 1.01 }
+    sd = 31_000
+    while (sd <= maxRange) { silDists.push(sd); sd *= 1.015 }
+  }
+  // Sort near → far (ascending distance)
+  silDists.sort((a, b) => a - b)
+  // Deduplicate (distances from overlapping ranges)
+  const silDistsDeduped: number[] = [silDists[0]]
+  for (let i = 1; i < silDists.length; i++) {
+    if (silDists[i] - silDistsDeduped[silDistsDeduped.length - 1] > 1) {
+      silDistsDeduped.push(silDists[i])
+    }
+  }
+
+  // Per-azimuth silhouette candidate heaps
+  const silCandidatesTemp: SilCandidate[][] = new Array(SILHOUETTE_NUM_AZIMUTHS)
+
+  for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
+    const azDeg = ai / SILHOUETTE_RESOLUTION
+    const azRad = azDeg * DEG_TO_RAD
+    const sinA  = Math.sin(azRad)
+    const cosA  = Math.cos(azRad)
+
+    // Per-bin heaps
+    const binHeaps: CandidateHeap[] = SILHOUETTE_BINS.map(b => new CandidateHeap(b[2]))
+
+    // State for local maxima detection (near → far)
+    let prevEffElev = -Infinity
+    let wasRising = false
+    // Track previous step data for recording the peak (which is one step behind)
+    let prevRawElev = 0, prevDist = 0, prevLat = viewerLat, prevLng = viewerLng
+    // Valley floor tracking (lowest point between viewer/previous peak and current position)
+    let valleyEffElev = Infinity, valleyDist = 0
+
+    for (let si = 0; si < silDistsDeduped.length; si++) {
+      const dist = silDistsDeduped[si]
+      const sLat = viewerLat + (cosA * dist) / 111_132
+      const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+
+      const zoom    = distToZoom(dist)
+      const rawElev = sampleBest(sLat, sLng, zoom)
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const effElev  = rawElev - curvDrop
+
+      // Detect local maxima: effElev was rising, now falling
+      if (wasRising && effElev < prevEffElev) {
+        // Previous step was a local maximum — insert into bin heap
+        const binIdx = distToBin(prevDist)
+        if (binIdx >= 0) {
+          const isOcean = prevRawElev <= 0.01 && prevRawElev >= -0.01  // Terrarium ocean = exactly 0
+          binHeaps[binIdx].insert({
+            effElev:     prevEffElev,
+            rawElev:     prevRawElev,
+            dist:        prevDist,
+            lat:         prevLat,
+            lng:         prevLng,
+            baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
+            flags:       isOcean ? 1 : 0,
+          })
+        }
+        // Reset valley tracking after recording a peak
+        valleyEffElev = effElev
+        valleyDist    = dist
+      }
+
+      // Track rising/falling
+      if (effElev > prevEffElev) {
+        wasRising = true
+      } else if (effElev < prevEffElev) {
+        wasRising = false
+      }
+
+      // Track valley floor (lowest point since last peak)
+      if (effElev < valleyEffElev) {
+        valleyEffElev = effElev
+        valleyDist    = dist
+      }
+
+      // Save current as previous for next iteration
+      prevEffElev = effElev
+      prevRawElev = rawElev
+      prevDist    = dist
+      prevLat     = sLat
+      prevLng     = sLng
+    }
+
+    // Handle edge case: if the last sample was still rising (peak at max range)
+    if (wasRising && prevEffElev > -Infinity) {
+      const binIdx = distToBin(prevDist)
+      if (binIdx >= 0) {
+        const isOcean = prevRawElev <= 0.01 && prevRawElev >= -0.01
+        binHeaps[binIdx].insert({
+          effElev: prevEffElev, rawElev: prevRawElev, dist: prevDist,
+          lat: prevLat, lng: prevLng,
+          baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+          baseDist: valleyEffElev === Infinity ? prevDist : valleyDist,
+          flags: isOcean ? 1 : 0,
+        })
+      }
+    }
+
+    // Flatten all bins into a single sorted-by-distance candidate list
+    const allCandidates: SilCandidate[] = []
+    for (const heap of binHeaps) {
+      for (const c of heap.sortedByDist()) {
+        allCandidates.push(c)
+      }
+    }
+    // Sort near → far for the front-to-back sweep at render time
+    allCandidates.sort((a, b) => a.dist - b.dist)
+    silCandidatesTemp[ai] = allCandidates
+
+    if (ai % 360 === 0) {
+      self.postMessage({ type: 'progress', phase: 'silhouette', progress: ai / SILHOUETTE_NUM_AZIMUTHS })
+    }
+  }
+
+  self.postMessage({ type: 'progress', phase: 'skyline', progress: 0.95 })
 
   // ── Phase 5: Pack crossing data into flat arrays ──────────────────────────
 
@@ -951,6 +1184,35 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands[bi].crossingOffsets = offsets
   }
 
+  // ── Phase 5b: Pack silhouette candidates into flat transferable arrays ────
+
+  const silOffsets = new Uint32Array(SILHOUETTE_NUM_AZIMUTHS + 1)
+  let silTotalFloats = 0
+  for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
+    silOffsets[ai] = silTotalFloats
+    silTotalFloats += silCandidatesTemp[ai].length * SILHOUETTE_FLOATS
+  }
+  silOffsets[SILHOUETTE_NUM_AZIMUTHS] = silTotalFloats
+
+  const silData = new Float32Array(silTotalFloats)
+  let silIdx = 0
+  let silTotalCandidates = 0
+  for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
+    for (const c of silCandidatesTemp[ai]) {
+      silData[silIdx++] = c.effElev
+      silData[silIdx++] = c.rawElev
+      silData[silIdx++] = c.dist
+      silData[silIdx++] = c.lat
+      silData[silIdx++] = c.lng
+      silData[silIdx++] = c.baseEffElev
+      silData[silIdx++] = c.baseDist
+      silData[silIdx++] = c.flags
+      silTotalCandidates++
+    }
+  }
+
+  console.log(`[SILHOUETTE] Packed ${silTotalCandidates} candidates across ${SILHOUETTE_NUM_AZIMUTHS} azimuths (${(silTotalFloats * 4 / 1024).toFixed(0)} KB)`)
+
   // Phase 6 removed — refined arcs now computed on-demand via 'refine-peaks' message.
   // See handleRefinePeaks() below.
 
@@ -964,12 +1226,20 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   lastCosViewerLat       = cosViewerLat
   lastSkylineComputed    = true
 
+  const silhouette: SilhouetteDataW = {
+    candidateData:    silData,
+    candidateOffsets: silOffsets,
+    resolution:       SILHOUETTE_RESOLUTION,
+    numAzimuths:      SILHOUETTE_NUM_AZIMUTHS,
+  }
+
   const skyline: SkylineData = {
     angles,
     distances,
     shading,
     bands,
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
+    silhouette,
     resolution,
     numAzimuths,
     computedAt: {
@@ -981,11 +1251,13 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     },
   }
 
-  // Transfer ArrayBuffers (zero-copy) — include band buffers
+  // Transfer ArrayBuffers (zero-copy) — include band + silhouette buffers
   const transferables: Transferable[] = [
     angles.buffer as ArrayBuffer,
     distances.buffer as ArrayBuffer,
     shading.buffer as ArrayBuffer,
+    silData.buffer as ArrayBuffer,
+    silOffsets.buffer as ArrayBuffer,
   ]
   for (const band of bands) {
     transferables.push(

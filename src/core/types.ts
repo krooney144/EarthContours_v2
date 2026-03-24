@@ -438,6 +438,86 @@ export interface PeakRefineItem {
   name: string
 }
 
+// ─── SCAN — Silhouette System (Depth-Peeled Terrain Layers) ──────────────────
+
+/**
+ * Distance bins for the silhouette system.  Log-spaced to match visual importance:
+ * dense bins where terrain detail matters (near), sparse where it doesn't (far).
+ *
+ * Each bin stores up to `maxCandidates` local-maximum terrain points per azimuth.
+ * This shared constant is the SINGLE source of truth — the worker, renderer,
+ * and future feature renderers (rivers, lakes) all import it.
+ *
+ * Format: [minDist_m, maxDist_m, maxCandidates]
+ */
+export const DISTANCE_BINS: readonly [number, number, number][] = [
+  [0,        1_000,   5],   // Bin 0: ultra-near cliffs/hills
+  [1_000,    5_000,   5],   // Bin 1: near valleys/ridges
+  [5_000,   15_000,   5],   // Bin 2: mid-near ranges
+  [15_000,  40_000,   4],   // Bin 3: mid-range peaks
+  [40_000, 100_000,   3],   // Bin 4: far ridges
+  [100_000, 250_000,  2],   // Bin 5: distant ranges
+  [250_000, 400_000,  2],   // Bin 6: horizon features
+] as const
+
+/** Total max candidates per azimuth across all bins. */
+export const MAX_SILHOUETTE_CANDIDATES = DISTANCE_BINS.reduce((s, b) => s + b[2], 0)  // 26
+
+/** Number of floats stored per silhouette candidate in the packed array.
+ *  [effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags]
+ *  flags: bit 0 = isOcean (rawElev≈0 on ocean tile). Remaining bits reserved. */
+export const SILHOUETTE_FLOATS_PER_CANDIDATE = 8
+
+/**
+ * Packed silhouette data for one depth range.
+ * The worker stores local elevation maxima (hilltops/ridgetops) along each
+ * azimuth ray, grouped into distance bins.  At render time the main thread
+ * does a front-to-back sweep with atan2 at the current AGL to determine
+ * which candidates are actually visible silhouette edges.
+ *
+ * Storage is AGL-independent: effElev = rawElev − curvDrop doesn't change
+ * when the viewer goes up/down.  Angles are computed on the main thread.
+ */
+export interface SilhouetteData {
+  /** Packed candidate array.  Each candidate = SILHOUETTE_FLOATS_PER_CANDIDATE floats:
+   *  [effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags].
+   *  All azimuths concatenated — use silhouetteOffsets to index. */
+  candidateData: Float32Array
+  /** Per-azimuth offset into candidateData (length = numAzimuths + 1).
+   *  Azimuth ai's candidates start at silhouetteOffsets[ai] and end before
+   *  silhouetteOffsets[ai+1].  Candidates within each azimuth are sorted
+   *  near-to-far by distance. */
+  candidateOffsets: Uint32Array
+  /** Azimuth resolution for this silhouette data (steps per degree). */
+  resolution: number
+  /** Number of azimuth samples = 360 × resolution. */
+  numAzimuths: number
+}
+
+/** A single visible silhouette layer at one azimuth, computed at render time.
+ *  Produced by the front-to-back sweep in buildSilhouetteLayers(). */
+export interface SilhouetteLayer {
+  /** Elevation angle of this layer's peak (radians) — top of fill, where stroke goes */
+  peakAngle: number
+  /** Elevation angle of this layer's base (radians) — bottom of fill */
+  baseAngle: number
+  /** Raw ground elevation at the peak point (metres) — for color mapping */
+  rawElev: number
+  /** Distance to the peak point (metres) — for line weight / atmospheric fade */
+  dist: number
+  /** GPS of the peak point — for feature attachment */
+  lat: number
+  lng: number
+  /** Effective elevation (rawElev - curvDrop) — for re-use */
+  effElev: number
+  /** Is this candidate over ocean? */
+  isOcean: boolean
+}
+
+/** Per-azimuth array of visible silhouette layers.
+ *  Computed on the main thread from SilhouetteData whenever AGL changes. */
+export type SilhouetteLayers = SilhouetteLayer[][]  // [azimuthIdx][layerIdx near→far]
+
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
@@ -471,6 +551,11 @@ export interface SkylineData {
    *  Built by grouping per-azimuth peak detections at similar distances.
    *  Used by renderRidgeStrands for variable-weight ridgeline rendering. */
   ridgeStrands: RidgeStrand[]
+  /** Depth-peeled silhouette data — local elevation maxima per azimuth across
+   *  all distance bins.  AGL-independent; the main thread computes visibility
+   *  at render time via front-to-back sweep.  Null if silhouette computation
+   *  was skipped (e.g. very old worker). */
+  silhouette: SilhouetteData | null
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
