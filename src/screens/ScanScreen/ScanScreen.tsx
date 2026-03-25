@@ -1300,34 +1300,16 @@ function renderBandContours(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // ── Pre-build per-column nearest silhouette peakY lookup ────────────────
-  // For each screen column, project the nearest silhouette surface's peak
-  // angle to screen Y. Contour points at or below this Y are occluded.
-  // One project() call per column upfront → O(1) lookup per contour point.
+  // ── Silhouette occlusion setup ──────────────────────────────────────────
+  // For each contour point we check ALL silhouette layers at that azimuth
+  // that are CLOSER than the contour. If any closer surface's peakY is
+  // above (lower Y) the contour's screen Y, the contour is occluded.
+  // This handles intermediate surfaces correctly — a contour at 20km behind
+  // a silhouette at 10km is culled even though the nearest surface at 3km
+  // is below it on screen.
   const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
   const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
-  const OCCLUSION_TOLERANCE_PX = 2  // Don't draw contours within 2px of ridgeline edge
-
-  let silPeakYPerCol: Float32Array | null = null
-  if (hasSilOcclusion && silhouetteLayers) {
-    silPeakYPerCol = new Float32Array(W)
-    silPeakYPerCol.fill(H + 1)  // Default: no silhouette → everything visible
-
-    for (let col = 0; col < W; col++) {
-      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-      const normBearing = ((bearingDeg % 360) + 360) % 360
-      const fracIdx = normBearing * silResolution
-      const ai = Math.round(fracIdx) % numSilAz
-
-      const azLayers = silhouetteLayers[ai]
-      if (azLayers && azLayers.length > 0) {
-        // layers[0] is the nearest silhouette surface
-        const nearest = azLayers[0]
-        const { y } = project(bearingDeg, nearest.peakAngle, cam)
-        silPeakYPerCol[col] = y
-      }
-    }
-  }
+  const OCCLUSION_TOLERANCE_PX = 2  // Cull contours within 2px of ridgeline edge
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1380,21 +1362,34 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (screen-Y based) ────────────────────
-      // A contour point is occluded if its screen Y is AT or BELOW the
-      // nearest silhouette surface's peakY at this column. This correctly
-      // handles far mountains visible ABOVE near terrain — a far contour
-      // at 50km with screen Y=100 draws fine if the nearest silhouette
-      // peakY=300 at that column (100 < 300, it's above the surface).
-      if (silPeakYPerCol) {
-        const col = Math.round(x)
-        if (col >= 0 && col < W) {
-          const silPeakY = silPeakYPerCol[col]
-          if (y >= silPeakY - OCCLUSION_TOLERANCE_PX) {
-            // Contour point is behind or at the nearest silhouette surface
-            if (pathStarted) { ctx.stroke(); pathStarted = false }
-            continue
+      // ── Silhouette occlusion check (multi-layer screen-Y) ──────────────
+      // Check ALL silhouette layers at this bearing that are CLOSER than
+      // the contour point. If ANY closer surface has a peakY above (<=)
+      // the contour's screen Y, the contour is behind that surface.
+      // Layers are sorted near→far, so we iterate until dist >= pt.dist.
+      if (hasSilOcclusion && silhouetteLayers) {
+        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silResolution) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        let occluded = false
+        if (azLayers) {
+          for (let li = 0; li < azLayers.length; li++) {
+            const layer = azLayers[li]
+            if (layer.isOcean) continue
+            // Only check surfaces CLOSER than this contour point
+            if (layer.dist >= pt.dist) break  // layers sorted near→far, done
+            // Project this closer surface's peak to screen Y
+            const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
+            if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
+              // Contour point is at or below a closer surface's ridgeline
+              occluded = true
+              break
+            }
           }
+        }
+        if (occluded) {
+          if (pathStarted) { ctx.stroke(); pathStarted = false }
+          continue
         }
       }
 
