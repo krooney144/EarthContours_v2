@@ -14,7 +14,7 @@
 
 import * as THREE from 'three'
 import { createLogger } from '../core/logger'
-import type { TerrainMeshData } from '../core/types'
+import type { TerrainMeshData, WaterBody, River, Glacier, Coastline, LatLng } from '../core/types'
 import { ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 import { marchingSquares } from './marchingSquares'
 
@@ -60,6 +60,9 @@ export class TerrainRenderer {
   private terrainMesh: THREE.Mesh | null = null
   private contourLines: THREE.LineSegments | null = null
   private canvas: HTMLCanvasElement | null = null
+
+  // Geo overlays
+  private geoOverlayGroup: THREE.Group | null = null
 
   // Terrain dimensions in metres (set when terrain loads)
   private terrainWidth_m = 0
@@ -131,6 +134,8 @@ export class TerrainRenderer {
       else mat.dispose()
       this.contourLines = null
     }
+
+    this.clearGeoOverlays()
 
     if (this.renderer) {
       this.renderer.dispose()
@@ -334,6 +339,257 @@ export class TerrainRenderer {
 
     posAttr.needsUpdate = true
     this.terrainMesh.geometry.computeVertexNormals()
+  }
+
+  // ── Geographic overlays (rivers, lakes, glaciers, coastlines) ────────────────
+
+  /**
+   * Remove all geo overlay objects from the scene and dispose their geometry.
+   */
+  clearGeoOverlays(): void {
+    if (this.geoOverlayGroup && this.scene) {
+      this.scene.remove(this.geoOverlayGroup)
+      this.geoOverlayGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Line) {
+          obj.geometry.dispose()
+          const mat = obj.material
+          if (Array.isArray(mat)) mat.forEach(m => m.dispose())
+          else (mat as THREE.Material).dispose()
+        }
+      })
+      this.geoOverlayGroup = null
+    }
+  }
+
+  /**
+   * Convert a lat/lng point to ENU world coordinates on the terrain surface.
+   * Returns { x, y, z } in metres, with y elevated to terrain height + offset.
+   */
+  private latLngToWorld(
+    lat: number, lng: number,
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    yOffset: number,
+  ): { x: number; y: number; z: number } | null {
+    const { bounds, elevations, width, height, minElevation_m } = mesh
+
+    // Normalise to 0-1 within bounds
+    const nx = (lng - bounds.west) / (bounds.east - bounds.west)
+    const ny = (bounds.north - lat) / (bounds.north - bounds.south)
+
+    // Allow a small tolerance outside bounds for features that cross the edge
+    if (nx < -0.02 || nx > 1.02 || ny < -0.02 || ny > 1.02) return null
+
+    // Grid sample coordinates (clamped)
+    const gx = Math.max(0, Math.min(width - 1, nx * (width - 1)))
+    const gy = Math.max(0, Math.min(height - 1, ny * (height - 1)))
+
+    // Bilinear interpolation of elevation
+    const x0 = Math.floor(gx), x1 = Math.min(x0 + 1, width - 1)
+    const y0 = Math.floor(gy), y1 = Math.min(y0 + 1, height - 1)
+    const fx = gx - x0, fy = gy - y0
+    const elev =
+      elevations[y0 * width + x0] * (1 - fx) * (1 - fy) +
+      elevations[y0 * width + x1] * fx * (1 - fy) +
+      elevations[y1 * width + x0] * (1 - fx) * fy +
+      elevations[y1 * width + x1] * fx * fy
+
+    return {
+      x: (nx - 0.5) * this.terrainWidth_m,
+      y: (elev - minElevation_m) * verticalExaggeration + yOffset,
+      z: (ny - 0.5) * this.terrainDepth_m,
+    }
+  }
+
+  /**
+   * Convert a polyline of lat/lng points to a 3D line following the terrain.
+   * Skips points outside bounds; returns position array for BufferGeometry.
+   */
+  private polylineToPositions(
+    points: LatLng[],
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    yOffset: number,
+  ): number[] {
+    const positions: number[] = []
+    for (const pt of points) {
+      const w = this.latLngToWorld(pt.lat, pt.lng, mesh, verticalExaggeration, yOffset)
+      if (w) positions.push(w.x, w.y, w.z)
+    }
+    return positions
+  }
+
+  /**
+   * Build all geo overlays for the current terrain.
+   * Filters features to the terrain bounding box, projects onto the mesh surface.
+   */
+  buildGeoOverlays(
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    waterBodies: WaterBody[],
+    rivers: River[],
+    glaciers: Glacier[],
+    coastlines: Coastline[],
+    options: { showLakes: boolean; showRivers: boolean; showGlaciers: boolean; showCoastlines: boolean },
+  ): { lakeCount: number; riverCount: number; glacierCount: number; coastlineCount: number } {
+    this.clearGeoOverlays()
+    if (!this.scene) return { lakeCount: 0, riverCount: 0, glacierCount: 0, coastlineCount: 0 }
+
+    this.geoOverlayGroup = new THREE.Group()
+
+    const { bounds } = mesh
+    const yOffset = this.elevRange_m * verticalExaggeration * 0.003  // small lift above surface
+
+    // ── Helper: does a feature's points intersect the terrain bounds? ──────
+    const boundsIntersects = (points: LatLng[]): boolean => {
+      for (const p of points) {
+        if (p.lat >= bounds.south && p.lat <= bounds.north &&
+            p.lng >= bounds.west  && p.lng <= bounds.east) return true
+      }
+      return false
+    }
+
+    let lakeCount = 0
+    let riverCount = 0
+    let glacierCount = 0
+    let coastlineCount = 0
+
+    // ── Rivers ────────────────────────────────────────────────────────────────
+    if (options.showRivers) {
+      const filtered = rivers.filter(r => boundsIntersects(r.points))
+      for (const river of filtered) {
+        const positions = this.polylineToPositions(river.points, mesh, verticalExaggeration, yOffset)
+        if (positions.length < 6) continue  // need at least 2 points
+
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+
+        const isMinor = river.isStream || (river.scalerank != null && river.scalerank >= 7)
+        const mat = new THREE.LineBasicMaterial({
+          color: 0x4488cc,
+          transparent: true,
+          opacity: isMinor ? 0.3 : 0.55,
+          linewidth: 1,
+          depthTest: true,
+          depthWrite: false,
+        })
+
+        this.geoOverlayGroup.add(new THREE.Line(geo, mat))
+        riverCount++
+      }
+    }
+
+    // ── Lakes ─────────────────────────────────────────────────────────────────
+    if (options.showLakes) {
+      const filtered = waterBodies.filter(w => boundsIntersects(w.polygon))
+      for (const lake of filtered) {
+        const positions = this.polylineToPositions(lake.polygon, mesh, verticalExaggeration, yOffset)
+        if (positions.length < 9) continue  // need at least 3 points
+
+        // Render as an outlined polygon (line loop) — simpler and more performant
+        // than triangulated fill, and avoids complex triangulation for concave shapes
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+
+        const mat = new THREE.LineBasicMaterial({
+          color: 0x3388bb,
+          transparent: true,
+          opacity: 0.5,
+          linewidth: 1,
+          depthTest: true,
+          depthWrite: false,
+        })
+
+        this.geoOverlayGroup.add(new THREE.LineLoop(geo, mat))
+
+        // Also fill the polygon with a semi-transparent mesh
+        // Use a flat shape at the average Y of the polygon points
+        if (positions.length >= 9) {
+          let avgY = 0
+          const count = positions.length / 3
+          for (let i = 0; i < count; i++) avgY += positions[i * 3 + 1]
+          avgY /= count
+
+          const shape = new THREE.Shape()
+          shape.moveTo(positions[0], positions[2])
+          for (let i = 1; i < count; i++) {
+            shape.lineTo(positions[i * 3], positions[i * 3 + 2])
+          }
+          shape.closePath()
+
+          const shapeGeo = new THREE.ShapeGeometry(shape)
+          // ShapeGeometry is in XY plane, we need XZ — rotate to horizontal
+          shapeGeo.rotateX(-Math.PI / 2)
+          // Position at the average Y elevation
+          const fillMat = new THREE.MeshBasicMaterial({
+            color: 0x2266aa,
+            transparent: true,
+            opacity: 0.25,
+            side: THREE.DoubleSide,
+            depthTest: true,
+            depthWrite: false,
+          })
+          const fillMesh = new THREE.Mesh(shapeGeo, fillMat)
+          fillMesh.position.y = avgY
+          this.geoOverlayGroup.add(fillMesh)
+        }
+
+        lakeCount++
+      }
+    }
+
+    // ── Glaciers ──────────────────────────────────────────────────────────────
+    if (options.showGlaciers) {
+      const filtered = glaciers.filter(g => boundsIntersects(g.polygon))
+      for (const glacier of filtered) {
+        const positions = this.polylineToPositions(glacier.polygon, mesh, verticalExaggeration, yOffset * 1.5)
+        if (positions.length < 9) continue
+
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+
+        const mat = new THREE.LineBasicMaterial({
+          color: 0xaaddee,
+          transparent: true,
+          opacity: 0.5,
+          linewidth: 1,
+          depthTest: true,
+          depthWrite: false,
+        })
+
+        this.geoOverlayGroup.add(new THREE.LineLoop(geo, mat))
+        glacierCount++
+      }
+    }
+
+    // ── Coastlines ────────────────────────────────────────────────────────────
+    if (options.showCoastlines) {
+      const filtered = coastlines.filter(c => boundsIntersects(c.points))
+      for (const coast of filtered) {
+        const positions = this.polylineToPositions(coast.points, mesh, verticalExaggeration, yOffset * 0.5)
+        if (positions.length < 6) continue
+
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+
+        const mat = new THREE.LineBasicMaterial({
+          color: 0xc4a86e,
+          transparent: true,
+          opacity: 0.5,
+          linewidth: 1,
+          depthTest: true,
+          depthWrite: false,
+        })
+
+        this.geoOverlayGroup.add(new THREE.Line(geo, mat))
+        coastlineCount++
+      }
+    }
+
+    this.scene.add(this.geoOverlayGroup)
+
+    log.info('Geo overlays built', { lakeCount, riverCount, glacierCount, coastlineCount })
+    return { lakeCount, riverCount, glacierCount, coastlineCount }
   }
 
   // ── Camera update from cameraStore orbit params ─────────────────────────────
