@@ -948,17 +948,16 @@ function projectFirstPerson(
 
 /** Distance threshold for "near" peaks — shown if they have line-of-sight
  *  regardless of whether they poke above the skyline. */
-const NEAR_PEAK_DIST = 50_000  // 50 km
+const ALWAYS_SHOW_PEAK_DIST = 15_000  // 15 km — always label peaks this close
 
 /**
  * Two-tier peak visibility:
- *  1. Skyline peaks (any distance): visible if peak angle ≥ ridgeline angle.
- *  2. Near peaks (< 50 km): visible if not fully occluded by terrain between
- *     viewer and peak — approximated by checking the peak's angle against
- *     the per-band ridgeline for bands closer than the peak's distance.
+ *  1. Close peaks (< 15 km): ALWAYS visible — you'd see the name on a trail
+ *     sign, so always label them regardless of terrain occlusion.
+ *  2. Far peaks (≥ 15 km): visible only if line-of-sight is clear — peak angle
+ *     must be above the ridgeline of every closer band (true occlusion check).
  *
- * FOV check uses the full horizontal FOV (not the 60% margin from before)
- * so peaks significantly off-center still appear when they're in-frame.
+ * FOV check uses the full horizontal FOV so peaks anywhere in-frame appear.
  */
 function isPeakVisible(
   peak: Peak,
@@ -983,6 +982,9 @@ function isPeakVisible(
   if (angleDiff < -180) angleDiff += 360
   if (Math.abs(angleDiff) > hfov * 0.5) return false
 
+  // Tier 1: close peaks — always visible, no occlusion check
+  if (dist <= ALWAYS_SHOW_PEAK_DIST) return true
+
   // Earth curvature correction
   const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
   const peakAngle = Math.atan2(peak.elevation_m - curvDrop - viewerElev, dist)
@@ -991,27 +993,23 @@ function isPeakVisible(
   const ridgeAngle = skylineAngleAt(skyline, bearing, projected)
   const tolerance = 0.15 * DEG_TO_RAD
 
-  // Tier 1: skyline peak — above the overall ridgeline
+  // Tier 2: skyline peak — above the overall ridgeline
   if (peakAngle >= ridgeAngle - tolerance) return true
 
-  // Tier 2: near-ground peak — within 50 km, check if closer terrain occludes it.
-  // Only bands whose maxDist < peak distance can occlude; if the peak's angle is
-  // above all those closer-band ridgelines, it has line-of-sight.
-  if (dist <= NEAR_PEAK_DIST) {
-    let occluded = false
-    for (let bi = 0; bi < skyline.bands.length; bi++) {
-      const bandCfg = DEPTH_BANDS[bi]
-      if (!bandCfg || bandCfg.minDist >= dist) continue  // band is farther than peak
-      const bandAngle = bandAngleAt(skyline, bi, bearing, projected)
-      if (bandAngle > -Math.PI / 2 + 0.001 && peakAngle < bandAngle - tolerance) {
-        occluded = true
-        break
-      }
+  // Tier 3: line-of-sight check — peak is below the overall ridgeline,
+  // but check if ALL closer bands actually occlude it. If any closer band's
+  // ridgeline is above the peak angle, it's occluded.
+  let occluded = false
+  for (let bi = 0; bi < skyline.bands.length; bi++) {
+    const bandCfg = DEPTH_BANDS[bi]
+    if (!bandCfg || bandCfg.minDist >= dist) continue  // band is farther than peak
+    const bandAngle = bandAngleAt(skyline, bi, bearing, projected)
+    if (bandAngle > -Math.PI / 2 + 0.001 && peakAngle < bandAngle - tolerance) {
+      occluded = true
+      break
     }
-    if (!occluded) return true
   }
-
-  return false
+  return !occluded
 }
 
 // ─── Quick Render (SkylineData) ───────────────────────────────────────────────
