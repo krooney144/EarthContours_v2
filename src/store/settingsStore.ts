@@ -286,7 +286,7 @@ export const useSettingsStore = create<SettingsStore>()(
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
         if (fromVersion < 2 && typeof state.verticalExaggeration === 'number') {
-          const VALID: VerticalExaggeration[] = [1, 2, 4, 10, 20]
+          const VALID: VerticalExaggeration[] = [1, 1.5, 2, 4, 10, 20]
           const old = state.verticalExaggeration as number
           const snapped = VALID.reduce((best, v) =>
             Math.abs(v - old) < Math.abs(best - old) ? v : best
