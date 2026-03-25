@@ -1586,10 +1586,10 @@ function renderTerrain(
             if (peakY < H) {
               const distT = Math.min(1, nearest.dist / silMaxDist)
               const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (nearest.rawElev - silElevMin) / silElevRange)) : 0.5
-              // DIAGNOSTIC: bright red for nearest-layer ground fill
-              const r = Math.round(180 - distT * 100)
-              const g = Math.round(20 + distT * 10)
-              const b = Math.round(20 + distT * 10)
+              // Distance-based fill: near=dark deep blue, far=slightly brighter slate
+              const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
+              const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
+              const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
               ctx.fillStyle = `rgb(${r},${g},${b})`
               ctx.fillRect(col, peakY, 1, H - peakY)
             }
@@ -1615,10 +1615,10 @@ function renderTerrain(
 
             const distT = Math.min(1, layer.dist / silMaxDist)
             const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (layer.rawElev - silElevMin) / silElevRange)) : 0.5
-            // DIAGNOSTIC: red fills — near=bright red, far=dark red
-            const r = Math.round(180 - distT * 100)
-            const g = Math.round(20 + distT * 10)
-            const b = Math.round(20 + distT * 10)
+            // Distance-based fill: near=dark deep blue, far=slightly brighter slate
+            const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
+            const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
+            const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
             ctx.fillStyle = `rgb(${r},${g},${b})`
             ctx.fillRect(col, peakY, 1, baseY - peakY)
           }
