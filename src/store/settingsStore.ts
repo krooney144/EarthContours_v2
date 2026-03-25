@@ -273,12 +273,15 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 5,                          // bump when persisted shape changes
+      version: 6,                          // bump when persisted shape changes
       /**
        * Migrations:
        * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
        * v2→v3: replace showRiverLabels + showWaterLabels with showRivers + showLakes + showGlaciers.
        * v3→v4: add showFill (default false), showBandLines default changed to false.
+       * v4→v5: add darkMode.
+       * v5→v6: fix showFill/showBandLines defaults — v4 wrongly set them to false,
+       *        making terrain invisible for existing users.
        */
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
@@ -291,14 +294,18 @@ export const useSettingsStore = create<SettingsStore>()(
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
         }
-        if (fromVersion < 5) {
-          log.info('Migrating settings v4→v5: add darkMode')
+        if (fromVersion < 6) {
+          log.info('Migrating settings v5→v6: fix showFill/showBandLines defaults to true')
+          // v4 migration wrongly defaulted these to false, making terrain see-through.
+          // Force them on for all existing users — they can toggle off in settings.
+          state.showFill = true
+          state.showBandLines = true
           if (state.darkMode === undefined) state.darkMode = true
         }
         if (fromVersion < 4) {
-          log.info('Migrating settings v3→v4: add showFill, showBandLines default off')
-          if (state.showFill === undefined) state.showFill = false
-          if (state.showBandLines === undefined) state.showBandLines = false
+          log.info('Migrating settings v3→v4: add showFill, showBandLines')
+          if (state.showFill === undefined) state.showFill = true
+          if (state.showBandLines === undefined) state.showBandLines = true
         }
         if (fromVersion < 3) {
           log.info('Migrating water settings v2→v3')

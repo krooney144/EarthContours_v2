@@ -606,17 +606,22 @@ function renderSilhouettes(
       // Skip if no visible height
       if (baseY <= peakY) continue
 
-      // Opaque fill color: distance-based depth cue
+      // Opaque fill color: distance + elevation depth cues.
+      // Must be CLEARLY distinct from the sky gradient (sky is rgb(0,8,16)→rgb(15,44,66)).
+      // Near terrain = darker/grounded, far terrain = lighter/atmospheric.
       const distT = Math.min(1, layer.dist / maxDist)
+      const elevT = hasElevRange ? Math.min(1, Math.max(0, (layer.rawElev - globalElevMin) / elevRange)) : 0.5
       if (darkMode) {
-        // Ocean-depth palette: nearer = darker, farther = slightly lighter
-        const r = Math.round(3 + distT * 10)
-        const g = Math.round(14 + distT * 40)
-        const b = Math.round(22 + distT * 55)
+        // Near: dark earthy teal, clearly darker than sky.
+        // Far: slightly brighter, still darker than sky at horizon.
+        // Elevation: higher = slightly brighter, lower = darker.
+        const r = Math.round(1 + distT * 8 + elevT * 4)
+        const g = Math.round(8 + distT * 20 + elevT * 12)
+        const b = Math.round(12 + distT * 30 + elevT * 10)
         ctx.fillStyle = `rgb(${r},${g},${b})`
       } else {
-        const base = Math.round(180 + distT * 60)
-        ctx.fillStyle = `rgb(${base},${Math.round(base * 1.02)},${Math.round(base * 0.96)})`
+        const base = Math.round(140 + distT * 40 + elevT * 30)
+        ctx.fillStyle = `rgb(${base},${Math.round(base * 1.05)},${Math.round(base * 0.92)})`
       }
 
       ctx.fillRect(col, peakY, 1, baseY - peakY)
@@ -1296,15 +1301,17 @@ function bandStyleForIndex(bandIndex: number, bandCount: number, darkMode: boole
   // t = 0 (far) → 1 (near)
   const t = bandCount <= 1 ? 1 : 1 - bandIndex / (bandCount - 1)
 
-  // Dark mode fill: void (#000810) → deep (#124B6B), on the ocean-depth palette.
-  // Light mode fill: warm earth tones — light sandy beige (far) → deeper olive (near).
+  // Dark mode fill: must be CLEARLY darker than the sky gradient
+  // (sky = rgb(0,8,16) at top → rgb(15,44,66) at horizon).
+  // Near bands = darkest (solid ground), far bands = slightly brighter (atmospheric).
+  // These sit ON TOP of silhouette fills, providing band-level depth cues.
   const FILL_COLORS_DARK: [number, number, number][] = [
-    [2,  12, 20],   // ultra-near — near void
-    [5,  24, 38],   // near — 20% toward deep
-    [8,  36, 56],   // mid-near — 40% toward deep
-    [11, 48, 74],   // mid — 60% toward deep
-    [14, 62, 90],   // mid-far — 80% toward deep
-    [18, 75, 107],  // far — exactly ec-deep
+    [1,   6,  10],   // ultra-near — deep void, clearly darker than sky
+    [2,  10,  18],   // near — barely brighter
+    [4,  18,  30],   // mid-near
+    [6,  28,  44],   // mid
+    [10, 38,  58],   // mid-far
+    [14, 50,  72],   // far — still darker than sky at horizon
   ]
   const FILL_COLORS_LIGHT: [number, number, number][] = [
     [85, 100, 80],   // ultra-near — deep olive green
@@ -2002,13 +2009,12 @@ function drawScanCanvas(
     ctx.restore()
   }
 
-  // ── 1b. Near-field occlusion — opaque terrain surface fill (0–2km) ────────
-  // Draws BEFORE silhouettes and bands. Uses the full elevation profile
-  // (not just ridgeline maxima) to create an impenetrable near-terrain fill.
-  // Only active when AGL < 60m — at higher altitudes band fills suffice.
-  if (projectedNearProfile) {
-    renderNearFieldOcclusion(ctx, projectedNearProfile, cam, darkMode)
-  }
+  // ── 1b. Near-field occlusion — DISABLED ───────────────────────────────────
+  // The running-max envelope approach creates flat-topped solid fills that
+  // don't follow terrain contours — visible as a "black mountain" artifact.
+  // Near-field profile data is still collected by the worker and available
+  // in skylineData.nearProfile for future terrain-surface rendering.
+  // Silhouette fills handle column-major occlusion instead.
 
   // ── 2a. Silhouette fills — opaque column-major terrain occlusion ─────────
   // Draws BEFORE band fills. Column-major opaque fills block background
