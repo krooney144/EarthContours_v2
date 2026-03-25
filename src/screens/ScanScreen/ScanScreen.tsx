@@ -606,23 +606,14 @@ function renderSilhouettes(
       // Skip if no visible height
       if (baseY <= peakY) continue
 
-      // Opaque fill color: distance + elevation depth cues.
-      // Must be CLEARLY distinct from the sky gradient (sky is rgb(0,8,16)→rgb(15,44,66)).
-      // Near terrain = darker/grounded, far terrain = lighter/atmospheric.
+      // ── DIAGNOSTIC: bright red fill to verify silhouette fills are rendering ──
+      // TODO: revert to distance+elevation colors after verifying
       const distT = Math.min(1, layer.dist / maxDist)
-      const elevT = hasElevRange ? Math.min(1, Math.max(0, (layer.rawElev - globalElevMin) / elevRange)) : 0.5
-      if (darkMode) {
-        // Near: dark earthy teal, clearly darker than sky.
-        // Far: slightly brighter, still darker than sky at horizon.
-        // Elevation: higher = slightly brighter, lower = darker.
-        const r = Math.round(1 + distT * 8 + elevT * 4)
-        const g = Math.round(8 + distT * 20 + elevT * 12)
-        const b = Math.round(12 + distT * 30 + elevT * 10)
-        ctx.fillStyle = `rgb(${r},${g},${b})`
-      } else {
-        const base = Math.round(140 + distT * 40 + elevT * 30)
-        ctx.fillStyle = `rgb(${base},${Math.round(base * 1.05)},${Math.round(base * 0.92)})`
-      }
+      // Near = bright red, far = dark red — makes it impossible to miss
+      const r = Math.round(180 - distT * 100)
+      const g = Math.round(20 + distT * 10)
+      const b = Math.round(20 + distT * 10)
+      ctx.fillStyle = `rgb(${r},${g},${b})`
 
       ctx.fillRect(col, peakY, 1, baseY - peakY)
     }
@@ -1527,8 +1518,12 @@ function renderTerrain(
     ctx.lineTo(W, H)
     ctx.closePath()
     if (hasVisiblePixels && showFill) {
+      // ── DIAGNOSTIC: semi-transparent band fills so silhouette fills show through ──
+      // TODO: revert to opaque band fills after verifying silhouette rendering
+      ctx.globalAlpha = 0.3
       ctx.fillStyle = style.fillColor
       ctx.fill()
+      ctx.globalAlpha = 1.0
     }
 
     // ── Contour lines for THIS band (drawn between fill and stroke) ─────
