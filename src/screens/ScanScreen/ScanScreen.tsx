@@ -606,14 +606,23 @@ function renderSilhouettes(
       // Skip if no visible height
       if (baseY <= peakY) continue
 
-      // ── DIAGNOSTIC: bright red fill to verify silhouette fills are rendering ──
-      // TODO: revert to distance+elevation colors after verifying
+      // Opaque fill color: distance + elevation depth cues.
+      // Silhouettes are the PRIMARY fill — band fills are disabled when silhouettes active.
+      // Near terrain = darker/grounded, far terrain = lighter/atmospheric.
       const distT = Math.min(1, layer.dist / maxDist)
-      // Near = bright red, far = dark red — makes it impossible to miss
-      const r = Math.round(180 - distT * 100)
-      const g = Math.round(20 + distT * 10)
-      const b = Math.round(20 + distT * 10)
-      ctx.fillStyle = `rgb(${r},${g},${b})`
+      const elevT = hasElevRange ? Math.min(1, Math.max(0, (layer.rawElev - globalElevMin) / elevRange)) : 0.5
+      if (darkMode) {
+        // Near: dark earthy tones, clearly darker than sky.
+        // Far: lighter, more atmospheric. Sky is rgb(0,8,16)→rgb(15,44,66).
+        // These must be BELOW sky brightness to read as solid terrain.
+        const r = Math.round(2 + distT * 10 + elevT * 6)
+        const g = Math.round(10 + distT * 24 + elevT * 14)
+        const b = Math.round(16 + distT * 32 + elevT * 12)
+        ctx.fillStyle = `rgb(${r},${g},${b})`
+      } else {
+        const base = Math.round(140 + distT * 40 + elevT * 30)
+        ctx.fillStyle = `rgb(${base},${Math.round(base * 1.05)},${Math.round(base * 0.92)})`
+      }
 
       ctx.fillRect(col, peakY, 1, baseY - peakY)
     }
@@ -1518,12 +1527,8 @@ function renderTerrain(
     ctx.lineTo(W, H)
     ctx.closePath()
     if (hasVisiblePixels && showFill) {
-      // ── DIAGNOSTIC: semi-transparent band fills so silhouette fills show through ──
-      // TODO: revert to opaque band fills after verifying silhouette rendering
-      ctx.globalAlpha = 0.3
       ctx.fillStyle = style.fillColor
       ctx.fill()
-      ctx.globalAlpha = 1.0
     }
 
     // ── Contour lines for THIS band (drawn between fill and stroke) ─────
@@ -2036,10 +2041,12 @@ function drawScanCanvas(
 
   // ── 2b. Terrain — depth-layered rendering (far→near painter's order) ─────────
   // Each band draws: fill → contours → stroke (new rendering order).
-  // Contours are integrated into renderTerrain so they sit naturally in the
-  // visual stack — on top of their own band's fill, below next nearer band's fill.
+  // When silhouettes are active, they ARE the fill — disable band fills to avoid
+  // painting over silhouette fills. Band strokes + contours still draw on top.
+  const hasSilhouettes = !!(silhouetteLayers && skylineData?.silhouette)
+  const effectiveShowFill = showFill && !hasSilhouettes
   if (skylineData) {
-    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
+    renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, effectiveShowFill,
       contourStrands, showContourLines, darkMode)
   }
 
