@@ -223,10 +223,13 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       bounds,
     }
 
+    // Clear old meshData so the Explore screen shows the loading bar
+    // instead of keeping the previous terrain visible during load.
     set({
       loadingState: 'loading',
       loadingProgress: 0,
       loadingMessage: 'Loading custom area...',
+      meshData: null,
       activeRegion: customRegion,
       isCustomBounds: true,
       terrainZoom: tileZoom,

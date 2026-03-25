@@ -307,8 +307,13 @@ export async function loadRegionElevation(
   })
 
   // ── Calculate tile range ──────────────────────────────────────────────────
-  const margin = 0.5  // degrees of margin around bounds to avoid edge artifacts
+  // Scale margin with area size — the old fixed 0.5° margin is enormous for
+  // small selections (e.g. a 4-mile box would fetch ~2400 tiles at z14
+  // instead of ~9).  Use ~10% of the area's span, clamped to 0.02°–0.5°.
   const { north, south, east, west } = region.bounds
+  const latSpan = north - south
+  const lngSpan = east - west
+  const margin = Math.max(0.02, Math.min(0.5, Math.max(latSpan, lngSpan) * 0.1))
 
   const tileNW = latLngToTile(north + margin, west - margin, z)
   const tileSE = latLngToTile(south - margin, east + margin, z)
