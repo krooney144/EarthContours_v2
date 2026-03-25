@@ -33,8 +33,8 @@ export const PREVIEW_BREAKPOINT_PX = 900
 
 // ─── Camera Defaults ─────────────────────────────────────────────────────────
 
-/** Default eye height above ground in meters (300ft ≈ 91m) */
-export const DEFAULT_HEIGHT_M = 91.44
+/** Default eye height above ground in meters (10ft ≈ 3m) — ground-level perspective */
+export const DEFAULT_HEIGHT_M = 3.048
 
 /** Maximum eye height in meters (10000ft ≈ 3048m) */
 export const MAX_HEIGHT_M = 3048
