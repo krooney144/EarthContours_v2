@@ -70,6 +70,18 @@ const ExploreScreen: React.FC = () => {
   const [showDebug, setShowDebug] = useState(false)
   const [geoCounts, setGeoCounts] = useState({ lakeCount: 0, riverCount: 0, glacierCount: 0, coastlineCount: 0 })
 
+  // Throttled camera tick — HTML overlays (peak labels) update at ~8fps max
+  // while the Three.js canvas renders at full 60fps. Prevents layout thrashing.
+  const [labelTick, setLabelTick] = useState(0)
+  const labelThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (labelThrottleRef.current) return  // already scheduled
+    labelThrottleRef.current = setTimeout(() => {
+      setLabelTick(t => t + 1)
+      labelThrottleRef.current = null
+    }, 120)
+  }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ])
+
   const [gpsPrompt, setGpsPrompt] = useState<string | null>(null)
 
   const [showHint, setShowHint] = useState<boolean>(() => {
@@ -448,6 +460,7 @@ const ExploreScreen: React.FC = () => {
               units={units}
               renderer={rendererRef.current}
               orbitRadius={orbitRadius}
+              labelTick={labelTick}
             />
           </div>
         )}
@@ -634,7 +647,8 @@ const PeakLabels3D: React.FC<{
   units: 'imperial' | 'metric'
   renderer: TerrainRenderer
   orbitRadius: number
-}> = ({ peaks, meshData, verticalExaggeration, containerW, containerH, units, renderer, orbitRadius }) => {
+  labelTick: number  // throttled counter — triggers re-render at ~8fps max
+}> = React.memo(({ peaks, meshData, verticalExaggeration, containerW, containerH, units, renderer, orbitRadius }) => {
   const { minElevation_m, bounds, elevations, width, height } = meshData
 
   const SEARCH_RADIUS = 6
@@ -745,7 +759,7 @@ const PeakLabels3D: React.FC<{
         <div
           key={peak.id}
           className={styles.peakLabel3D}
-          style={{ left: `${sx}px`, top: `${sy}px` }}
+          style={{ transform: `translate(${sx}px, ${sy}px)` }}
         >
           {showLabel && (
             <>
@@ -761,6 +775,6 @@ const PeakLabels3D: React.FC<{
       ))}
     </>
   )
-}
+})
 
 export default ExploreScreen

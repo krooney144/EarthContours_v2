@@ -267,8 +267,17 @@ const SettingsScreen: React.FC = () => {
           <Row label="Peak Labels" description="Show mountain name labels on terrain">
             <Toggle id="toggle-peaks" label="Toggle peak labels" checked={settings.showPeakLabels} onChange={settings.togglePeakLabels} />
           </Row>
-          <Row label="Lakes" description="Show lakes and reservoirs on map">
+          <Row label="Lakes" description="Show lakes and reservoirs on map and 3D view">
             <Toggle id="toggle-lakes" label="Toggle lakes" checked={settings.showLakes} onChange={settings.toggleLakes} />
+          </Row>
+          <Row label="Rivers" description="Show rivers and streams on map and 3D view">
+            <Toggle id="toggle-rivers" label="Toggle rivers" checked={settings.showRivers} onChange={settings.toggleRivers} />
+          </Row>
+          <Row label="Glaciers" description="Show glaciers and ice features on map and 3D view">
+            <Toggle id="toggle-glaciers" label="Toggle glaciers" checked={settings.showGlaciers} onChange={settings.toggleGlaciers} />
+          </Row>
+          <Row label="Coastlines" description="Show coastline outlines on map">
+            <Toggle id="toggle-coastlines" label="Toggle coastlines" checked={settings.showCoastlines} onChange={settings.toggleCoastlines} />
           </Row>
           <Row label="Contour Lines" description="Show elevation contour lines on terrain">
             <Toggle id="toggle-contours" label="Toggle contour lines" checked={settings.showContourLines} onChange={settings.toggleContourLines} />
