@@ -518,6 +518,50 @@ export interface SilhouetteLayer {
  *  Computed on the main thread from SilhouetteData whenever AGL changes. */
 export type SilhouetteLayers = SilhouetteLayer[][]  // [azimuthIdx][layerIdx near→far]
 
+// ─── SCAN — Near-Field Occlusion Profile ─────────────────────────────────────
+
+/** Number of distance samples per azimuth for the near-field occlusion profile.
+ *  50 samples from 20m to 2km gives ~40m average spacing — sufficient for
+ *  opaque terrain surface rendering without excessive memory/compute. */
+export const NEAR_PROFILE_SAMPLES = 50
+
+/** Maximum distance (metres) for the near-field profile. */
+export const NEAR_PROFILE_MAX_DIST = 2000
+
+/** AGL threshold (metres) below which near-field occlusion is active.
+ *  Above ~60m (200ft) the bird's-eye view makes occlusion unnecessary. */
+export const NEAR_PROFILE_AGL_LIMIT = 60
+
+/**
+ * Dense near-field elevation profile for proper terrain occlusion.
+ * Stores raw (elevation, distance) pairs at ~50 evenly-log-spaced samples
+ * per azimuth for the 0–2km range.  AGL-independent — the main thread
+ * re-projects to elevation angles at the current viewer height.
+ *
+ * This fixes the "see-through mountains" problem: band fills only know
+ * the ridgeline (max angle), not the terrain surface shape below it.
+ * The near profile captures the FULL terrain surface so it can be rendered
+ * as an opaque fill that blocks all far terrain behind it.
+ *
+ * Memory: 2880 azimuths × 50 samples × 2 floats × 4 bytes = ~1.1 MB.
+ * Reprojection: 144K atan2 calls ≈ 1.5ms on mobile.
+ */
+export interface NearFieldProfile {
+  /** Packed profile data: [rawElev₀, dist₀, rawElev₁, dist₁, ...] per azimuth.
+   *  All azimuths concatenated — use profileOffsets to index.
+   *  Within each azimuth, samples are sorted near→far by distance. */
+  profileData: Float32Array
+  /** Number of actual samples per azimuth (may be less than NEAR_PROFILE_SAMPLES
+   *  if terrain is sparse).  Length = numAzimuths. */
+  sampleCounts: Uint16Array
+  /** Azimuth resolution (steps per degree). Matches silhouette resolution (8). */
+  resolution: number
+  /** Total azimuths = 360 × resolution. */
+  numAzimuths: number
+  /** Number of floats per sample (2: rawElev, dist). */
+  floatsPerSample: 2
+}
+
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
@@ -556,6 +600,11 @@ export interface SkylineData {
    *  at render time via front-to-back sweep.  Null if silhouette computation
    *  was skipped (e.g. very old worker). */
   silhouette: SilhouetteData | null
+  /** Dense near-field elevation profile (0–2km) for opaque terrain occlusion.
+   *  Fixes the "see-through mountains" problem where band fills only capture
+   *  the ridgeline, not the full terrain surface shape.
+   *  Null if near-field profile was not computed (e.g. very old worker). */
+  nearProfile: NearFieldProfile | null
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */

@@ -57,8 +57,8 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData } from '../../core/types'
-import { DEPTH_BANDS, SILHOUETTE_FLOATS_PER_CANDIDATE } from '../../core/types'
+import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData, NearFieldProfile } from '../../core/types'
+import { DEPTH_BANDS, SILHOUETTE_FLOATS_PER_CANDIDATE, NEAR_PROFILE_SAMPLES, NEAR_PROFILE_AGL_LIMIT } from '../../core/types'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -171,6 +171,74 @@ function reprojectRefinedArcs(
     }
     return { angles, arc }
   })
+}
+
+// ─── Near-Field Occlusion Profile Re-Projection ─────────────────────────────
+
+/**
+ * Re-projected near-field profile: per-azimuth running-max elevation angle
+ * envelope.  The envelope gives the maximum angle that near terrain reaches
+ * at each distance step — everything below this angle is hidden by nearer
+ * terrain.  Used by renderNearFieldOcclusion() to draw an opaque fill.
+ *
+ * Fixed-stride layout: envelope[ai * NEAR_PROFILE_SAMPLES + si] = max angle
+ * at sample index si for azimuth ai.  -PI/2 sentinel for empty slots.
+ */
+interface ProjectedNearProfile {
+  /** Per-azimuth running-max angle envelope.
+   *  Length = numAzimuths × NEAR_PROFILE_SAMPLES. */
+  envelope: Float32Array
+  /** Valid sample counts per azimuth (from worker). */
+  sampleCounts: Uint16Array
+  /** Number of azimuths. */
+  numAzimuths: number
+  /** Azimuth resolution (steps per degree). */
+  resolution: number
+}
+
+/**
+ * Re-project the near-field elevation profile at the current viewer elevation.
+ * For each azimuth, walks the 50 distance samples near→far, computing elevation
+ * angles and tracking the running maximum (occlusion envelope).
+ *
+ * Cost: 2880 azimuths × 50 samples = 144K atan2 calls ≈ 1.5ms.
+ * Only called when AGL < 60m (200ft) and profile data exists.
+ */
+function reprojectNearProfile(
+  profile: NearFieldProfile,
+  viewerElev: number,
+): ProjectedNearProfile {
+  const { profileData, sampleCounts, numAzimuths, resolution } = profile
+  const FPS = 2  // floats per sample: rawElev, dist
+  const stride = NEAR_PROFILE_SAMPLES * FPS
+
+  const envelope = new Float32Array(numAzimuths * NEAR_PROFILE_SAMPLES)
+  envelope.fill(-Math.PI / 2)  // sentinel
+
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    const count = sampleCounts[ai]
+    if (count === 0) continue
+
+    const base = ai * stride
+    const envBase = ai * NEAR_PROFILE_SAMPLES
+    let maxAngle = -Math.PI / 2
+
+    for (let si = 0; si < count; si++) {
+      const off = base + si * FPS
+      const rawElev = profileData[off]
+      const dist    = profileData[off + 1]
+
+      if (rawElev === -Infinity || rawElev < 2.0 || dist <= 0) continue
+
+      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const angle = Math.atan2(rawElev - curvDrop - viewerElev, dist)
+
+      if (angle > maxAngle) maxAngle = angle
+      envelope[envBase + si] = maxAngle
+    }
+  }
+
+  return { envelope, sampleCounts, numAzimuths, resolution }
 }
 
 // ─── Silhouette Layer Builder (AGL-dependent, runs on every height change) ───
@@ -389,6 +457,86 @@ function matchSilhouetteStrands(
 }
 
 // ─── Silhouette Renderer ─────────────────────────────────────────────────────
+
+// ─── Near-Field Occlusion Renderer ───────────────────────────────────────────
+
+/**
+ * Render the near-field terrain surface as an opaque fill.
+ *
+ * For each screen column, looks up the near-field profile envelope at that
+ * bearing.  The envelope gives the running-max elevation angle from near→far
+ * within 0–2km.  We draw an opaque fill from the envelope's max angle down
+ * to the screen bottom.  This creates a solid terrain surface that blocks
+ * ALL far terrain behind near hills — fixing the "see-through mountains" bug.
+ *
+ * The fill uses the near-band color (darkest in the palette) for visual
+ * consistency with the existing band fill system.
+ *
+ * Only called when AGL < 60m (200ft) — at higher altitudes the existing
+ * band fill system handles occlusion correctly.
+ */
+function renderNearFieldOcclusion(
+  ctx: CanvasRenderingContext2D,
+  projectedProfile: ProjectedNearProfile,
+  cam: CameraParams,
+  darkMode: boolean = true,
+): void {
+  const { W, H } = cam
+  const { envelope, sampleCounts, numAzimuths, resolution } = projectedProfile
+
+  // Near-terrain fill color — matches the darkest band fill
+  const fillColor = darkMode ? 'rgb(2, 12, 20)' : 'rgb(85, 100, 80)'
+
+  // Build a polygon: trace the near terrain "max angle" across screen columns
+  ctx.beginPath()
+  ctx.moveTo(0, H)
+
+  let hasVisiblePixels = false
+
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+    const normBearing = ((bearingDeg % 360) + 360) % 360
+    const fracIdx = normBearing * resolution
+    const ai0 = Math.floor(fracIdx) % numAzimuths
+    const ai1 = (ai0 + 1) % numAzimuths
+    const t = fracIdx - Math.floor(fracIdx)
+
+    // Find the max envelope angle for each neighboring azimuth
+    const count0 = sampleCounts[ai0]
+    const count1 = sampleCounts[ai1]
+
+    if (count0 === 0 && count1 === 0) {
+      ctx.lineTo(col, H)
+      continue
+    }
+
+    // Get the final envelope value (running max at the farthest sample)
+    const envBase0 = ai0 * NEAR_PROFILE_SAMPLES
+    const envBase1 = ai1 * NEAR_PROFILE_SAMPLES
+    const maxAngle0 = count0 > 0 ? envelope[envBase0 + count0 - 1] : -Math.PI / 2
+    const maxAngle1 = count1 > 0 ? envelope[envBase1 + count1 - 1] : -Math.PI / 2
+
+    // Interpolate between the two azimuths
+    const maxAngle = maxAngle0 * (1 - t) + maxAngle1 * t
+
+    if (maxAngle <= -Math.PI / 2 + 0.001) {
+      ctx.lineTo(col, H)
+      continue
+    }
+
+    hasVisiblePixels = true
+    const { y } = project(bearingDeg, maxAngle, cam)
+    ctx.lineTo(col, Math.min(H, Math.max(0, Math.round(y))))
+  }
+
+  ctx.lineTo(W, H)
+  ctx.closePath()
+
+  if (hasVisiblePixels) {
+    ctx.fillStyle = fillColor
+    ctx.fill()
+  }
+}
 
 /**
  * Render silhouette fills and strokes.
@@ -1790,6 +1938,7 @@ function drawScanCanvas(
   contourStrands: PrebuiltContourStrand[],
   projectedArcs: ProjectedRefinedArc[] | null,
   silhouetteLayers: SilhouetteLayer[][] | null,
+  projectedNearProfile: ProjectedNearProfile | null,
   showBandLines: boolean = true,
   showFill: boolean = true,
   showPeakLabels: boolean = true,
@@ -1851,6 +2000,14 @@ function drawScanCanvas(
       ctx.fill()
     }
     ctx.restore()
+  }
+
+  // ── 1b. Near-field occlusion — opaque terrain surface fill (0–2km) ────────
+  // Draws BEFORE silhouettes and bands. Uses the full elevation profile
+  // (not just ridgeline maxima) to create an impenetrable near-terrain fill.
+  // Only active when AGL < 60m — at higher altitudes band fills suffice.
+  if (projectedNearProfile) {
+    renderNearFieldOcclusion(ctx, projectedNearProfile, cam, darkMode)
   }
 
   // ── 2a. Silhouette fills — opaque column-major terrain occlusion ─────────
@@ -2146,6 +2303,19 @@ const ScanScreen: React.FC = () => {
       })
     }
     return layers
+  }, [skylineData, height_m])
+
+  // ── Re-project near-field occlusion profile (AGL < 60m only) ──────────────
+  // 144K atan2 calls ≈ 1.5ms.  Skipped when AGL ≥ 60m (existing band fill sufficient).
+  const projectedNearProfile = useMemo<ProjectedNearProfile | null>(() => {
+    if (!skylineData || !skylineData.nearProfile) return null
+    if (height_m >= NEAR_PROFILE_AGL_LIMIT) return null
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    const t0 = performance.now()
+    const result = reprojectNearProfile(skylineData.nearProfile, viewerElev)
+    const dt = performance.now() - t0
+    log.info('Near-field profile reprojected', { ms: dt.toFixed(1), agl: height_m.toFixed(0) })
+    return result
   }, [skylineData, height_m])
 
   // ── Initialise Web Worker ─────────────────────────────────────────────────
@@ -2475,6 +2645,7 @@ const ScanScreen: React.FC = () => {
       fov, skylineData, projectedBands,
       contourStrands, projectedArcs,
       silhouetteLayers,
+      projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
       showContourLines, darkMode,
     )
@@ -2489,6 +2660,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
+    projectedNearProfile,
     showBandLines, showFill, showPeakLabels, showContourLines, darkMode,
   ])
 
@@ -2928,6 +3100,24 @@ const ScanScreen: React.FC = () => {
                         {silhouetteLayers && (
                           <div>visible layers: {totalVisibleLayers} avg:{avgVisiblePerAz}/az max:{maxLayersPerAz} active:{azWithLayers}az</div>
                         )}
+                      </>
+                    )
+                  })()}
+
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>NEAR-FIELD OCCLUSION</div>
+                  {(() => {
+                    const np = skylineData.nearProfile
+                    if (!np) return <div style={{ color: '#666' }}>no near-field profile</div>
+                    const totalSamples = np.sampleCounts.reduce((s: number, c: number) => s + c, 0)
+                    const avgPerAz = (totalSamples / np.numAzimuths).toFixed(1)
+                    const memKB = ((np.profileData.length * 4 + np.sampleCounts.length * 2) / 1024).toFixed(0)
+                    const active = projectedNearProfile ? 'ON' : 'OFF'
+                    const reason = !projectedNearProfile && height_m >= NEAR_PROFILE_AGL_LIMIT
+                      ? `(AGL≥${NEAR_PROFILE_AGL_LIMIT}m)` : ''
+                    return (
+                      <>
+                        <div style={{ color: active === 'ON' ? '#4f4' : '#f44' }}>{active} {reason}</div>
+                        <div>samples:{totalSamples} avg:{avgPerAz}/az mem:{memKB}KB</div>
                       </>
                     )
                   })()}
