@@ -1300,9 +1300,34 @@ function renderBandContours(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // Silhouette occlusion: per-point distance check against nearest surface
+  // ── Pre-build per-column nearest silhouette peakY lookup ────────────────
+  // For each screen column, project the nearest silhouette surface's peak
+  // angle to screen Y. Contour points at or below this Y are occluded.
+  // One project() call per column upfront → O(1) lookup per contour point.
   const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
   const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
+  const OCCLUSION_TOLERANCE_PX = 2  // Don't draw contours within 2px of ridgeline edge
+
+  let silPeakYPerCol: Float32Array | null = null
+  if (hasSilOcclusion && silhouetteLayers) {
+    silPeakYPerCol = new Float32Array(W)
+    silPeakYPerCol.fill(H + 1)  // Default: no silhouette → everything visible
+
+    for (let col = 0; col < W; col++) {
+      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+      const normBearing = ((bearingDeg % 360) + 360) % 360
+      const fracIdx = normBearing * silResolution
+      const ai = Math.round(fracIdx) % numSilAz
+
+      const azLayers = silhouetteLayers[ai]
+      if (azLayers && azLayers.length > 0) {
+        // layers[0] is the nearest silhouette surface
+        const nearest = azLayers[0]
+        const { y } = project(bearingDeg, nearest.peakAngle, cam)
+        silPeakYPerCol[col] = y
+      }
+    }
+  }
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1346,31 +1371,31 @@ function renderBandContours(
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
 
-      // ── Silhouette occlusion check ─────────────────────────────────────
-      // Skip contour points that are BEHIND the nearest silhouette surface
-      // at this bearing. A contour at 8km should not draw if there's an
-      // opaque silhouette surface at 3km blocking it.
-      if (hasSilOcclusion && silhouetteLayers) {
-        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silResolution) % numSilAz
-        const azLayers = silhouetteLayers[ai]
-        if (azLayers && azLayers.length > 0) {
-          // layers[0] is the nearest silhouette surface
-          const nearestSilDist = azLayers[0].dist
-          if (pt.dist > nearestSilDist) {
-            // This contour point is behind the nearest surface — occluded
-            if (pathStarted) { ctx.stroke(); pathStarted = false }
-            continue
-          }
-        }
-      }
-
+      // Project the contour point to screen coordinates FIRST
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
 
       if (!onScreen) {
         if (pathStarted) { ctx.stroke(); pathStarted = false }
         continue
+      }
+
+      // ── Silhouette occlusion check (screen-Y based) ────────────────────
+      // A contour point is occluded if its screen Y is AT or BELOW the
+      // nearest silhouette surface's peakY at this column. This correctly
+      // handles far mountains visible ABOVE near terrain — a far contour
+      // at 50km with screen Y=100 draws fine if the nearest silhouette
+      // peakY=300 at that column (100 < 300, it's above the surface).
+      if (silPeakYPerCol) {
+        const col = Math.round(x)
+        if (col >= 0 && col < W) {
+          const silPeakY = silPeakYPerCol[col]
+          if (y >= silPeakY - OCCLUSION_TOLERANCE_PX) {
+            // Contour point is behind or at the nearest silhouette surface
+            if (pathStarted) { ctx.stroke(); pathStarted = false }
+            continue
+          }
+        }
       }
 
       // Logarithmic width: distributes variation evenly across 0–400km
