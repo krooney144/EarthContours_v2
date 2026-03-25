@@ -224,9 +224,11 @@
 
 .peakLabel3D {
   position: absolute;
-  /* translateY lifts the whole div so the dot (last child) centres on sy.
-     -100% moves the bottom to sy; +2.5px offsets the dot's half-height. */
-  transform: translateX(-50%) translateY(calc(-100% + 2.5px));
+  left: 0;
+  top: 0;
+  /* JS sets transform: translate(sx, sy) to position at the projected point.
+     will-change: transform enables GPU compositing for smooth orbit. */
+  will-change: transform;
   display: flex;
   flex-direction: column;
   align-items: center;

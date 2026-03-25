@@ -48,10 +48,13 @@ const ExploreScreen: React.FC = () => {
 
   const {
     peaks, meshData, contourElevations, activeRegion, isRealElevation,
-    waterBodies, rivers, terrainZoom, isCustomBounds,
+    waterBodies, rivers, glaciers, coastlines, terrainZoom, isCustomBounds,
     loadingState, loadingProgress, loadingMessage,
   } = useTerrainStore()
-  const { units, showPeakLabels, verticalExaggeration, setVerticalExaggeration } = useSettingsStore()
+  const {
+    units, showPeakLabels, verticalExaggeration, setVerticalExaggeration,
+    showLakes, showRivers, showGlaciers, showCoastlines,
+  } = useSettingsStore()
   const { activeLat, activeLng, mode, gpsPermission, gpsLat, requestGPS, switchToGPS } = useLocationStore()
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -65,6 +68,19 @@ const ExploreScreen: React.FC = () => {
 
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [showDebug, setShowDebug] = useState(false)
+  const [geoCounts, setGeoCounts] = useState({ lakeCount: 0, riverCount: 0, glacierCount: 0, coastlineCount: 0 })
+
+  // Throttled camera tick — HTML overlays (peak labels) update at ~8fps max
+  // while the Three.js canvas renders at full 60fps. Prevents layout thrashing.
+  const [labelTick, setLabelTick] = useState(0)
+  const labelThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (labelThrottleRef.current) return  // already scheduled
+    labelThrottleRef.current = setTimeout(() => {
+      setLabelTick(t => t + 1)
+      labelThrottleRef.current = null
+    }, 120)
+  }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ])
 
   const [gpsPrompt, setGpsPrompt] = useState<string | null>(null)
 
@@ -169,6 +185,23 @@ const ExploreScreen: React.FC = () => {
     }
     lastExaggerationRef.current = verticalExaggeration
   }, [meshData, verticalExaggeration, contourElevations])
+
+  // ── Build geo overlays (rivers, lakes, glaciers, coastlines) ──────────────
+
+  useEffect(() => {
+    const renderer = rendererRef.current
+    if (!renderer || !renderer.isReady() || !meshData) {
+      setGeoCounts({ lakeCount: 0, riverCount: 0, glacierCount: 0, coastlineCount: 0 })
+      return
+    }
+    const counts = renderer.buildGeoOverlays(
+      meshData, verticalExaggeration,
+      waterBodies, rivers, glaciers, coastlines,
+      { showLakes, showRivers, showGlaciers, showCoastlines },
+    )
+    setGeoCounts(counts)
+  }, [meshData, verticalExaggeration, waterBodies, rivers, glaciers, coastlines,
+      showLakes, showRivers, showGlaciers, showCoastlines])
 
   // ── Render loop: update camera + render on every state change ──────────────
 
@@ -426,6 +459,8 @@ const ExploreScreen: React.FC = () => {
               containerH={containerSize.h}
               units={units}
               renderer={rendererRef.current}
+              orbitRadius={orbitRadius}
+              labelTick={labelTick}
             />
           </div>
         )}
@@ -573,8 +608,9 @@ const ExploreScreen: React.FC = () => {
           NE: {bounds.north.toFixed(4)}&deg;, {bounds.east.toFixed(4)}&deg;<br />
           SE: {bounds.south.toFixed(4)}&deg;, {bounds.east.toFixed(4)}&deg;<br />
           SW: {bounds.south.toFixed(4)}&deg;, {bounds.west.toFixed(4)}&deg;<br />
-          <strong>Data</strong><br />
-          Peaks: {peaks.length} · Lakes: {waterBodies.length} · Rivers: {rivers.length}<br />
+          <strong>Data (in bounds / total)</strong><br />
+          Peaks: {peaks.length} · Lakes: {geoCounts.lakeCount}/{waterBodies.length} · Rivers: {geoCounts.riverCount}/{rivers.length}<br />
+          Glaciers: {geoCounts.glacierCount}/{glaciers.length} · Coastlines: {geoCounts.coastlineCount}/{coastlines.length}<br />
           Tile zoom: z{terrainZoom} · Grid: {meshData ? meshData.width : '—'}&times;{meshData ? meshData.height : '—'}<br />
           Source: {isCustomBounds ? 'Custom bounds' : (activeRegion?.id ?? 'none')}<br />
           Elev: {formatElevation(minElevation_m, units)} &ndash; {formatElevation(maxElevation_m, units)}<br />
@@ -595,6 +631,12 @@ const ExploreScreen: React.FC = () => {
  * HTML overlay that renders peak labels projected via the Three.js camera.
  * Uses TerrainRenderer.projectToScreen() so labels stay locked to the
  * terrain mesh at all zoom/pan levels.
+ *
+ * Collision detection: labels are placed highest-elevation-first. Each placed
+ * label reserves a screen-space bounding box. Subsequent peaks that would
+ * overlap get their text card hidden but still show a small dot marker.
+ * As the user zooms in (smaller orbitRadius relative to terrain), more labels
+ * fit on screen — mimicking the SCAN label behavior.
  */
 const PeakLabels3D: React.FC<{
   peaks: Peak[]
@@ -604,64 +646,135 @@ const PeakLabels3D: React.FC<{
   containerH: number
   units: 'imperial' | 'metric'
   renderer: TerrainRenderer
-}> = ({ peaks, meshData, verticalExaggeration, containerW, containerH, units, renderer }) => {
+  orbitRadius: number
+  labelTick: number  // throttled counter — triggers re-render at ~8fps max
+}> = React.memo(({ peaks, meshData, verticalExaggeration, containerW, containerH, units, renderer, orbitRadius }) => {
   const { minElevation_m, bounds, elevations, width, height } = meshData
 
   const SEARCH_RADIUS = 6
 
-  const topPeaks = [...peaks]
+  // Scale max labels with zoom: closer camera → more labels visible.
+  // orbitRadius / terrainWidth gives a rough "zoom fraction" (1 = full view, 0.3 = zoomed in).
+  const terrainWidth_m = meshData.worldWidth_km * 1000
+  const zoomFraction = terrainWidth_m > 0 ? orbitRadius / terrainWidth_m : 1
+  // At full zoom-out (fraction ~0.8+): show up to 6 labels
+  // At medium zoom (fraction ~0.4): show up to 10
+  // At close zoom (fraction ~0.2): show up to 15
+  const maxLabels = Math.round(Math.max(4, Math.min(15, 18 - zoomFraction * 15)))
+
+  // Sort by elevation, take a generous candidate pool
+  const candidates = [...peaks]
     .sort((a, b) => b.elevation_m - a.elevation_m)
-    .slice(0, 5)
+    .slice(0, 30)
+
+  // Approximate label card dimensions in pixels for collision detection
+  const LABEL_W = 140
+  const LABEL_H = 48
+  const DOT_MARGIN = 12  // minimum spacing for dot-only markers
+
+  // Track placed bounding boxes: { x, y, w, h }
+  const placedBoxes: Array<{ x: number; y: number; w: number; h: number }> = []
+
+  const rectsOverlap = (
+    ax: number, ay: number, aw: number, ah: number,
+    bx: number, by: number, bw: number, bh: number,
+  ) => ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
+
+  type PlacedPeak = {
+    peak: Peak
+    sx: number
+    sy: number
+    bestElev: number
+    showLabel: boolean
+  }
+
+  const placed: PlacedPeak[] = []
+
+  for (const peak of candidates) {
+    if (placed.length >= maxLabels + 10) break  // enough dots + labels
+
+    const LAT_TOL = (bounds.north - bounds.south) * 0.02
+    const LNG_TOL = (bounds.east  - bounds.west)  * 0.02
+    if (
+      peak.lat < bounds.south - LAT_TOL || peak.lat > bounds.north + LAT_TOL ||
+      peak.lng < bounds.west  - LNG_TOL || peak.lng > bounds.east  + LNG_TOL
+    ) continue
+
+    const nomCol = Math.round((peak.lng - bounds.west)  / (bounds.east  - bounds.west)  * (width  - 1))
+    const nomRow = Math.round((bounds.north - peak.lat) / (bounds.north - bounds.south) * (height - 1))
+
+    let bestElev = -Infinity, bestCol = nomCol, bestRow = nomRow
+    for (let dr = -SEARCH_RADIUS; dr <= SEARCH_RADIUS; dr++) {
+      for (let dc = -SEARCH_RADIUS; dc <= SEARCH_RADIUS; dc++) {
+        const c = Math.max(0, Math.min(width  - 1, nomCol + dc))
+        const r = Math.max(0, Math.min(height - 1, nomRow + dr))
+        const e = elevations[r * width + c]
+        if (e > bestElev) { bestElev = e; bestCol = c; bestRow = r }
+      }
+    }
+
+    const screen = renderer.projectToScreen(
+      meshData, bestCol, bestRow, bestElev, verticalExaggeration,
+      containerW, containerH,
+    )
+    if (!screen) continue
+
+    const { sx, sy } = screen
+    if (sx < -40 || sx > containerW + 40 || sy < -40 || sy > containerH + 40) continue
+
+    // Check collision for a label card (centered horizontally, above the dot)
+    const labelX = sx - LABEL_W / 2
+    const labelY = sy - LABEL_H - 24  // card sits above the line+dot
+
+    const labelsPlaced = placed.filter(p => p.showLabel).length
+    let showLabel = labelsPlaced < maxLabels
+
+    if (showLabel) {
+      for (const box of placedBoxes) {
+        if (rectsOverlap(labelX, labelY, LABEL_W, LABEL_H, box.x, box.y, box.w, box.h)) {
+          showLabel = false
+          break
+        }
+      }
+    }
+
+    if (showLabel) {
+      placedBoxes.push({ x: labelX, y: labelY, w: LABEL_W, h: LABEL_H })
+    } else {
+      // Even for dot-only, check we're not right on top of another dot
+      let dotTooClose = false
+      for (const p of placed) {
+        const dx = sx - p.sx, dy = sy - p.sy
+        if (Math.sqrt(dx * dx + dy * dy) < DOT_MARGIN) { dotTooClose = true; break }
+      }
+      if (dotTooClose) continue
+    }
+
+    placed.push({ peak, sx, sy, bestElev, showLabel })
+  }
 
   return (
     <>
-      {topPeaks.map((peak) => {
-        const LAT_TOL = (bounds.north - bounds.south) * 0.02
-        const LNG_TOL = (bounds.east  - bounds.west)  * 0.02
-        if (
-          peak.lat < bounds.south - LAT_TOL || peak.lat > bounds.north + LAT_TOL ||
-          peak.lng < bounds.west  - LNG_TOL || peak.lng > bounds.east  + LNG_TOL
-        ) return null
-
-        const nomCol = Math.round((peak.lng - bounds.west)  / (bounds.east  - bounds.west)  * (width  - 1))
-        const nomRow = Math.round((bounds.north - peak.lat) / (bounds.north - bounds.south) * (height - 1))
-
-        let bestElev = -Infinity, bestCol = nomCol, bestRow = nomRow
-        for (let dr = -SEARCH_RADIUS; dr <= SEARCH_RADIUS; dr++) {
-          for (let dc = -SEARCH_RADIUS; dc <= SEARCH_RADIUS; dc++) {
-            const c = Math.max(0, Math.min(width  - 1, nomCol + dc))
-            const r = Math.max(0, Math.min(height - 1, nomRow + dr))
-            const e = elevations[r * width + c]
-            if (e > bestElev) { bestElev = e; bestCol = c; bestRow = r }
-          }
-        }
-
-        const screen = renderer.projectToScreen(
-          meshData, bestCol, bestRow, bestElev, verticalExaggeration,
-          containerW, containerH,
-        )
-        if (!screen) return null
-
-        const { sx, sy } = screen
-        if (sx < -80 || sx > containerW + 80 || sy < -60 || sy > containerH + 60) return null
-
-        return (
-          <div
-            key={peak.id}
-            className={styles.peakLabel3D}
-            style={{ left: `${sx}px`, top: `${sy}px` }}
-          >
-            <div className={styles.peakLabelCard}>
-              <span className={styles.peakLabelName}>{peak.name}</span>
-              <span className={styles.peakLabelElev}>{formatElevation(bestElev, units)}</span>
-            </div>
-            <div className={styles.peakLine3D} />
-            <div className={styles.peakDot3D} />
-          </div>
-        )
-      })}
+      {placed.map(({ peak, sx, sy, bestElev, showLabel }) => (
+        <div
+          key={peak.id}
+          className={styles.peakLabel3D}
+          style={{ transform: `translate(${sx}px, ${sy}px)` }}
+        >
+          {showLabel && (
+            <>
+              <div className={styles.peakLabelCard}>
+                <span className={styles.peakLabelName}>{peak.name}</span>
+                <span className={styles.peakLabelElev}>{formatElevation(bestElev, units)}</span>
+              </div>
+              <div className={styles.peakLine3D} />
+            </>
+          )}
+          <div className={styles.peakDot3D} />
+        </div>
+      ))}
     </>
   )
-}
+})
 
 export default ExploreScreen

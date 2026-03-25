@@ -14,7 +14,7 @@
 
 import * as THREE from 'three'
 import { createLogger } from '../core/logger'
-import type { TerrainMeshData } from '../core/types'
+import type { TerrainMeshData, WaterBody, River, Glacier, Coastline, LatLng } from '../core/types'
 import { ENU_M_PER_DEG_LAT, ENU_M_PER_DEG_LON_AT_LAT } from '../core/constants'
 import { marchingSquares } from './marchingSquares'
 
@@ -60,6 +60,9 @@ export class TerrainRenderer {
   private terrainMesh: THREE.Mesh | null = null
   private contourLines: THREE.LineSegments | null = null
   private canvas: HTMLCanvasElement | null = null
+
+  // Geo overlays
+  private geoOverlayGroup: THREE.Group | null = null
 
   // Terrain dimensions in metres (set when terrain loads)
   private terrainWidth_m = 0
@@ -132,6 +135,8 @@ export class TerrainRenderer {
       this.contourLines = null
     }
 
+    this.clearGeoOverlays()
+
     if (this.renderer) {
       this.renderer.dispose()
       this.renderer = null
@@ -193,23 +198,48 @@ export class TerrainRenderer {
     const posAttr = geometry.getAttribute('position')
     const colors = new Float32Array(posAttr.count * 3)
 
+    // Ocean/coastline color constants
+    const OCEAN_R = 10 / 255, OCEAN_G = 30 / 255, OCEAN_B = 46 / 255   // dark navy (#0a1e2e)
+    const SEA_LEVEL = Math.max(0, -minElevation_m)  // how far above grid-min is sea level
+    const BEACH_GRADIENT_M = 15  // metres above sea level for the gradient fade
+
     for (let row = 0; row < height; row++) {
       for (let col = 0; col < width; col++) {
         const vi = row * width + col
         const elev = elevations[vi]
-        const y = (elev - minElevation_m) * verticalExaggeration
+
+        // Clamp ocean to sea level — prevents negative bathymetry from
+        // pulling the mesh down and creating hanging contour lines
+        const clampedElev = Math.max(0, elev)
+        const y = (clampedElev - Math.max(0, minElevation_m)) * verticalExaggeration
 
         // PlaneGeometry after rotateX(-PI/2): vertices are in XZ plane.
         // Vertex order: row 0 is top (north), increasing row goes south (Z+).
         // Set Y to displaced elevation.
         posAttr.setY(vi, y)
 
-        // Vertex color from palette
-        const t = (elev - minElevation_m) / this.elevRange_m
-        const c = elevationToColor(t)
-        colors[vi * 3] = c.r / 255
-        colors[vi * 3 + 1] = c.g / 255
-        colors[vi * 3 + 2] = c.b / 255
+        // Vertex color: ocean = dark blue, coastline = gradient, land = palette
+        if (elev <= 0) {
+          // Ocean — flat dark blue
+          colors[vi * 3]     = OCEAN_R
+          colors[vi * 3 + 1] = OCEAN_G
+          colors[vi * 3 + 2] = OCEAN_B
+        } else if (elev < BEACH_GRADIENT_M) {
+          // Beach gradient — blend from ocean color to terrain palette
+          const blend = elev / BEACH_GRADIENT_M  // 0 at sea level, 1 at BEACH_GRADIENT_M
+          const t = (clampedElev - Math.max(0, minElevation_m)) / this.elevRange_m
+          const c = elevationToColor(t)
+          colors[vi * 3]     = OCEAN_R + (c.r / 255 - OCEAN_R) * blend
+          colors[vi * 3 + 1] = OCEAN_G + (c.g / 255 - OCEAN_G) * blend
+          colors[vi * 3 + 2] = OCEAN_B + (c.b / 255 - OCEAN_B) * blend
+        } else {
+          // Normal terrain
+          const t = (clampedElev - Math.max(0, minElevation_m)) / this.elevRange_m
+          const c = elevationToColor(t)
+          colors[vi * 3]     = c.r / 255
+          colors[vi * 3 + 1] = c.g / 255
+          colors[vi * 3 + 2] = c.b / 255
+        }
       }
     }
 
@@ -262,6 +292,7 @@ export class TerrainRenderer {
     const colors: number[] = []
 
     for (const elev of contourElevations) {
+      if (elev <= 0) continue  // skip ocean/below-sea-level contours
       const segments = marchingSquares(elevations, width, height, elev)
       if (segments.length === 0) continue
 
@@ -324,16 +355,312 @@ export class TerrainRenderer {
     const posAttr = this.terrainMesh.geometry.getAttribute('position')
     const { elevations, width, height, minElevation_m } = mesh
 
+    const clampedMin = Math.max(0, minElevation_m)
     for (let row = 0; row < height; row++) {
       for (let col = 0; col < width; col++) {
         const vi = row * width + col
-        const y = (elevations[vi] - minElevation_m) * verticalExaggeration
+        const clampedElev = Math.max(0, elevations[vi])
+        const y = (clampedElev - clampedMin) * verticalExaggeration
         posAttr.setY(vi, y)
       }
     }
 
     posAttr.needsUpdate = true
     this.terrainMesh.geometry.computeVertexNormals()
+  }
+
+  // ── Geographic overlays (rivers, lakes, glaciers, coastlines) ────────────────
+
+  /**
+   * Remove all geo overlay objects from the scene and dispose their geometry.
+   */
+  clearGeoOverlays(): void {
+    if (this.geoOverlayGroup && this.scene) {
+      this.scene.remove(this.geoOverlayGroup)
+      this.geoOverlayGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Line) {
+          obj.geometry.dispose()
+          const mat = obj.material
+          if (Array.isArray(mat)) mat.forEach(m => m.dispose())
+          else (mat as THREE.Material).dispose()
+        }
+      })
+      this.geoOverlayGroup = null
+    }
+  }
+
+  /**
+   * Convert a lat/lng point to ENU world coordinates on the terrain surface.
+   * Returns { x, y, z } in metres, with y elevated to terrain height + offset.
+   */
+  private latLngToWorld(
+    lat: number, lng: number,
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    yOffset: number,
+  ): { x: number; y: number; z: number } | null {
+    const { bounds, elevations, width, height, minElevation_m } = mesh
+
+    // Normalise to 0-1 within bounds
+    const nx = (lng - bounds.west) / (bounds.east - bounds.west)
+    const ny = (bounds.north - lat) / (bounds.north - bounds.south)
+
+    // Allow a small tolerance outside bounds for features that cross the edge
+    if (nx < -0.02 || nx > 1.02 || ny < -0.02 || ny > 1.02) return null
+
+    // Grid sample coordinates (clamped)
+    const gx = Math.max(0, Math.min(width - 1, nx * (width - 1)))
+    const gy = Math.max(0, Math.min(height - 1, ny * (height - 1)))
+
+    // Bilinear interpolation of elevation
+    const x0 = Math.floor(gx), x1 = Math.min(x0 + 1, width - 1)
+    const y0 = Math.floor(gy), y1 = Math.min(y0 + 1, height - 1)
+    const fx = gx - x0, fy = gy - y0
+    const elev =
+      elevations[y0 * width + x0] * (1 - fx) * (1 - fy) +
+      elevations[y0 * width + x1] * fx * (1 - fy) +
+      elevations[y1 * width + x0] * (1 - fx) * fy +
+      elevations[y1 * width + x1] * fx * fy
+
+    return {
+      x: (nx - 0.5) * this.terrainWidth_m,
+      y: (elev - minElevation_m) * verticalExaggeration + yOffset,
+      z: (ny - 0.5) * this.terrainDepth_m,
+    }
+  }
+
+  /**
+   * Convert a polyline of lat/lng points to one or more 3D line segments
+   * following the terrain. Breaks the polyline when a point falls outside
+   * bounds (instead of skipping it, which creates stray diagonal lines).
+   * Returns an array of position arrays — one per continuous segment.
+   */
+  private polylineToSegments(
+    points: LatLng[],
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    yOffset: number,
+  ): number[][] {
+    const segments: number[][] = []
+    let current: number[] = []
+    for (const pt of points) {
+      const w = this.latLngToWorld(pt.lat, pt.lng, mesh, verticalExaggeration, yOffset)
+      if (w) {
+        current.push(w.x, w.y, w.z)
+      } else {
+        // Break: out-of-bounds point — start a new segment
+        if (current.length >= 6) segments.push(current)
+        current = []
+      }
+    }
+    if (current.length >= 6) segments.push(current)
+    return segments
+  }
+
+  /**
+   * Build all geo overlays for the current terrain.
+   * Filters features to the terrain bounding box, projects onto the mesh surface.
+   * Coastlines are no longer rendered as overlays — ocean is handled via
+   * vertex coloring in buildTerrain() using the DEM's own elevation data.
+   */
+  buildGeoOverlays(
+    mesh: TerrainMeshData,
+    verticalExaggeration: number,
+    waterBodies: WaterBody[],
+    rivers: River[],
+    glaciers: Glacier[],
+    _coastlines: Coastline[],
+    options: { showLakes: boolean; showRivers: boolean; showGlaciers: boolean; showCoastlines: boolean },
+  ): { lakeCount: number; riverCount: number; glacierCount: number; coastlineCount: number } {
+    this.clearGeoOverlays()
+    if (!this.scene) return { lakeCount: 0, riverCount: 0, glacierCount: 0, coastlineCount: 0 }
+
+    this.geoOverlayGroup = new THREE.Group()
+
+    const { bounds } = mesh
+    const yOffset = this.elevRange_m * verticalExaggeration * 0.003
+
+    // ── Helper: does a feature's points intersect the terrain bounds? ──────
+    const boundsIntersects = (points: LatLng[]): boolean => {
+      for (const p of points) {
+        if (p.lat >= bounds.south && p.lat <= bounds.north &&
+            p.lng >= bounds.west  && p.lng <= bounds.east) return true
+      }
+      return false
+    }
+
+    /** Add a Line per segment from polylineToSegments */
+    const addLineSegments = (
+      segments: number[][], color: number, opacity: number,
+    ) => {
+      for (const positions of segments) {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+        const mat = new THREE.LineBasicMaterial({
+          color, transparent: true, opacity,
+          depthTest: true, depthWrite: false,
+        })
+        this.geoOverlayGroup!.add(new THREE.Line(geo, mat))
+      }
+    }
+
+    let lakeCount = 0
+    let riverCount = 0
+    let glacierCount = 0
+    const coastlineCount = 0  // coastlines handled by vertex coloring now
+
+    // ── Rivers — thicker appearance via parallel offset lines ──────────────
+    if (options.showRivers) {
+      const filtered = rivers.filter(r => boundsIntersects(r.points))
+      for (const river of filtered) {
+        const segments = this.polylineToSegments(river.points, mesh, verticalExaggeration, yOffset)
+        if (segments.length === 0) continue
+
+        const isMinor = river.isStream || (river.scalerank != null && river.scalerank >= 7)
+        const opacity = isMinor ? 0.35 : 0.65
+        const color = 0x3377bb
+
+        // Main line
+        addLineSegments(segments, color, opacity)
+
+        // Parallel offset lines for visual thickness (WebGL linewidth is 1px on most GPUs)
+        if (!isMinor) {
+          const offsetM = this.terrainWidth_m * 0.0004  // small lateral offset
+          for (const seg of segments) {
+            const shifted: number[] = []
+            for (let i = 0; i < seg.length; i += 3) {
+              shifted.push(seg[i] + offsetM, seg[i + 1], seg[i + 2])
+            }
+            const geo = new THREE.BufferGeometry()
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(shifted, 3))
+            const mat = new THREE.LineBasicMaterial({
+              color, transparent: true, opacity: opacity * 0.5,
+              depthTest: true, depthWrite: false,
+            })
+            this.geoOverlayGroup!.add(new THREE.Line(geo, mat))
+          }
+        }
+
+        riverCount++
+      }
+    }
+
+    // ── Lakes — darker fill + prominent outline ─────────────────────────────
+    if (options.showLakes) {
+      const filtered = waterBodies.filter(w => boundsIntersects(w.polygon))
+      for (const lake of filtered) {
+        const segments = this.polylineToSegments(lake.polygon, mesh, verticalExaggeration, yOffset)
+        // Use all positions from all segments for the outline
+        const allPositions: number[] = []
+        for (const s of segments) allPositions.push(...s)
+        if (allPositions.length < 9) continue
+
+        // Dark outline
+        const outlineGeo = new THREE.BufferGeometry()
+        outlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3))
+        const outlineMat = new THREE.LineBasicMaterial({
+          color: 0x1a4466,
+          transparent: true,
+          opacity: 0.75,
+          depthTest: true,
+          depthWrite: false,
+        })
+        this.geoOverlayGroup.add(new THREE.LineLoop(outlineGeo, outlineMat))
+
+        // Semi-transparent fill at average Y
+        const count = allPositions.length / 3
+        if (count >= 3) {
+          let avgY = 0
+          for (let i = 0; i < count; i++) avgY += allPositions[i * 3 + 1]
+          avgY /= count
+
+          const shape = new THREE.Shape()
+          shape.moveTo(allPositions[0], allPositions[2])
+          for (let i = 1; i < count; i++) {
+            shape.lineTo(allPositions[i * 3], allPositions[i * 3 + 2])
+          }
+          shape.closePath()
+
+          const shapeGeo = new THREE.ShapeGeometry(shape)
+          shapeGeo.rotateX(-Math.PI / 2)
+          const fillMat = new THREE.MeshBasicMaterial({
+            color: 0x1a4488,
+            transparent: true,
+            opacity: 0.4,
+            side: THREE.DoubleSide,
+            depthTest: true,
+            depthWrite: false,
+          })
+          const fillMesh = new THREE.Mesh(shapeGeo, fillMat)
+          fillMesh.position.y = avgY
+          this.geoOverlayGroup.add(fillMesh)
+        }
+
+        lakeCount++
+      }
+    }
+
+    // ── Glaciers — white/ice-blue semi-transparent fill + darker outline ───
+    if (options.showGlaciers) {
+      const filtered = glaciers.filter(g => boundsIntersects(g.polygon))
+      for (const glacier of filtered) {
+        const segments = this.polylineToSegments(glacier.polygon, mesh, verticalExaggeration, yOffset * 1.5)
+        const allPositions: number[] = []
+        for (const s of segments) allPositions.push(...s)
+        if (allPositions.length < 9) continue
+
+        // Darker outline
+        const outlineGeo = new THREE.BufferGeometry()
+        outlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3))
+        const outlineMat = new THREE.LineBasicMaterial({
+          color: 0x6688aa,
+          transparent: true,
+          opacity: 0.6,
+          depthTest: true,
+          depthWrite: false,
+        })
+        this.geoOverlayGroup.add(new THREE.LineLoop(outlineGeo, outlineMat))
+
+        // White/ice-blue fill
+        const count = allPositions.length / 3
+        if (count >= 3) {
+          let avgY = 0
+          for (let i = 0; i < count; i++) avgY += allPositions[i * 3 + 1]
+          avgY /= count
+
+          const shape = new THREE.Shape()
+          shape.moveTo(allPositions[0], allPositions[2])
+          for (let i = 1; i < count; i++) {
+            shape.lineTo(allPositions[i * 3], allPositions[i * 3 + 2])
+          }
+          shape.closePath()
+
+          const shapeGeo = new THREE.ShapeGeometry(shape)
+          shapeGeo.rotateX(-Math.PI / 2)
+          const fillMat = new THREE.MeshBasicMaterial({
+            color: 0xddeeff,
+            transparent: true,
+            opacity: 0.3,
+            side: THREE.DoubleSide,
+            depthTest: true,
+            depthWrite: false,
+          })
+          const fillMesh = new THREE.Mesh(shapeGeo, fillMat)
+          fillMesh.position.y = avgY
+          this.geoOverlayGroup.add(fillMesh)
+        }
+
+        glacierCount++
+      }
+    }
+
+    // Coastlines: no longer rendered as overlay lines — ocean is handled
+    // by vertex coloring (dark blue for elev ≤ 0, gradient beach transition).
+
+    this.scene.add(this.geoOverlayGroup)
+
+    log.info('Geo overlays built', { lakeCount, riverCount, glacierCount, coastlineCount })
+    return { lakeCount, riverCount, glacierCount, coastlineCount }
   }
 
   // ── Camera update from cameraStore orbit params ─────────────────────────────
