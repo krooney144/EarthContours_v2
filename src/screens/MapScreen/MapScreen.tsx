@@ -2333,16 +2333,18 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
                   // Auto-set vertical exaggeration based on area size:
                   // small areas have enough natural relief, large areas need amplification
                   const maxKm = selectionDims.maxSideKm
-                  const autoExag: 1 | 2 | 4 | 10 | 20 =
-                    maxKm < 5  ? 1 :
-                    maxKm < 20 ? 2 :
-                    maxKm < 80 ? 4 :
-                    maxKm < 300 ? 10 : 20
+                  const autoExag: 1 | 1.5 | 2 | 4 | 10 | 20 =
+                    maxKm < 10  ? 1 :
+                    maxKm < 30  ? 1.5 :
+                    maxKm < 80  ? 2 :
+                    maxKm < 300 ? 4 :
+                    maxKm < 500 ? 10 : 20
                   setVerticalExaggeration(autoExag)
                   // Start loading custom bounds and navigate to EXPLORE
                   loadCustomBounds(bounds)
                   navigateTo('explore')
-                  setIsSelectingArea(false)
+                  // Keep selection visible on Map so the blue box persists
+                  // when the user navigates back — shows where they're exploring
                 }}
                 aria-label="Open selected area in Explore 3D view"
                 disabled={selectionSeverity === 'danger'}

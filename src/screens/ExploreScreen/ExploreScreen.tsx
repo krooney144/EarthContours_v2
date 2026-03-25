@@ -346,12 +346,13 @@ const ExploreScreen: React.FC = () => {
 
   // ── Exaggeration options for inline selector ────────────────────────────
 
-  const EXAG_OPTIONS: Array<{ value: 1 | 2 | 4 | 10 | 20; label: string }> = [
-    { value: 1,  label: '1x'  },
-    { value: 2,  label: '2x'  },
-    { value: 4,  label: '4x'  },
-    { value: 10, label: '10x' },
-    { value: 20, label: '20x' },
+  const EXAG_OPTIONS: Array<{ value: 1 | 1.5 | 2 | 4 | 10 | 20; label: string }> = [
+    { value: 1,   label: '1x'   },
+    { value: 1.5, label: '1.5x' },
+    { value: 2,   label: '2x'   },
+    { value: 4,   label: '4x'   },
+    { value: 10,  label: '10x'  },
+    { value: 20,  label: '20x'  },
   ]
 
   return (
@@ -415,7 +416,7 @@ const ExploreScreen: React.FC = () => {
           aria-hidden="true"
         />
 
-        {!isLoading && showPeakLabels && containerSize.w > 0 && rendererRef.current && (
+        {!isLoading && showPeakLabels && containerSize.w > 0 && rendererRef.current && meshData && (
           <div className={styles.peakLabelsLayer}>
             <PeakLabels3D
               peaks={peaks}
