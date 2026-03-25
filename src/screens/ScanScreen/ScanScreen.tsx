@@ -1292,11 +1292,17 @@ function renderBandContours(
   cam: CameraParams,
   globalElevMin: number,
   globalElevMax: number,
+  silhouetteLayers: SilhouetteLayer[][] | null,
+  silResolution: number,
   darkMode: boolean = true,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
+
+  // Silhouette occlusion: per-point distance check against nearest surface
+  const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
+  const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1339,6 +1345,25 @@ function renderBandContours(
 
     for (let i = 0; i < strand.points.length; i++) {
       const pt = strand.points[i]
+
+      // ── Silhouette occlusion check ─────────────────────────────────────
+      // Skip contour points that are BEHIND the nearest silhouette surface
+      // at this bearing. A contour at 8km should not draw if there's an
+      // opaque silhouette surface at 3km blocking it.
+      if (hasSilOcclusion && silhouetteLayers) {
+        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silResolution) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        if (azLayers && azLayers.length > 0) {
+          // layers[0] is the nearest silhouette surface
+          const nearestSilDist = azLayers[0].dist
+          if (pt.dist > nearestSilDist) {
+            // This contour point is behind the nearest surface — occluded
+            if (pathStarted) { ctx.stroke(); pathStarted = false }
+            continue
+          }
+        }
+      }
 
       const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
       const onScreen = x >= -10 && x <= W + 10 && y >= 0 && y < H
@@ -1589,7 +1614,8 @@ function renderTerrain(
       // Filter strands belonging to this band
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
-        renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax, darkMode)
+        renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
+          silhouetteLayers, silResolution, darkMode)
       }
     }
 
