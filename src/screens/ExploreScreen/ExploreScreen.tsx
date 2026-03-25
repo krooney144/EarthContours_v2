@@ -51,7 +51,7 @@ const ExploreScreen: React.FC = () => {
     waterBodies, rivers, terrainZoom, isCustomBounds,
     loadingState, loadingProgress, loadingMessage,
   } = useTerrainStore()
-  const { units, showPeakLabels, verticalExaggeration } = useSettingsStore()
+  const { units, showPeakLabels, verticalExaggeration, setVerticalExaggeration } = useSettingsStore()
   const { activeLat, activeLng, mode, gpsPermission, gpsLat, requestGPS, switchToGPS } = useLocationStore()
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -337,36 +337,47 @@ const ExploreScreen: React.FC = () => {
     verticalExaggeration, containerSize,
   ])
 
-  // ── Loading state ──────────────────────────────────────────────────────────
+  // ── Derived values (safe even when meshData is null) ──────────────────────
 
-  if (!meshData) {
-    return (
-      <div className={styles.screen}>
-        <div style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          height: '100%', color: 'var(--ec-text-muted)',
-          fontFamily: 'var(--font-display)', letterSpacing: '0.1em',
-          gap: '12px',
-        }}>
-          <div>{loadingState === 'loading' ? loadingMessage || 'LOADING TERRAIN...' : 'LOADING TERRAIN...'}</div>
-          {loadingState === 'loading' && loadingProgress > 0 && (
-            <div style={{ width: '200px', height: '4px', background: 'rgba(132,209,219,0.15)', borderRadius: '2px' }}>
-              <div style={{
-                width: `${loadingProgress}%`, height: '100%',
-                background: 'var(--ec-glow)', borderRadius: '2px',
-                transition: 'width 0.3s ease',
-              }} />
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
+  const minElevation_m = meshData?.minElevation_m ?? 0
+  const maxElevation_m = meshData?.maxElevation_m ?? 0
+  const bounds = meshData?.bounds ?? { north: 0, south: 0, east: 0, west: 0 }
+  const isLoading = !meshData
 
-  const { minElevation_m, maxElevation_m, bounds } = meshData
+  // ── Exaggeration options for inline selector ────────────────────────────
+
+  const EXAG_OPTIONS: Array<{ value: 1 | 2 | 4 | 10 | 20; label: string }> = [
+    { value: 1,  label: '1x'  },
+    { value: 2,  label: '2x'  },
+    { value: 4,  label: '4x'  },
+    { value: 10, label: '10x' },
+    { value: 20, label: '20x' },
+  ]
 
   return (
     <div className={styles.screen}>
+      {/* ── Loading overlay — always on top, doesn't unmount the canvas ──── */}
+      {isLoading && (
+        <div className={styles.loadingOverlay}>
+          <div className={styles.loadingContent}>
+            <div className={styles.loadingMessage}>
+              {loadingState === 'loading' ? loadingMessage || 'LOADING TERRAIN...' : 'LOADING TERRAIN...'}
+            </div>
+            {loadingState === 'loading' && loadingProgress > 0 && (
+              <div className={styles.loadingBarTrack}>
+                <div
+                  className={styles.loadingBarFill}
+                  style={{ width: `${loadingProgress}%` }}
+                />
+              </div>
+            )}
+            <div className={styles.loadingHint}>
+              Select an area on the Map screen to explore any location in 3D
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className={styles.header}>
         <div>
@@ -385,7 +396,7 @@ const ExploreScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* 3D Canvas area */}
+      {/* 3D Canvas area — ALWAYS mounted so Three.js renderer survives reloads */}
       <div
         ref={containerRef}
         className={styles.canvasArea}
@@ -404,7 +415,7 @@ const ExploreScreen: React.FC = () => {
           aria-hidden="true"
         />
 
-        {showPeakLabels && containerSize.w > 0 && rendererRef.current && (
+        {!isLoading && showPeakLabels && containerSize.w > 0 && rendererRef.current && (
           <div className={styles.peakLabelsLayer}>
             <PeakLabels3D
               peaks={peaks}
@@ -429,7 +440,7 @@ const ExploreScreen: React.FC = () => {
           </div>
         )}
 
-        {showHint && (
+        {showHint && !isLoading && (
           <div
             className={styles.controlsHint}
             onClick={dismissHint}
@@ -467,49 +478,74 @@ const ExploreScreen: React.FC = () => {
       </div>
 
       {/* Elevation legend */}
-      <div className={styles.legend} aria-label="Elevation color legend">
-        <div className={`${styles.legendLabel} ${styles.legendTop}`}>
-          {formatElevation(maxElevation_m, units)}
+      {!isLoading && (
+        <div className={styles.legend} aria-label="Elevation color legend">
+          <div className={`${styles.legendLabel} ${styles.legendTop}`}>
+            {formatElevation(maxElevation_m, units)}
+          </div>
+          <div className={styles.legendGradient} aria-hidden="true" />
+          <div className={`${styles.legendLabel} ${styles.legendBottom}`}>
+            {formatElevation(minElevation_m, units)}
+          </div>
         </div>
-        <div className={styles.legendGradient} aria-hidden="true" />
-        <div className={`${styles.legendLabel} ${styles.legendBottom}`}>
-          {formatElevation(minElevation_m, units)}
+      )}
+
+      {/* ── Vertical exaggeration selector ──────────────────────────────── */}
+      {!isLoading && (
+        <div className={styles.exaggerationControl}>
+          <div className={styles.exaggerationLabel}>VERT</div>
+          <div className={styles.exaggerationOptions}>
+            {EXAG_OPTIONS.map(opt => (
+              <button
+                key={opt.value}
+                className={`${styles.exaggerationBtn} ${verticalExaggeration === opt.value ? styles.exaggerationActive : ''}`}
+                onClick={() => setVerticalExaggeration(opt.value)}
+                aria-label={`Set vertical exaggeration to ${opt.label}`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Re-center button */}
-      <button
-        className={styles.recenterBtn}
-        onClick={handleRecenter}
-        aria-label="Re-center camera on terrain"
-      >
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-          <circle cx="7" cy="7" r="5" />
-          <circle cx="7" cy="7" r="1.5" fill="currentColor" />
-          <line x1="7" y1="0" x2="7" y2="3" />
-          <line x1="7" y1="11" x2="7" y2="14" />
-          <line x1="0" y1="7" x2="3" y2="7" />
-          <line x1="11" y1="7" x2="14" y2="7" />
-        </svg>
-        RE-CENTER
-      </button>
+      {!isLoading && (
+        <button
+          className={styles.recenterBtn}
+          onClick={handleRecenter}
+          aria-label="Re-center camera on terrain"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <circle cx="7" cy="7" r="5" />
+            <circle cx="7" cy="7" r="1.5" fill="currentColor" />
+            <line x1="7" y1="0" x2="7" y2="3" />
+            <line x1="7" y1="11" x2="7" y2="14" />
+            <line x1="0" y1="7" x2="3" y2="7" />
+            <line x1="11" y1="7" x2="14" y2="7" />
+          </svg>
+          RE-CENTER
+        </button>
+      )}
 
       {/* Current location button */}
-      <button
-        className={`${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
-        onClick={handleMyLocation}
-        aria-label="Center on my GPS location"
-        title="My Location"
-      >
-        <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-          <circle cx="9" cy="9" r="4" />
-          <circle cx="9" cy="9" r="1.5" fill="currentColor" />
-          <line x1="9" y1="1" x2="9" y2="4" />
-          <line x1="9" y1="14" x2="9" y2="17" />
-          <line x1="1" y1="9" x2="4" y2="9" />
-          <line x1="14" y1="9" x2="17" y2="9" />
-        </svg>
-      </button>
+      {!isLoading && (
+        <button
+          className={`${styles.locationBtn} ${gpsLat !== null ? styles.locationActive : ''}`}
+          onClick={handleMyLocation}
+          aria-label="Center on my GPS location"
+          title="My Location"
+        >
+          <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <circle cx="9" cy="9" r="4" />
+            <circle cx="9" cy="9" r="1.5" fill="currentColor" />
+            <line x1="9" y1="1" x2="9" y2="4" />
+            <line x1="9" y1="14" x2="9" y2="17" />
+            <line x1="1" y1="9" x2="4" y2="9" />
+            <line x1="14" y1="9" x2="17" y2="9" />
+          </svg>
+        </button>
+      )}
 
       {/* GPS Prompt */}
       {gpsPrompt && (
@@ -538,10 +574,11 @@ const ExploreScreen: React.FC = () => {
           SW: {bounds.south.toFixed(4)}&deg;, {bounds.west.toFixed(4)}&deg;<br />
           <strong>Data</strong><br />
           Peaks: {peaks.length} · Lakes: {waterBodies.length} · Rivers: {rivers.length}<br />
-          Tile zoom: z{terrainZoom} · Grid: {meshData.width}&times;{meshData.height}<br />
+          Tile zoom: z{terrainZoom} · Grid: {meshData ? meshData.width : '—'}&times;{meshData ? meshData.height : '—'}<br />
           Source: {isCustomBounds ? 'Custom bounds' : (activeRegion?.id ?? 'none')}<br />
           Elev: {formatElevation(minElevation_m, units)} &ndash; {formatElevation(maxElevation_m, units)}<br />
-          Size: {meshData.worldWidth_km.toFixed(1)} &times; {meshData.worldDepth_km.toFixed(1)} km<br />
+          Size: {meshData ? meshData.worldWidth_km.toFixed(1) : '—'} &times; {meshData ? meshData.worldDepth_km.toFixed(1) : '—'} km<br />
+          Vert. exag: {verticalExaggeration}&times;<br />
           <strong>Camera</strong><br />
           Radius: {(orbitRadius / 1000).toFixed(1)}km · Pan: {orbitPanX.toFixed(3)}, {orbitPanZ.toFixed(3)}<br />
           Theta: {(orbitTheta * 180 / Math.PI).toFixed(1)}&deg; · Phi: {(orbitPhi * 180 / Math.PI).toFixed(1)}&deg;

@@ -536,7 +536,7 @@ interface MapScreenProps {
 const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
   const { activeLat, activeLng, gpsLat, gpsLng, gpsPermission, mode, setExploreLocation, switchToGPS, requestGPS } = useLocationStore()
   const { peaks, waterBodies, rivers, glaciers, coastlines, meshData, activeRegion, isCustomBounds, setWaterBodies, setRivers, setGlaciers, setCoastlines, loadCustomBounds } = useTerrainStore()
-  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, showCoastlines, units } = useSettingsStore()
+  const { coordFormat, showPeakLabels, showLakes, showRivers: showRiversSetting, showGlaciers, showCoastlines, units, setVerticalExaggeration } = useSettingsStore()
   const { navigateTo } = useUIStore()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -622,15 +622,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
   //      - Red (>500 km): Too large — will likely crash on mobile (100+ MB stitched grid)
   //   5. Tap EXPLORE to load the selected bounds in the EXPLORE 3D screen
   //
-  //   SIZE THRESHOLDS (based on EXPLORE's z=10 tile pipeline):
-  //   - At z=10, each tile is ~0.35° (~35 km). Tiles are fetched, decoded (262 KB each),
-  //     stitched into a pixel grid, then downsampled to 256×256.
-  //   - 300 km/side ≈ 64 tiles ≈ 17 MB stitched — comfortable on all devices
-  //   - 500 km/side ≈ 196 tiles ≈ 100 MB stitched — strains mobile browsers
-  //   - 1000 km/side ≈ 784 tiles ≈ 400 MB stitched — OOM on most phones
-  //
-  //   Offline downloads are handled separately via predetermined regions in Settings,
-  //   not via this drag-select (curated regions ensure correct size + accurate estimates).
+  //   SIZE THRESHOLDS (adaptive zoom — see elevationLoader.adaptiveZoomForArea):
+  //   Adaptive zoom keeps tile counts reasonable for any area size:
+  //     <10km→z14, 10-30→z13, 30-80→z12, 80-200→z11, 200-400→z10, >400→z9
+  //   The real constraint is the ENU flat-earth approximation which breaks down
+  //   above ~500km, and very large areas still produce heavy stitched grids.
+  //   - ≤500 km/side: OK — adaptive zoom keeps tiles ≤200, flat-earth <0.3% error
+  //   - 500-800 km/side: Warning — flat-earth error >0.5%, slower loads, may distort
+  //   - >800 km/side: Danger — projection too inaccurate, OOM risk on mobile
   const [isSelectingArea, setIsSelectingArea] = useState(false)
   const [selectionStart, setSelectionStart] = useState<{ lat: number; lng: number } | null>(null)
   const [selectionEnd, setSelectionEnd] = useState<{ lat: number; lng: number } | null>(null)
@@ -639,6 +638,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
   // ── Selection dimension computation ─────────────────────────────────────
   // Computes width/height in km from the lat/lng selection bounds.
   // Uses simple spherical math: 111.132 km/° lat, 111.320×cos(lat) km/° lng.
+  // Tile estimate uses adaptive zoom matching elevationLoader.adaptiveZoomForArea().
   const selectionDims = React.useMemo(() => {
     if (!selectionStart || !selectionEnd) return null
     const latRange = Math.abs(selectionEnd.lat - selectionStart.lat)
@@ -647,19 +647,23 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
     const heightKm = latRange * 111.132
     const widthKm = lngRange * 111.320 * Math.cos((midLat * Math.PI) / 180)
     const maxSideKm = Math.max(widthKm, heightKm)
-    // Estimate tile count at z=10: each tile ~0.35° (360/1024)
-    const tilesWide = Math.ceil(lngRange / (360 / 1024)) + 2
-    const tilesTall = Math.ceil(latRange / (360 / 1024)) + 2
+    // Pick adaptive zoom matching elevationLoader
+    const estZoom = maxSideKm < 10 ? 14 : maxSideKm < 30 ? 13 : maxSideKm < 80 ? 12
+      : maxSideKm < 200 ? 11 : maxSideKm < 400 ? 10 : 9
+    const tileDegs = 360 / Math.pow(2, estZoom)
+    const margin = Math.max(0.02, Math.min(0.5, Math.max(latRange, lngRange) * 0.1))
+    const tilesWide = Math.ceil((lngRange + 2 * margin) / tileDegs) + 1
+    const tilesTall = Math.ceil((latRange + 2 * margin) / tileDegs) + 1
     const tileCount = tilesWide * tilesTall
-    const estimatedMB = (tileCount * 262144) / (1024 * 1024) // stitched grid ~262 KB/tile decoded
-    return { widthKm, heightKm, maxSideKm, tileCount, estimatedMB }
+    const estimatedMB = (tileCount * 262144) / (1024 * 1024)
+    return { widthKm, heightKm, maxSideKm, tileCount, estimatedMB, estZoom }
   }, [selectionStart, selectionEnd])
 
   // Color-code selection based on size thresholds
   type SelectionSeverity = 'ok' | 'warning' | 'danger'
   const selectionSeverity: SelectionSeverity = !selectionDims ? 'ok'
-    : selectionDims.maxSideKm > 500 ? 'danger'
-    : selectionDims.maxSideKm > 300 ? 'warning'
+    : selectionDims.maxSideKm > 800 ? 'danger'
+    : selectionDims.maxSideKm > 500 ? 'warning'
     : 'ok'
 
   const dragRef = useRef({
@@ -2326,6 +2330,15 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
                     east: bounds.east.toFixed(4), west: bounds.west.toFixed(4),
                     dims: `${selectionDims.widthKm.toFixed(0)}×${selectionDims.heightKm.toFixed(0)} km`,
                   })
+                  // Auto-set vertical exaggeration based on area size:
+                  // small areas have enough natural relief, large areas need amplification
+                  const maxKm = selectionDims.maxSideKm
+                  const autoExag: 1 | 2 | 4 | 10 | 20 =
+                    maxKm < 5  ? 1 :
+                    maxKm < 20 ? 2 :
+                    maxKm < 80 ? 4 :
+                    maxKm < 300 ? 10 : 20
+                  setVerticalExaggeration(autoExag)
                   // Start loading custom bounds and navigate to EXPLORE
                   loadCustomBounds(bounds)
                   navigateTo('explore')
