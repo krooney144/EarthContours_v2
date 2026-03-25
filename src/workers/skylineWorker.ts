@@ -137,6 +137,15 @@ interface SilhouetteDataW {
   numAzimuths:      number
 }
 
+/** Near-field profile data produced by the worker (mirrors types.ts NearFieldProfile). */
+interface NearFieldProfileW {
+  profileData:    Float32Array
+  sampleCounts:   Uint16Array
+  resolution:     number
+  numAzimuths:    number
+  floatsPerSample: 2
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -150,6 +159,8 @@ export interface SkylineData {
   refinedArcs: RefinedArc[]
   /** Depth-peeled silhouette candidates (AGL-independent, all azimuths) */
   silhouette:  SilhouetteDataW | null
+  /** Dense near-field elevation profile (0–2km) for opaque terrain occlusion */
+  nearProfile: NearFieldProfileW | null
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -1213,6 +1224,68 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
   console.log(`[SILHOUETTE] Packed ${silTotalCandidates} candidates across ${SILHOUETTE_NUM_AZIMUTHS} azimuths (${(silTotalFloats * 4 / 1024).toFixed(0)} KB)`)
 
+  // ── Phase 5c: Near-field occlusion profile (2880 azimuths, 20m–2km) ─────
+  //
+  // Stores the full terrain elevation at ~50 evenly-log-spaced distance
+  // samples per azimuth.  This gives the main thread the actual terrain
+  // SURFACE shape (not just ridgeline maxima) so it can render an opaque
+  // fill that properly blocks all far terrain behind near hills.
+  //
+  // Reuses tiles already in cache from Phases 3–4.  No new fetches.
+
+  const NEAR_PROFILE_SAMPLES = 50
+  const NEAR_PROFILE_MAX_DIST = 2000  // metres
+  const NEAR_PROFILE_FPS = 2  // floats per sample: rawElev, dist
+
+  // Build log-spaced distance steps: 20m → 2000m, exactly NEAR_PROFILE_SAMPLES steps
+  const nearProfileDists: number[] = []
+  {
+    const logStart = Math.log(20)
+    const logEnd   = Math.log(NEAR_PROFILE_MAX_DIST)
+    const logStep  = (logEnd - logStart) / (NEAR_PROFILE_SAMPLES - 1)
+    for (let i = 0; i < NEAR_PROFILE_SAMPLES; i++) {
+      nearProfileDists.push(Math.exp(logStart + i * logStep))
+    }
+  }
+
+  // Fixed-stride layout: each azimuth gets NEAR_PROFILE_SAMPLES × 2 floats.
+  // Unused slots have rawElev = -Infinity (sentinel).
+  // sampleCounts tracks actual valid samples per azimuth.
+  const npTotalFloats = SILHOUETTE_NUM_AZIMUTHS * NEAR_PROFILE_SAMPLES * NEAR_PROFILE_FPS
+  const npData = new Float32Array(npTotalFloats)
+  npData.fill(-Infinity)  // sentinel for empty slots
+  const npCounts = new Uint16Array(SILHOUETTE_NUM_AZIMUTHS)
+
+  for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
+    const azDeg = ai / SILHOUETTE_RESOLUTION
+    const azRad = azDeg * DEG_TO_RAD
+    const sinA  = Math.sin(azRad)
+    const cosA  = Math.cos(azRad)
+
+    const base = ai * NEAR_PROFILE_SAMPLES * NEAR_PROFILE_FPS
+    let count = 0
+    for (let si = 0; si < nearProfileDists.length; si++) {
+      const dist = nearProfileDists[si]
+      const sLat = viewerLat + (cosA * dist) / 111_132
+      const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
+
+      const zoom    = distToZoom(dist)
+      const rawElev = sampleBest(sLat, sLng, zoom)
+
+      // Skip ocean/invalid samples
+      if (rawElev < 2.0) continue
+
+      const off = base + count * NEAR_PROFILE_FPS
+      npData[off]     = rawElev
+      npData[off + 1] = dist
+      count++
+    }
+    npCounts[ai] = count
+  }
+
+  const npValidSamples = npCounts.reduce((s, c) => s + c, 0)
+  console.log(`[NEAR-PROFILE] ${npValidSamples} valid samples across ${SILHOUETTE_NUM_AZIMUTHS} azimuths (${(npTotalFloats * 4 / 1024).toFixed(0)} KB)`)
+
   // Phase 6 removed — refined arcs now computed on-demand via 'refine-peaks' message.
   // See handleRefinePeaks() below.
 
@@ -1233,6 +1306,14 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     numAzimuths:      SILHOUETTE_NUM_AZIMUTHS,
   }
 
+  const nearProfile: NearFieldProfileW = {
+    profileData:    npData,
+    sampleCounts:   npCounts,
+    resolution:     SILHOUETTE_RESOLUTION,
+    numAzimuths:    SILHOUETTE_NUM_AZIMUTHS,
+    floatsPerSample: NEAR_PROFILE_FPS as 2,
+  }
+
   const skyline: SkylineData = {
     angles,
     distances,
@@ -1240,6 +1321,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands,
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
     silhouette,
+    nearProfile,
     resolution,
     numAzimuths,
     computedAt: {
@@ -1251,13 +1333,15 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     },
   }
 
-  // Transfer ArrayBuffers (zero-copy) — include band + silhouette buffers
+  // Transfer ArrayBuffers (zero-copy) — include band + silhouette + near-profile buffers
   const transferables: Transferable[] = [
     angles.buffer as ArrayBuffer,
     distances.buffer as ArrayBuffer,
     shading.buffer as ArrayBuffer,
     silData.buffer as ArrayBuffer,
     silOffsets.buffer as ArrayBuffer,
+    npData.buffer as ArrayBuffer,
+    npCounts.buffer as ArrayBuffer,
   ]
   for (const band of bands) {
     transferables.push(

@@ -276,6 +276,9 @@ const SettingsScreen: React.FC = () => {
           <Row label="Solid Terrain" description="Show solid 3D mesh in Explore (off = contour lines only)">
             <Toggle id="toggle-solid-terrain" label="Toggle solid terrain" checked={settings.solidTerrain} onChange={settings.toggleSolidTerrain} />
           </Row>
+          <Row label="Band Lines" description="Show depth band ridgeline strokes in Scan view">
+            <Toggle id="toggle-band-lines" label="Toggle band lines" checked={settings.showBandLines} onChange={settings.toggleBandLines} />
+          </Row>
           <Row label="Terrain Fill" description="Show solid fill below ridgelines in Scan view">
             <Toggle id="toggle-fill" label="Toggle terrain fill" checked={settings.showFill} onChange={settings.toggleFill} />
           </Row>
