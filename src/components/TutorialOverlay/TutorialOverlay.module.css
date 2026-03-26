@@ -72,7 +72,7 @@
 
 .centerBlock {
   position: absolute;
-  top: 40%;
+  top: 30%;
   left: 50%;
   transform: translate(-50%, -50%);
   display: flex;
@@ -255,7 +255,7 @@
 
 .settingsNote {
   position: absolute;
-  bottom: calc(var(--ec-nav-height, 64px) + 28px);
+  bottom: calc(var(--ec-nav-height, 64px) + 54px);
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--font-body);
@@ -369,13 +369,13 @@
 
 /* Gyro — next to actual bottom-right gyro button */
 .scanGyro {
-  right: 110px;
-  bottom: calc(var(--ec-nav-height, 64px) + 110px);
+  right: 64px;
+  bottom: calc(var(--ec-nav-height, 64px) + 115px);
 }
 
 /* GPS — next to actual bottom-right GPS button, well below gyro */
 .scanGps {
-  right: 110px;
+  right: 64px;
   bottom: calc(var(--ec-nav-height, 64px) + 68px);
 }
 
