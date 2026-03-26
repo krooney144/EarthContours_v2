@@ -1,0 +1,26 @@
+/**
+ * NavigateHint — subtle bottom-center hint that fades out
+ */
+
+.hint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-3, 12px));
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--ec-text-muted);
+  background: var(--ec-bg-overlay);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+  opacity: 0.7;
+  transition: opacity 1.5s ease-out;
+}
+
+.hidden {
+  opacity: 0;
+}

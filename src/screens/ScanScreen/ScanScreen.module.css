@@ -199,7 +199,7 @@
   color: var(--ec-text-muted);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  background: rgba(8, 20, 35, 0.6);
+  background: var(--ec-bg-overlay);
   padding: 2px 8px;
   border-radius: var(--radius-full);
 }
@@ -259,7 +259,7 @@
   letter-spacing: 0.04em;
   text-align: center;
   pointer-events: none;
-  background: rgba(8, 20, 35, 0.5);
+  background: var(--ec-bg-overlay);
   padding: 1px 5px;
   border-radius: var(--radius-full);
 }
@@ -312,6 +312,14 @@
   color: var(--ec-foam);
   text-shadow: 0 0 10px rgba(132, 209, 219, 0.55);
   text-transform: uppercase;
+}
+
+.peakNameLocal {
+  font-family: var(--font-body);
+  font-size: 8px;
+  color: var(--ec-text-muted);
+  letter-spacing: 0.04em;
+  opacity: 0.7;
 }
 
 .peakElev {
@@ -506,7 +514,7 @@
   pointer-events: none;
   z-index: var(--z-overlay);
   letter-spacing: 0.08em;
-  background: rgba(8, 20, 35, 0.5);
+  background: var(--ec-bg-overlay);
   padding: 4px 12px;
   border-radius: var(--radius-full);
 }

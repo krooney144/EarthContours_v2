@@ -15,7 +15,7 @@
  */
 
 import React, { useCallback, useState } from 'react'
-import { useSettingsStore, useLocationStore } from '../../store'
+import { useSettingsStore, useLocationStore, useUIStore } from '../../store'
 import { createLogger } from '../../core/logger'
 import { submitFeedback } from '../../data/feedbackService'
 import type { VerticalExaggeration, UnitSystem, CoordFormat, TargetFPS, BatteryMode, GPSAccuracy } from '../../core/types'
@@ -108,6 +108,7 @@ const Section: React.FC<SectionProps> = ({ icon, title, children }) => (
 const SettingsScreen: React.FC = () => {
   const settings = useSettingsStore()
   const { gpsPermission, requestGPS } = useLocationStore()
+  const startTutorial = useUIStore((s) => s.startTutorial)
 
   const [feedbackText, setFeedbackText] = useState('')
   const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
@@ -200,6 +201,24 @@ const SettingsScreen: React.FC = () => {
             to view 3D terrain with contour lines, and Scan for a first-person
             360° panoramic skyline with ridgeline rendering and peak identification.
             All elevation data comes from AWS Terrarium DEM tiles.
+          </div>
+        </Section>
+
+        {/* ── Take a Tour ── */}
+        <Section icon="◈" title="Take a Tour">
+          <div className={styles.aboutText}>
+            Learn how each screen works with a quick visual guide.
+          </div>
+          <div className={styles.tourButtons}>
+            <button className={styles.tourBtn} onClick={() => startTutorial('map')}>
+              Map Tutorial
+            </button>
+            <button className={styles.tourBtn} onClick={() => startTutorial('explore')}>
+              Explore Tutorial
+            </button>
+            <button className={styles.tourBtn} onClick={() => startTutorial('scan')}>
+              Scan Tutorial
+            </button>
           </div>
         </Section>
 

@@ -30,11 +30,11 @@ const SCREEN_CARDS: Array<{
   icon: string
 }> = [
   {
-    id: 'scan',
-    title: 'SCAN',
-    description: 'AR first-person terrain view. Point and see peak names, elevations, and contour lines.',
-    previewClass: 'scanPreview',
-    icon: '◉',
+    id: 'map',
+    title: 'MAP',
+    description: 'Real topographic map. Pan, zoom, and click anywhere to explore that terrain.',
+    previewClass: 'mapPreview',
+    icon: '⊕',
   },
   {
     id: 'explore',
@@ -44,11 +44,11 @@ const SCREEN_CARDS: Array<{
     icon: '⬡',
   },
   {
-    id: 'map',
-    title: 'MAP',
-    description: 'Real topographic map. Pan, zoom, and click anywhere to explore that terrain.',
-    previewClass: 'mapPreview',
-    icon: '⊕',
+    id: 'scan',
+    title: 'SCAN',
+    description: 'AR first-person terrain view. Point and see peak names, elevations, and contour lines.',
+    previewClass: 'scanPreview',
+    icon: '◉',
   },
 ]
 

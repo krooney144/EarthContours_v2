@@ -44,6 +44,7 @@ import {
 import { loadElevationTile } from '../../data/elevationLoader'
 import { loadNaturalEarthRivers, loadNaturalEarthLakes, loadNaturalEarthGlaciers, loadNaturalEarthCoastlines } from '../../data/geoManager'
 import type { TileCoord } from '../../core/types'
+import { TutorialOverlay } from '../../components/TutorialOverlay/TutorialOverlay'
 import styles from './MapScreen.module.css'
 
 const log = createLogger('SCREEN:MAP')
@@ -1160,7 +1161,13 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
         if (tileZoom >= 10) {
           ctx.font      = `10px 'Josefin Sans', sans-serif`
           ctx.fillStyle = 'rgba(167, 221, 229, 0.9)'
-          ctx.fillText(peak.name, px.x, px.y + 14)
+          const label = peak.nameEn || peak.name
+          ctx.fillText(label, px.x, px.y + 14)
+          if (peak.nameEn && peak.nameEn !== peak.name) {
+            ctx.font      = `8px 'Jost', sans-serif`
+            ctx.fillStyle = 'rgba(167, 221, 229, 0.55)'
+            ctx.fillText(peak.name, px.x, px.y + 24)
+          }
         }
       }
     }
@@ -2526,6 +2533,9 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
 
       {/* End of non-exhibit chrome */}
       </>)}
+
+      {/* Tutorial overlay */}
+      <TutorialOverlay screen="map" />
     </div>
   )
 }

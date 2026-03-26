@@ -59,6 +59,8 @@ import {
 import { fetchPeaksNear }                from '../../data/peakLoader'
 import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData, NearFieldProfile } from '../../core/types'
 import { DEPTH_BANDS, SILHOUETTE_FLOATS_PER_CANDIDATE, NEAR_PROFILE_SAMPLES, NEAR_PROFILE_AGL_LIMIT } from '../../core/types'
+import { NavigateHint } from '../../components/NavigateHint/NavigateHint'
+import { TutorialOverlay } from '../../components/TutorialOverlay/TutorialOverlay'
 import styles from './ScanScreen.module.css'
 
 const log = createLogger('SCREEN:SCAN')
@@ -829,6 +831,7 @@ interface PinchState {
 interface PeakScreenPos {
   id:          string
   name:        string
+  nameEn?:     string  // English name (when different from primary name)
   elevation_m: number
   dist_km:     number
   bearing:     number
@@ -2217,6 +2220,7 @@ function drawScanCanvas(
     peakPositions.push({
       id:          peak.id,
       name:        peak.name,
+      nameEn:      peak.nameEn,
       elevation_m: peak.elevation_m,
       dist_km:     horizDist / 1000,
       bearing:     calculateBearing({ lat: activeLat, lng: activeLng }, { lat: peak.lat, lng: peak.lng }),
@@ -3254,6 +3258,9 @@ const ScanScreen: React.FC = () => {
           ← Drag to look around — Pinch to zoom →
         </div>
 
+        {/* Navigate hint */}
+        <NavigateHint />
+
         {/* ── Bottom-right action buttons (gyro + GPS) ─────────────────── */}
         <div className={styles.actionButtons}>
           {/* Gyroscope toggle — activates device orientation tracking */}
@@ -3345,6 +3352,9 @@ const ScanScreen: React.FC = () => {
         units={units}
         skylineReady={skylineData !== null}
       />
+
+      {/* Tutorial overlay */}
+      <TutorialOverlay screen="scan" />
     </div>
   )
 }
@@ -3362,9 +3372,14 @@ const PeakLabel: React.FC<{
   // Format distance respecting unit preference
   const distStr = formatDistance(pos.dist_km, units)
 
+  // Show English name prominently if available, with local name below
+  const displayName = pos.nameEn || pos.name
+  const localName = pos.nameEn ? pos.name : undefined
+
   const card = (
     <div className={styles.peakCard} aria-hidden="true">
-      <span className={styles.peakName}>{pos.name}</span>
+      <span className={styles.peakName}>{displayName}</span>
+      {localName && <span className={styles.peakNameLocal}>{localName}</span>}
       <span className={styles.peakElev}>{formatElevation(pos.elevation_m, units)}</span>
       <span className={styles.peakBearing}>
         {headingToCompass(pos.bearing)} · {distStr}

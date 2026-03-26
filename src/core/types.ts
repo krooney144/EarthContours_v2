@@ -70,6 +70,7 @@ export type GPSPermission = 'unknown' | 'granted' | 'denied' | 'unavailable'
 export interface Peak {
   id: string
   name: string
+  nameEn?: string       // English name from OSM name:en tag (omitted if same as name)
   lat: number
   lng: number
   elevation_m: number   // Always stored in meters internally

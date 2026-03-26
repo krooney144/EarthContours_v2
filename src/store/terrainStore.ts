@@ -93,7 +93,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       return
     }
 
-    set({ loadingState: 'loading', loadingProgress: 0, loadingMessage: `Loading ${region.name}...`, activeRegion: region, isCustomBounds: false })
+    set({ loadingState: 'loading', loadingProgress: 0, loadingMessage: 'Loading elevation data...', activeRegion: region, isCustomBounds: false })
 
     try {
       // ── Phase 1: Peak data ────────────────────────────────────────────────

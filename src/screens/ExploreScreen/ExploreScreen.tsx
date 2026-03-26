@@ -25,6 +25,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { NavigateHint } from '../../components/NavigateHint/NavigateHint'
+import { TutorialOverlay } from '../../components/TutorialOverlay/TutorialOverlay'
 import {
   useCameraStore, useTerrainStore, useSettingsStore, useLocationStore,
 } from '../../store'
@@ -590,6 +592,9 @@ const ExploreScreen: React.FC = () => {
         </div>
       )}
 
+      {/* Navigate hint */}
+      {!isLoading && <NavigateHint />}
+
       {/* Debug toggle */}
       <button
         className={styles.debugToggle}
@@ -621,6 +626,9 @@ const ExploreScreen: React.FC = () => {
           Theta: {(orbitTheta * 180 / Math.PI).toFixed(1)}&deg; · Phi: {(orbitPhi * 180 / Math.PI).toFixed(1)}&deg;
         </div>
       )}
+
+      {/* Tutorial overlay */}
+      <TutorialOverlay screen="explore" />
     </div>
   )
 }
