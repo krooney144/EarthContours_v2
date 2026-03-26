@@ -74,6 +74,13 @@ const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
 const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full 360°
 
+// ─── Unified Terrain Fill ─────────────────────────────────────────────────────
+// Single flat base color for ALL terrain surfaces (band fills, silhouette fills,
+// near-field occlusion). Contour/ridgeline strokes sit on top with elevation-based
+// coloring. One color per theme eliminates blocky multi-band fill appearance.
+const TERRAIN_FILL_DARK  = 'rgb(4, 10, 18)'     // Deep navy — darker than sky gradient, contour lines visible
+const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
+
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
 /**
@@ -486,8 +493,8 @@ function renderNearFieldOcclusion(
   const { W, H } = cam
   const { envelope, sampleCounts, numAzimuths, resolution } = projectedProfile
 
-  // Near-terrain fill color — matches the darkest band fill
-  const fillColor = darkMode ? 'rgb(2, 12, 20)' : 'rgb(85, 100, 80)'
+  // Unified terrain fill — same flat color as all other terrain surfaces
+  const fillColor = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
 
   // Build a polygon: trace the near terrain "max angle" across screen columns
   ctx.beginPath()
@@ -1560,7 +1567,7 @@ function renderTerrain(
     ctx.closePath()
     // Band fills only render if no silhouettes — silhouettes replace them
     if (hasVisiblePixels && showFill && !hasSilhouettes) {
-      ctx.fillStyle = style.fillColor
+      ctx.fillStyle = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
       ctx.fill()
     }
 
@@ -1569,6 +1576,10 @@ function renderTerrain(
     // bands' contours, then THIS band's contours draw on top.
     if (hasSilhouettes && silByBand && nearestLayerPerAz) {
       const isNearestBand = (bi === 0)
+      // Unified terrain fill — one flat color for all silhouette surfaces.
+      // Eliminates per-pixel RGB computation (perf win on mobile).
+      const fillColor = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
+      ctx.fillStyle = fillColor
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
@@ -1585,23 +1596,13 @@ function renderTerrain(
             const peakPos = project(bearingDeg, nearest.peakAngle, cam)
             const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
             if (peakY < H) {
-              const distT = Math.min(1, nearest.dist / silMaxDist)
-              const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (nearest.rawElev - silElevMin) / silElevRange)) : 0.5
-              // Distance-based fill: near=dark deep blue, far=slightly brighter slate
-              const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
-              const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
-              const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
-              ctx.fillStyle = `rgb(${r},${g},${b})`
               ctx.fillRect(col, peakY, 1, H - peakY)
             }
           }
         }
 
         // Draw silhouette layers in this band (far→near within band)
-        // These are layers whose distance falls in this band's range
         if (bandLayers.length > 0) {
-          // Sort by distance descending (far first) for painter's order
-          // Layers are already near→far from buildSilhouetteLayers, reverse
           for (let li = bandLayers.length - 1; li >= 0; li--) {
             const layer = bandLayers[li]
 
@@ -1613,14 +1614,6 @@ function renderTerrain(
             const baseY = Math.max(0, Math.min(H, Math.round(basePos.y)))
 
             if (baseY <= peakY) continue
-
-            const distT = Math.min(1, layer.dist / silMaxDist)
-            const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (layer.rawElev - silElevMin) / silElevRange)) : 0.5
-            // Distance-based fill: near=dark deep blue, far=slightly brighter slate
-            const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
-            const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
-            const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
-            ctx.fillStyle = `rgb(${r},${g},${b})`
             ctx.fillRect(col, peakY, 1, baseY - peakY)
           }
         }
@@ -1641,11 +1634,15 @@ function renderTerrain(
     }
 
     // ── Ridgeline stroke — continuous paths with periodic color updates ──
+    // Distance-proximity gating: break path when adjacent columns jump to a
+    // different depth (same fix that prevents contour strand jumping).
+    // Ratio threshold: if dist changes by more than 2× between columns, break.
     if (hasVisiblePixels && showBandLines) {
       ctx.lineCap = 'butt'
       ctx.lineJoin = 'round'
 
       let segStartCol = -1
+      let prevDist = 0
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
@@ -1654,6 +1651,7 @@ function renderTerrain(
         if (angle <= -Math.PI / 2 + 0.001) {
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
+          prevDist = 0
           continue
         }
 
@@ -1663,10 +1661,22 @@ function renderTerrain(
         if (screenY >= H) {
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
+          prevDist = 0
           continue
         }
 
         const clampedY = Math.max(0, screenY)
+        const dist = bandDistAt(skyline, bi, bearingDeg)
+
+        // Distance jump detection: break path if depth changes drastically
+        // between adjacent columns (prevents lines connecting unrelated terrain)
+        if (segStartCol >= 0 && prevDist > 0 && dist > 0) {
+          const ratio = dist > prevDist ? dist / prevDist : prevDist / dist
+          if (ratio > 2.0) {
+            ctx.stroke()
+            segStartCol = -1
+          }
+        }
 
         if (segStartCol < 0) {
           // Start a new segment — compute color + distance-based line width
@@ -1674,7 +1684,6 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
           ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
@@ -1683,7 +1692,6 @@ function renderTerrain(
           segStartCol = col
         } else if (col - segStartCol >= segSize) {
           // Flush current segment, start new one with updated color + width.
-          // Overlap by 1px: lineTo then moveTo at same point prevents gaps.
           ctx.lineTo(col, clampedY)
           ctx.stroke()
 
@@ -1691,7 +1699,6 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
           ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
@@ -1701,6 +1708,8 @@ function renderTerrain(
         } else {
           ctx.lineTo(col, clampedY)
         }
+
+        prevDist = dist
       }
 
       // Flush final segment
