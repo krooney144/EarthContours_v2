@@ -1,17 +1,81 @@
 /**
- * TutorialOverlay — Visual cheat sheet overlay for each screen.
+ * TutorialOverlay — Visual cheat sheet with mini-icon anchors.
  *
- * Semi-transparent overlay that lets you SEE the actual controls underneath.
- * Labels positioned near real control locations so users understand what
- * each button does. Works on both mobile and desktop.
- *
- * Tap anywhere to dismiss.
+ * Design principles:
+ * - Semi-transparent dark overlay with light blur — controls visible underneath
+ * - Mini SVG icons matching actual buttons so users know what to look for
+ * - Structured, scannable blocks (icon + short label) not paragraphs
+ * - Visual hierarchy: title → description → callouts top-to-bottom → close
+ * - Close hint at bottom
  */
 
 import React from 'react'
 import { useUIStore } from '../../store'
 import type { ScreenId } from '../../core/types'
 import styles from './TutorialOverlay.module.css'
+
+// ─── Mini Icon Components (match actual button SVGs) ────────────────────────
+
+const IconCrosshair: React.FC = () => (
+  <svg className={styles.icon} width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <circle cx="9" cy="9" r="4" /><circle cx="9" cy="9" r="1.5" fill="currentColor" />
+    <line x1="9" y1="1" x2="9" y2="4" /><line x1="9" y1="14" x2="9" y2="17" />
+    <line x1="1" y1="9" x2="4" y2="9" /><line x1="14" y1="9" x2="17" y2="9" />
+  </svg>
+)
+
+const IconAreaSelect: React.FC = () => (
+  <svg className={styles.icon} width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <rect x="3" y="3" width="12" height="12" strokeDasharray="3 2" />
+    <rect x="1.5" y="1.5" width="3" height="3" fill="currentColor" stroke="none" />
+    <rect x="13.5" y="1.5" width="3" height="3" fill="currentColor" stroke="none" />
+    <rect x="1.5" y="13.5" width="3" height="3" fill="currentColor" stroke="none" />
+    <rect x="13.5" y="13.5" width="3" height="3" fill="currentColor" stroke="none" />
+  </svg>
+)
+
+const IconRecenter: React.FC = () => (
+  <svg className={styles.icon} width="20" height="20" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <circle cx="7" cy="7" r="5" /><circle cx="7" cy="7" r="1.5" fill="currentColor" />
+    <line x1="7" y1="0" x2="7" y2="3" /><line x1="7" y1="11" x2="7" y2="14" />
+    <line x1="0" y1="7" x2="3" y2="7" /><line x1="11" y1="7" x2="14" y2="7" />
+  </svg>
+)
+
+const IconGyro: React.FC = () => (
+  <svg className={styles.icon} width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
+    <ellipse cx="12" cy="12" rx="10" ry="10" opacity="0.5" />
+    <ellipse cx="12" cy="12" rx="10" ry="5" opacity="0.7" />
+    <ellipse cx="12" cy="12" rx="3.5" ry="10" opacity="0.7" />
+    <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" opacity="0.9" />
+  </svg>
+)
+
+const IconViewpoint: React.FC = () => (
+  <svg className={styles.iconLarge} width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#84D1DB" strokeWidth="1.5">
+    <circle cx="12" cy="12" r="8" opacity="0.6" />
+    <circle cx="12" cy="12" r="4" />
+    <circle cx="12" cy="12" r="1.5" fill="#84D1DB" />
+  </svg>
+)
+
+const IconZoomSlider: React.FC = () => (
+  <svg className={styles.icon} width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <line x1="7" y1="2" x2="7" y2="26" opacity="0.4" />
+    <circle cx="7" cy="10" r="4" fill="currentColor" opacity="0.6" />
+    <text x="7" y="3" textAnchor="middle" fill="currentColor" fontSize="6" stroke="none">+</text>
+    <text x="7" y="28" textAnchor="middle" fill="currentColor" fontSize="7" stroke="none">−</text>
+  </svg>
+)
+
+const IconHeightSlider: React.FC = () => (
+  <svg className={styles.icon} width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="currentColor" strokeWidth="1">
+    <line x1="7" y1="2" x2="7" y2="26" opacity="0.4" />
+    <circle cx="7" cy="18" r="4" fill="currentColor" opacity="0.6" />
+    <text x="7" y="4" textAnchor="middle" fill="currentColor" fontSize="4" stroke="none">HIGH</text>
+    <text x="7" y="28" textAnchor="middle" fill="currentColor" fontSize="4" stroke="none">LOW</text>
+  </svg>
+)
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
@@ -32,12 +96,12 @@ export const TutorialOverlay: React.FC<TutorialOverlayProps> = ({ screen }) => {
       role="dialog"
       aria-label={`${screen} tutorial`}
     >
-      {/* Dismiss hint — prominent at top */}
-      <div className={styles.dismissHint}>Tap anywhere to close tutorial</div>
-
       {screen === 'map' && <MapTutorial />}
       {screen === 'explore' && <ExploreTutorial />}
       {screen === 'scan' && <ScanTutorial />}
+
+      {/* Dismiss — bottom center */}
+      <div className={styles.dismissHint}>Tap anywhere to close tutorial</div>
     </div>
   )
 }
@@ -46,49 +110,40 @@ export const TutorialOverlay: React.FC<TutorialOverlayProps> = ({ screen }) => {
 
 const MapTutorial: React.FC = () => (
   <>
-    {/* Title + description */}
+    {/* 1. Title + description */}
     <div className={styles.titleBlock}>
       <div className={styles.title}>MAP</div>
-      <div className={styles.description}>
-        Browse topographic elevation data. Light areas are higher elevation,
-        dark areas are lower — down to sea level.
+      <div className={styles.desc}>
+        Topographic elevation map — light = high, dark = sea level
       </div>
     </div>
 
-    {/* Center tap hint */}
-    <div className={styles.centerHint}>
-      <div className={styles.centerIcon}>+</div>
-      <div className={styles.centerText}>
-        Tap anywhere to set your viewpoint location
-      </div>
+    {/* 2. Center — viewpoint tap */}
+    <div className={styles.centerBlock}>
+      <IconViewpoint />
+      <div className={styles.centerLabel}>Tap anywhere to set viewpoint</div>
     </div>
 
-    {/* Right controls — positioned near the actual zoom/location/area buttons */}
+    {/* 3. Right-side button callouts — positioned near actual buttons */}
+    <div className={`${styles.callout} ${styles.mapGps}`}>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Set viewpoint to GPS</span>
+      </div>
+      <div className={styles.btnPreview}><IconCrosshair /></div>
+    </div>
+
+    <div className={`${styles.callout} ${styles.mapArea}`}>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Select 3D area for Explore</span>
+      </div>
+      <div className={styles.btnPreview}><IconAreaSelect /></div>
+    </div>
+
     <div className={`${styles.callout} ${styles.mapZoom}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Zoom in and out
-        <span className={styles.subtext}>Pinch on mobile · Scroll on desktop</span>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Zoom</span>
+        <span className={styles.calloutSub}>Pinch · Scroll · +/−</span>
       </div>
-    </div>
-
-    <div className={`${styles.callout} ${styles.mapLocation}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Set viewpoint to your GPS location
-      </div>
-    </div>
-
-    <div className={`${styles.callout} ${styles.mapAreaSelect}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Select an area to view in 3D on Explore tab
-      </div>
-    </div>
-
-    {/* Bottom nav hint */}
-    <div className={styles.navHint}>
-      Use the tabs below to switch between Map, Explore, and Scan
     </div>
   </>
 )
@@ -97,59 +152,47 @@ const MapTutorial: React.FC = () => (
 
 const ExploreTutorial: React.FC = () => (
   <>
+    {/* 1. Title + description */}
     <div className={styles.titleBlock}>
       <div className={styles.title}>EXPLORE</div>
-      <div className={styles.description}>
-        3D terrain view of the selected area. Orbit, zoom, and fly
-        through the landscape with contour lines and peak labels.
+      <div className={styles.desc}>
+        3D terrain — orbit, zoom, and fly through the landscape
       </div>
     </div>
 
-    {/* Center navigation instructions */}
-    <div className={styles.centerHint}>
-      <div className={styles.centerText}>
-        <strong>Mobile:</strong> 1-finger drag to orbit · 2-finger drag to pan · Pinch to zoom
-        <br />
-        <strong>Desktop:</strong> Left-click drag to pan · Right-click drag to orbit · Scroll to zoom
-        <br />
-        <strong>Both:</strong> Double-tap / double-click to fly to a spot
+    {/* 2. Controls — same format as existing EXPLORE CONTROLS popup */}
+    <div className={styles.controlsBox}>
+      <div className={styles.controlsTitle}>CONTROLS</div>
+      <div className={styles.controlRow}><span className={styles.controlKey}>Drag / 1 finger</span><span className={styles.controlVal}>Orbit &amp; tilt</span></div>
+      <div className={styles.controlRow}><span className={styles.controlKey}>Right-click / 2 fingers</span><span className={styles.controlVal}>Pan</span></div>
+      <div className={styles.controlRow}><span className={styles.controlKey}>Scroll / Pinch</span><span className={styles.controlVal}>Zoom</span></div>
+      <div className={styles.controlRow}><span className={styles.controlKey}>Double-tap / click</span><span className={styles.controlVal}>Fly to point</span></div>
+    </div>
+
+    {/* 3. Button callouts */}
+    <div className={`${styles.callout} ${styles.exploreExag}`}>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Vertical exaggeration</span>
+        <span className={styles.calloutSub}>1× = true elevation</span>
       </div>
     </div>
 
-    {/* Right side — vertical exaggeration */}
-    <div className={`${styles.callout} ${styles.exploreExaggeration}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Vertical exaggeration
-        <span className={styles.subtext}>
-          1× = true elevation · Higher values stretch terrain height
-        </span>
-      </div>
-    </div>
-
-    {/* Right side — recenter */}
     <div className={`${styles.callout} ${styles.exploreRecenter}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Re-center camera view
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Re-center view</span>
       </div>
+      <div className={styles.btnPreview}><IconRecenter /></div>
     </div>
 
-    {/* Left side — GPS button */}
     <div className={`${styles.callout} ${styles.exploreGps}`}>
-      <div className={styles.calloutText}>
-        Show your GPS location on terrain
+      <div className={styles.btnPreview}><IconCrosshair /></div>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>GPS location</span>
       </div>
-      <div className={styles.calloutArrow}>→</div>
     </div>
 
-    {/* Settings hint */}
-    <div className={styles.settingsHint}>
-      Toggle labels, contour lines, and terrain fill in Settings
-    </div>
-
-    <div className={styles.navHint}>
-      Select a new area on the Map tab to explore different terrain
+    <div className={styles.settingsNote}>
+      Customize labels, contours, and fill in Settings
     </div>
   </>
 )
@@ -158,75 +201,60 @@ const ExploreTutorial: React.FC = () => (
 
 const ScanTutorial: React.FC = () => (
   <>
+    {/* 1. Title + description */}
     <div className={styles.titleBlock}>
       <div className={styles.title}>SCAN</div>
-      <div className={styles.description}>
-        First-person 360° panorama from your viewpoint. See the horizon,
-        ridgelines, peak names, elevations, and distances.
+      <div className={styles.desc}>
+        360° panorama — drag to look around, see peaks and ridgelines
       </div>
     </div>
 
-    {/* Center drag instruction */}
-    <div className={styles.centerHint}>
-      <div className={styles.centerText}>
-        Drag left and right to look around the full 360° horizon
+    {/* 2. Compass callout — just below top */}
+    <div className={`${styles.callout} ${styles.scanCompass}`}>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Compass — your heading direction</span>
       </div>
     </div>
 
-    {/* Left — zoom slider */}
+    {/* 3. Left slider */}
     <div className={`${styles.callout} ${styles.scanZoom}`}>
-      <div className={styles.calloutText}>
-        Zoom slider
-        <span className={styles.subtext}>Drag up to zoom in · Or pinch to zoom</span>
+      <div className={styles.btnPreview}><IconZoomSlider /></div>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Zoom</span>
+        <span className={styles.calloutSub}>Drag or pinch</span>
       </div>
-      <div className={styles.calloutArrow}>→</div>
     </div>
 
-    {/* Right — height slider */}
+    {/* 4. Right slider */}
     <div className={`${styles.callout} ${styles.scanHeight}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Height (AGL) slider
-        <span className={styles.subtext}>Adjust your viewing height above ground</span>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Height (AGL)</span>
+        <span className={styles.calloutSub}>Adjust viewing altitude</span>
       </div>
+      <div className={styles.btnPreview}><IconHeightSlider /></div>
     </div>
 
-    {/* Bottom right — gyro + GPS */}
+    {/* 5. Bottom-right buttons */}
     <div className={`${styles.callout} ${styles.scanGyro}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        Gyroscope
-        <span className={styles.subtext}>
-          Face the correct direction before enabling — aligns view with your phone
-        </span>
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Gyroscope</span>
+        <span className={styles.calloutSub}>Face correct direction first</span>
       </div>
+      <div className={styles.btnPreview}><IconGyro /></div>
     </div>
 
     <div className={`${styles.callout} ${styles.scanGps}`}>
-      <div className={styles.calloutArrow}>←</div>
-      <div className={styles.calloutText}>
-        GPS — use your current location as viewpoint
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>GPS viewpoint</span>
       </div>
+      <div className={styles.btnPreview}><IconCrosshair /></div>
     </div>
 
-    {/* Top — compass */}
-    <div className={`${styles.callout} ${styles.scanCompass}`}>
-      <div className={styles.calloutText}>
-        Compass heading — shows which direction you are looking (N, S, E, W)
-      </div>
-      <div className={styles.calloutArrow}>↑</div>
-    </div>
-
-    {/* Bottom — HUD */}
+    {/* 6. HUD callout */}
     <div className={`${styles.callout} ${styles.scanHud}`}>
-      <div className={styles.calloutArrow}>↓</div>
-      <div className={styles.calloutText}>
-        Info panel — your coordinates, elevation, heading, and scan range
+      <div className={styles.calloutContent}>
+        <span className={styles.calloutLabel}>Info panel — coordinates, elevation, heading</span>
       </div>
-    </div>
-
-    <div className={styles.navHint}>
-      Set a new viewpoint location on the Map tab
     </div>
   </>
 )
