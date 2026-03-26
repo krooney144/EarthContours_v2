@@ -370,13 +370,13 @@
 /* Gyro — next to actual bottom-right gyro button */
 .scanGyro {
   right: 110px;
-  bottom: calc(var(--ec-nav-height, 64px) + 85px);
+  bottom: calc(var(--ec-nav-height, 64px) + 110px);
 }
 
-/* GPS — next to actual bottom-right GPS button */
+/* GPS — next to actual bottom-right GPS button, well below gyro */
 .scanGps {
   right: 110px;
-  bottom: calc(var(--ec-nav-height, 64px) + 62px);
+  bottom: calc(var(--ec-nav-height, 64px) + 68px);
 }
 
 /* HUD — just above actual HUD bar */

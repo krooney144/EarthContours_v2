@@ -159,6 +159,7 @@ const MapTutorial: React.FC = () => (
         <span className={styles.calloutLabel}>Zoom</span>
         <span className={styles.calloutSub}>Pinch · Scroll · +/−</span>
       </div>
+      <div className={styles.sliderPreviewBox}><IconZoomSliderTall /></div>
     </div>
   </>
 )
@@ -204,7 +205,7 @@ const ExploreTutorial: React.FC = () => (
     <div className={`${styles.callout} ${styles.exploreGps}`}>
       <div className={styles.btnPreview}><IconCrosshair /></div>
       <div className={styles.calloutContent}>
-        <span className={styles.calloutLabel}>GPS location</span>
+        <span className={styles.calloutLabel}>Set location to GPS</span>
       </div>
     </div>
 
@@ -262,7 +263,7 @@ const ScanTutorial: React.FC = () => (
 
     <div className={`${styles.callout} ${styles.scanGps}`}>
       <div className={styles.calloutContent}>
-        <span className={styles.calloutLabel}>GPS viewpoint</span>
+        <span className={styles.calloutLabel}>Set viewpoint to GPS</span>
       </div>
       <div className={styles.btnPreview}><IconCrosshair /></div>
     </div>
