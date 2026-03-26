@@ -1,16 +1,21 @@
 /**
- * TutorialOverlay — translucent overlay with positioned tip callouts
+ * TutorialOverlay — Semi-transparent overlay with control-aligned callouts.
+ *
+ * Key design: low opacity background so real controls are visible underneath.
+ * Callouts positioned to match actual control locations using the same
+ * CSS variables (--ec-nav-height, --space-3, etc.).
  */
+
+/* ── Base Overlay ─────────────────────────────────────────────────────────── */
 
 .overlay {
   position: absolute;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  background: rgba(0, 0, 0, 0.45);
   cursor: pointer;
   animation: fadeIn 0.3s ease-out;
+  overflow: hidden;
 }
 
 @keyframes fadeIn {
@@ -18,75 +23,286 @@
   to { opacity: 1; }
 }
 
-.title {
-  position: absolute;
-  top: 60px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.25em;
-  color: var(--ec-foam);
-  text-shadow: 0 0 20px rgba(132, 209, 219, 0.6);
-}
-
-/* ── Tip positioning ──────────────────────────────────────────────────── */
-
-.tip {
-  position: absolute;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  max-width: 220px;
-  pointer-events: none;
-}
-
-.tipDot {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ec-glow);
-  margin-top: 3px;
-  box-shadow: 0 0 8px var(--ec-glow);
-}
-
-.tipText {
-  font-family: var(--font-body);
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--ec-text-primary);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
-}
-
-/* Position classes */
-.top-left      { top: 100px; left: 20px; }
-.top-center    { top: 100px; left: 50%; transform: translateX(-50%); }
-.top-right     { top: 100px; right: 20px; }
-.mid-left      { top: 45%; left: 20px; }
-.mid-right     { top: 45%; right: 20px; text-align: right; flex-direction: row-reverse; }
-.center        { top: 35%; left: 50%; transform: translateX(-50%); }
-.bottom-left   { bottom: 120px; left: 20px; }
-.bottom-center { bottom: 100px; left: 50%; transform: translateX(-50%); }
-.bottom-right  { bottom: 120px; right: 20px; text-align: right; flex-direction: row-reverse; }
-
-/* ── Dismiss hint ─────────────────────────────────────────────────────── */
+/* ── Dismiss Hint (top, prominent) ────────────────────────────────────────── */
 
 .dismissHint {
   position: absolute;
-  bottom: 30px;
+  top: 6px;
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--font-display);
   font-size: 11px;
-  letter-spacing: 0.12em;
-  color: var(--ec-text-muted);
-  opacity: 0.7;
-  animation: pulse 2s ease-in-out infinite;
+  letter-spacing: 0.1em;
+  color: #fff;
+  background: rgba(132, 209, 219, 0.3);
+  border: 1px solid rgba(132, 209, 219, 0.4);
+  padding: 4px 16px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  z-index: 1;
+  animation: pulse 2.5s ease-in-out infinite;
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 0.5; }
+  0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
+}
+
+/* ── Title Block ──────────────────────────────────────────────────────────── */
+
+.titleBlock {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: 320px;
+  width: 90%;
+  pointer-events: none;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.25em;
+  color: #fff;
+  text-shadow: 0 0 20px rgba(132, 209, 219, 0.5);
+  margin-bottom: 6px;
+}
+
+.description {
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+/* ── Center Hint ──────────────────────────────────────────────────────────── */
+
+.centerHint {
+  position: absolute;
+  top: 42%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  max-width: 300px;
+  width: 85%;
+}
+
+.centerIcon {
+  font-size: 32px;
+  color: rgba(132, 209, 219, 0.6);
+  margin-bottom: 8px;
+  text-shadow: 0 0 12px rgba(132, 209, 219, 0.4);
+}
+
+.centerText {
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+.centerText strong {
+  color: #84D1DB;
+  font-weight: 600;
+}
+
+/* ── Callout (positioned label near a control) ────────────────────────────── */
+
+.callout {
+  position: absolute;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  pointer-events: none;
+  max-width: 200px;
+}
+
+.calloutArrow {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: #84D1DB;
+  line-height: 1.2;
+  text-shadow: 0 0 6px rgba(132, 209, 219, 0.5);
+  font-weight: 700;
+}
+
+.calloutText {
+  font-family: var(--font-body);
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.subtext {
+  display: block;
+  font-size: 10px;
+  color: rgba(167, 221, 229, 0.75);
+  margin-top: 2px;
+}
+
+/* ── Nav Hint (above bottom nav) ──────────────────────────────────────────── */
+
+.navHint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: rgba(167, 221, 229, 0.8);
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+/* ── Settings Hint (centered, below midpoint) ─────────────────────────────── */
+
+.settingsHint {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + 28px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: rgba(167, 221, 229, 0.65);
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAP-specific callout positions
+   Controls stack on the right: zoom+/slider/zoom−, location btn, area btn
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Zoom controls — right side, upper portion of control stack */
+.mapZoom {
+  right: 60px;
+  bottom: calc(var(--ec-nav-height, 64px) + 200px);
+}
+
+/* Location/GPS button — right side, below zoom */
+.mapLocation {
+  right: 60px;
+  bottom: calc(var(--ec-nav-height, 64px) + 130px);
+}
+
+/* Area selection button — right side, bottom of control stack */
+.mapAreaSelect {
+  right: 60px;
+  bottom: calc(var(--ec-nav-height, 64px) + 80px);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPLORE-specific callout positions
+   Exaggeration picker: bottom-right above recenter
+   Recenter: bottom-right
+   GPS: bottom-left
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Vertical exaggeration — near the actual picker, right side */
+.exploreExaggeration {
+  right: 60px;
+  bottom: calc(var(--ec-nav-height, 64px) + 100px);
+}
+
+/* Re-center button — bottom right */
+.exploreRecenter {
+  right: 90px;
+  bottom: calc(var(--ec-nav-height, 64px) + 14px);
+}
+
+/* GPS button — bottom left */
+.exploreGps {
+  left: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + 14px);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCAN-specific callout positions
+   Zoom slider: left edge
+   Height slider: right edge
+   Gyro/GPS: bottom-right buttons
+   Compass: top
+   HUD: above nav bar
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Zoom slider label — to the right of the left-edge slider */
+.scanZoom {
+  left: 44px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Height/AGL slider label — to the left of the right-edge slider */
+.scanHeight {
+  right: 50px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Gyro button — above/left of bottom-right action area */
+.scanGyro {
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 100px);
+}
+
+/* GPS button — above/left of bottom-right, below gyro */
+.scanGps {
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 68px);
+}
+
+/* Compass strip — below the actual compass at top */
+.scanCompass {
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+/* HUD bar — above the actual HUD */
+.scanHud {
+  bottom: calc(var(--ec-nav-height, 64px) + 54px);
+  left: 50%;
+  transform: translateX(-50%);
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile adjustments
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 480px) {
+  .callout {
+    max-width: 160px;
+  }
+
+  .calloutText {
+    font-size: 10px;
+  }
+
+  .centerText {
+    font-size: 12px;
+  }
+
+  .description {
+    font-size: 11px;
+  }
+
+  .dismissHint {
+    font-size: 10px;
+  }
 }
