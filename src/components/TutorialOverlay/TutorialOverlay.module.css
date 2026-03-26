@@ -1,9 +1,9 @@
 /**
  * TutorialOverlay — semi-transparent with icon-anchored callouts.
  *
- * Slightly dark + blurred so real controls peek through.
- * Callouts use mini SVG icon previews so users know what button to find.
- * Positioned near actual controls using matching CSS variable math.
+ * Callout positions match actual control positions using the same
+ * CSS variables (--ec-nav-height, --space-2, etc.) so they align
+ * on both mobile and desktop.
  */
 
 /* ── Base Overlay ─────────────────────────────────────────────────────────── */
@@ -25,11 +25,23 @@
   to { opacity: 1; }
 }
 
-/* ── Title Block (top center) ─────────────────────────────────────────────── */
+/* ── Title Block ──────────────────────────────────────────────────────────── */
 
 .titleBlock {
   position: absolute;
   top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: 300px;
+  width: 85%;
+  pointer-events: none;
+}
+
+/* SCAN title is lower to avoid overlapping compass */
+.scanTitleBlock {
+  position: absolute;
+  top: 90px;
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
@@ -111,7 +123,7 @@
   white-space: nowrap;
 }
 
-/* ── Button Preview (mini icon circle) ────────────────────────────────────── */
+/* ── Button Preview (mini icon box) ───────────────────────────────────────── */
 
 .btnPreview {
   flex-shrink: 0;
@@ -127,15 +139,74 @@
   box-shadow: 0 0 8px rgba(132, 209, 219, 0.25);
 }
 
-.icon {
+.icon, .iconLarge {
   display: block;
 }
 
-.iconLarge {
+/* ── Slider Preview (tall vertical for scan sliders) ──────────────────────── */
+
+.sliderPreview {
   display: block;
 }
 
-/* ── Controls Box (Explore — matches existing EXPLORE CONTROLS format) ──── */
+.sliderPreviewBox {
+  flex-shrink: 0;
+  width: 28px;
+  height: 86px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(132, 209, 219, 0.4);
+  background: rgba(13, 30, 46, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #84D1DB;
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.2);
+}
+
+/* ── Exaggeration Picker Preview ──────────────────────────────────────────── */
+
+.exagPreview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  border: 1.5px solid rgba(132, 209, 219, 0.4);
+  background: rgba(13, 30, 46, 0.7);
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: #84D1DB;
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.2);
+}
+
+.exagLabel {
+  font-family: var(--font-display);
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  color: rgba(132, 209, 219, 0.6);
+}
+
+.exagOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: var(--font-display);
+  font-size: 8px;
+  color: rgba(132, 209, 219, 0.5);
+}
+
+.exagOptions span {
+  padding: 1px 4px;
+  border-radius: 2px;
+  text-align: center;
+}
+
+.exagActive {
+  background: rgba(132, 209, 219, 0.18);
+  color: #84D1DB !important;
+  font-weight: 600;
+}
+
+/* ── Controls Box (Explore) ───────────────────────────────────────────────── */
 
 .controlsBox {
   position: absolute;
@@ -195,7 +266,7 @@
   pointer-events: none;
 }
 
-/* ── Dismiss Hint (bottom center, prominent) ──────────────────────────────── */
+/* ── Dismiss Hint (bottom center) ─────────────────────────────────────────── */
 
 .dismissHint {
   position: absolute;
@@ -222,41 +293,46 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    MAP — callout positions
-   Right-side button stack: zoom+/slider/zoom−, location, area select
+   Actual buttons: right: var(--space-2) (8px), stacked in .controls
+   container at bottom: calc(nav + space-10). Order top→bottom:
+   GPS (44px) → gap (8px) → Area (44px) → gap → +(44px) → slider(120px) → −(44px)
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* GPS button — topmost in stack */
 .mapGps {
-  right: 60px;
-  bottom: calc(var(--ec-nav-height, 64px) + 170px);
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 268px);
 }
 
+/* Area select — second button */
 .mapArea {
-  right: 60px;
-  bottom: calc(var(--ec-nav-height, 64px) + 120px);
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 216px);
 }
 
+/* Zoom — near the + button / slider area */
 .mapZoom {
-  right: 60px;
-  bottom: calc(var(--ec-nav-height, 64px) + 240px);
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 130px);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    EXPLORE — callout positions
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Exaggeration picker — above recenter on right side */
+/* Exaggeration picker — right side, above recenter */
 .exploreExag {
   right: 16px;
-  bottom: calc(var(--ec-nav-height, 64px) + 90px);
+  bottom: calc(var(--ec-nav-height, 64px) + 80px);
 }
 
-/* Recenter — bottom right */
+/* Recenter — bottom right, matches actual .recenterBtn position */
 .exploreRecenter {
   right: 16px;
   bottom: calc(var(--ec-nav-height, 64px) + 14px);
 }
 
-/* GPS — bottom left */
+/* GPS — bottom left, matches actual .locationBtn position */
 .exploreGps {
   left: 16px;
   bottom: calc(var(--ec-nav-height, 64px) + 14px);
@@ -264,40 +340,46 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    SCAN — callout positions
+   Actual layout:
+   - Compass: top: 0, height: 52px
+   - Zoom slider: left: space-3 (12px), top: 72px, width: 28px, extends to HUD
+   - Height slider: right: space-3 (12px), top: 72px, width: 36px
+   - Gyro+GPS: bottom-right, ~62px above nav, 48px circles
+   - HUD: bottom: nav-height, height: 52px
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Compass — below compass strip */
+/* Compass — just below compass strip (52px high) */
 .scanCompass {
   top: 56px;
   left: 50%;
   transform: translateX(-50%);
 }
 
-/* Zoom slider — right of left-edge slider */
+/* Zoom slider — to the right of the actual left-edge slider */
 .scanZoom {
-  left: 8px;
-  top: 42%;
+  left: 42px;
+  top: 30%;
 }
 
-/* Height slider — left of right-edge slider */
+/* Height slider — to the left of the actual right-edge slider */
 .scanHeight {
-  right: 8px;
-  top: 42%;
+  right: 48px;
+  top: 30%;
 }
 
-/* Gyro button — left of bottom-right area */
+/* Gyro — next to actual bottom-right gyro button */
 .scanGyro {
-  right: 16px;
-  bottom: calc(var(--ec-nav-height, 64px) + 118px);
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 85px);
 }
 
-/* GPS button — left of bottom-right, below gyro */
+/* GPS — next to actual bottom-right GPS button */
 .scanGps {
-  right: 16px;
-  bottom: calc(var(--ec-nav-height, 64px) + 68px);
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 62px);
 }
 
-/* HUD — above nav bar */
+/* HUD — just above actual HUD bar */
 .scanHud {
   bottom: calc(var(--ec-nav-height, 64px) + 54px);
   left: 50%;
@@ -333,5 +415,15 @@
   .btnPreview {
     width: 28px;
     height: 28px;
+  }
+
+  .sliderPreviewBox {
+    width: 24px;
+    height: 70px;
+  }
+
+  /* Tighter right-side positioning on mobile */
+  .mapGps, .mapArea, .mapZoom {
+    right: 50px;
   }
 }

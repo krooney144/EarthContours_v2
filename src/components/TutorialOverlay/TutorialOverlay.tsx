@@ -59,22 +59,38 @@ const IconViewpoint: React.FC = () => (
   </svg>
 )
 
-const IconZoomSlider: React.FC = () => (
-  <svg className={styles.icon} width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="currentColor" strokeWidth="1.5">
-    <line x1="7" y1="2" x2="7" y2="26" opacity="0.4" />
-    <circle cx="7" cy="10" r="4" fill="currentColor" opacity="0.6" />
-    <text x="7" y="3" textAnchor="middle" fill="currentColor" fontSize="6" stroke="none">+</text>
-    <text x="7" y="28" textAnchor="middle" fill="currentColor" fontSize="7" stroke="none">−</text>
+/** Tall vertical zoom slider preview matching actual scan slider */
+const IconZoomSliderTall: React.FC = () => (
+  <svg className={styles.sliderPreview} width="20" height="80" viewBox="0 0 20 80" fill="none" stroke="currentColor" strokeWidth="1">
+    <text x="10" y="8" textAnchor="middle" fill="currentColor" fontSize="10" stroke="none" fontWeight="500">+</text>
+    <line x1="10" y1="14" x2="10" y2="66" opacity="0.4" strokeWidth="2" />
+    <circle cx="10" cy="28" r="5" fill="currentColor" opacity="0.5" />
+    <text x="10" y="78" textAnchor="middle" fill="currentColor" fontSize="10" stroke="none" fontWeight="500">−</text>
   </svg>
 )
 
-const IconHeightSlider: React.FC = () => (
-  <svg className={styles.icon} width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="currentColor" strokeWidth="1">
-    <line x1="7" y1="2" x2="7" y2="26" opacity="0.4" />
-    <circle cx="7" cy="18" r="4" fill="currentColor" opacity="0.6" />
-    <text x="7" y="4" textAnchor="middle" fill="currentColor" fontSize="4" stroke="none">HIGH</text>
-    <text x="7" y="28" textAnchor="middle" fill="currentColor" fontSize="4" stroke="none">LOW</text>
+/** Tall vertical height slider preview matching actual scan AGL slider */
+const IconHeightSliderTall: React.FC = () => (
+  <svg className={styles.sliderPreview} width="20" height="80" viewBox="0 0 20 80" fill="none" stroke="currentColor" strokeWidth="1">
+    <text x="10" y="8" textAnchor="middle" fill="currentColor" fontSize="5" stroke="none">HIGH</text>
+    <line x1="10" y1="14" x2="10" y2="66" opacity="0.4" strokeWidth="2" />
+    <circle cx="10" cy="50" r="5" fill="currentColor" opacity="0.5" />
+    <text x="10" y="78" textAnchor="middle" fill="currentColor" fontSize="5" stroke="none">LOW</text>
   </svg>
+)
+
+/** Vertical exaggeration picker preview */
+const IconExagPicker: React.FC = () => (
+  <div className={styles.exagPreview}>
+    <span className={styles.exagLabel}>VERT</span>
+    <div className={styles.exagOptions}>
+      <span>1×</span>
+      <span>1.5×</span>
+      <span>2×</span>
+      <span className={styles.exagActive}>4×</span>
+      <span>10×</span>
+    </div>
+  </div>
 )
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -110,7 +126,6 @@ export const TutorialOverlay: React.FC<TutorialOverlayProps> = ({ screen }) => {
 
 const MapTutorial: React.FC = () => (
   <>
-    {/* 1. Title + description */}
     <div className={styles.titleBlock}>
       <div className={styles.title}>MAP</div>
       <div className={styles.desc}>
@@ -118,13 +133,13 @@ const MapTutorial: React.FC = () => (
       </div>
     </div>
 
-    {/* 2. Center — viewpoint tap */}
+    {/* Center — viewpoint tap */}
     <div className={styles.centerBlock}>
       <IconViewpoint />
       <div className={styles.centerLabel}>Tap anywhere to set viewpoint</div>
     </div>
 
-    {/* 3. Right-side button callouts — positioned near actual buttons */}
+    {/* Right-side callouts — aligned to actual button stack: GPS → Area → Zoom */}
     <div className={`${styles.callout} ${styles.mapGps}`}>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Set viewpoint to GPS</span>
@@ -152,7 +167,6 @@ const MapTutorial: React.FC = () => (
 
 const ExploreTutorial: React.FC = () => (
   <>
-    {/* 1. Title + description */}
     <div className={styles.titleBlock}>
       <div className={styles.title}>EXPLORE</div>
       <div className={styles.desc}>
@@ -160,7 +174,7 @@ const ExploreTutorial: React.FC = () => (
       </div>
     </div>
 
-    {/* 2. Controls — same format as existing EXPLORE CONTROLS popup */}
+    {/* Controls table */}
     <div className={styles.controlsBox}>
       <div className={styles.controlsTitle}>CONTROLS</div>
       <div className={styles.controlRow}><span className={styles.controlKey}>Drag / 1 finger</span><span className={styles.controlVal}>Orbit &amp; tilt</span></div>
@@ -169,14 +183,16 @@ const ExploreTutorial: React.FC = () => (
       <div className={styles.controlRow}><span className={styles.controlKey}>Double-tap / click</span><span className={styles.controlVal}>Fly to point</span></div>
     </div>
 
-    {/* 3. Button callouts */}
+    {/* Vertical exaggeration — with picker preview */}
     <div className={`${styles.callout} ${styles.exploreExag}`}>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Vertical exaggeration</span>
-        <span className={styles.calloutSub}>1× = true elevation</span>
+        <span className={styles.calloutSub}>1× = true elevation · Higher = stretched</span>
       </div>
+      <IconExagPicker />
     </div>
 
+    {/* Recenter — bottom right */}
     <div className={`${styles.callout} ${styles.exploreRecenter}`}>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Re-center view</span>
@@ -184,6 +200,7 @@ const ExploreTutorial: React.FC = () => (
       <div className={styles.btnPreview}><IconRecenter /></div>
     </div>
 
+    {/* GPS — bottom left */}
     <div className={`${styles.callout} ${styles.exploreGps}`}>
       <div className={styles.btnPreview}><IconCrosshair /></div>
       <div className={styles.calloutContent}>
@@ -192,7 +209,7 @@ const ExploreTutorial: React.FC = () => (
     </div>
 
     <div className={styles.settingsNote}>
-      Customize labels, contours, and fill in Settings
+      Toggle on and off labels, rivers, and lakes in Settings
     </div>
   </>
 )
@@ -201,40 +218,40 @@ const ExploreTutorial: React.FC = () => (
 
 const ScanTutorial: React.FC = () => (
   <>
-    {/* 1. Title + description */}
-    <div className={styles.titleBlock}>
-      <div className={styles.title}>SCAN</div>
-      <div className={styles.desc}>
-        360° panorama — drag to look around, see peaks and ridgelines
-      </div>
-    </div>
-
-    {/* 2. Compass callout — just below top */}
+    {/* Compass callout — right below compass strip */}
     <div className={`${styles.callout} ${styles.scanCompass}`}>
       <div className={styles.calloutContent}>
-        <span className={styles.calloutLabel}>Compass — your heading direction</span>
+        <span className={styles.calloutLabel}>Compass — your heading</span>
       </div>
     </div>
 
-    {/* 3. Left slider */}
+    {/* Title + description — below compass callout */}
+    <div className={styles.scanTitleBlock}>
+      <div className={styles.title}>SCAN</div>
+      <div className={styles.desc}>
+        360° panorama — drag to look around
+      </div>
+    </div>
+
+    {/* Left slider — tall preview matching actual slider */}
     <div className={`${styles.callout} ${styles.scanZoom}`}>
-      <div className={styles.btnPreview}><IconZoomSlider /></div>
+      <div className={styles.sliderPreviewBox}><IconZoomSliderTall /></div>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Zoom</span>
         <span className={styles.calloutSub}>Drag or pinch</span>
       </div>
     </div>
 
-    {/* 4. Right slider */}
+    {/* Right slider — tall preview */}
     <div className={`${styles.callout} ${styles.scanHeight}`}>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Height (AGL)</span>
-        <span className={styles.calloutSub}>Adjust viewing altitude</span>
+        <span className={styles.calloutSub}>Viewing altitude</span>
       </div>
-      <div className={styles.btnPreview}><IconHeightSlider /></div>
+      <div className={styles.sliderPreviewBox}><IconHeightSliderTall /></div>
     </div>
 
-    {/* 5. Bottom-right buttons */}
+    {/* Gyro + GPS — bottom right */}
     <div className={`${styles.callout} ${styles.scanGyro}`}>
       <div className={styles.calloutContent}>
         <span className={styles.calloutLabel}>Gyroscope</span>
@@ -250,10 +267,10 @@ const ScanTutorial: React.FC = () => (
       <div className={styles.btnPreview}><IconCrosshair /></div>
     </div>
 
-    {/* 6. HUD callout */}
+    {/* HUD callout */}
     <div className={`${styles.callout} ${styles.scanHud}`}>
       <div className={styles.calloutContent}>
-        <span className={styles.calloutLabel}>Info panel — coordinates, elevation, heading</span>
+        <span className={styles.calloutLabel}>Info — coordinates, elevation, heading</span>
       </div>
     </div>
   </>
