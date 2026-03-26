@@ -86,6 +86,37 @@
   letter-spacing: 0.02em;
 }
 
+/* ── Take a Tour ── */
+
+.tourButtons {
+  display: flex;
+  gap: var(--space-3);
+  padding: 0 var(--space-5) var(--space-4);
+  flex-wrap: wrap;
+}
+
+.tourBtn {
+  flex: 1;
+  min-width: 80px;
+  padding: 8px 12px;
+  background: var(--ec-glow-soft);
+  border: 1px solid var(--ec-border-active);
+  border-radius: var(--radius-sm);
+  color: var(--ec-text-accent);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.tourBtn:hover {
+  background: var(--ec-glow-medium);
+  color: var(--ec-foam);
+}
+
 /* ── Row (individual setting) ─────────────────────────────────────────────── */
 
 .row {

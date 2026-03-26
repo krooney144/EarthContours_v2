@@ -25,8 +25,10 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { NavigateHint } from '../../components/NavigateHint/NavigateHint'
+import { TutorialOverlay } from '../../components/TutorialOverlay/TutorialOverlay'
 import {
-  useCameraStore, useTerrainStore, useSettingsStore, useLocationStore,
+  useCameraStore, useTerrainStore, useSettingsStore, useLocationStore, useUIStore,
 } from '../../store'
 import { createLogger } from '../../core/logger'
 import { formatElevation } from '../../core/utils'
@@ -82,6 +84,7 @@ const ExploreScreen: React.FC = () => {
     }, 120)
   }, [orbitTheta, orbitPhi, orbitRadius, orbitPanX, orbitPanZ])
 
+  const tutorialScreen = useUIStore((s) => s.tutorialScreen)
   const [gpsPrompt, setGpsPrompt] = useState<string | null>(null)
 
   const [showHint, setShowHint] = useState<boolean>(() => {
@@ -476,7 +479,7 @@ const ExploreScreen: React.FC = () => {
           </div>
         )}
 
-        {showHint && !isLoading && (
+        {showHint && !isLoading && tutorialScreen !== 'explore' && (
           <div
             className={styles.controlsHint}
             onClick={dismissHint}
@@ -590,6 +593,9 @@ const ExploreScreen: React.FC = () => {
         </div>
       )}
 
+      {/* Navigate hint */}
+      {!isLoading && <NavigateHint />}
+
       {/* Debug toggle */}
       <button
         className={styles.debugToggle}
@@ -621,6 +627,9 @@ const ExploreScreen: React.FC = () => {
           Theta: {(orbitTheta * 180 / Math.PI).toFixed(1)}&deg; · Phi: {(orbitPhi * 180 / Math.PI).toFixed(1)}&deg;
         </div>
       )}
+
+      {/* Tutorial overlay */}
+      <TutorialOverlay screen="explore" />
     </div>
   )
 }

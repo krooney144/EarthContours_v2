@@ -131,9 +131,14 @@ out body;`
         let elev = parseFloat(raw)
         // If the tag explicitly says 'ft', convert to metres
         if (e.tags.ele.toLowerCase().includes('ft')) elev *= 0.3048
+        // Prefer English name; omit nameEn if it matches the primary name
+        const nameEn = e.tags['name:en']
+        const hasDistinctEn = nameEn && nameEn !== e.tags.name
+
         return {
           id:          `osm-${e.id}`,
           name:        e.tags.name,
+          ...(hasDistinctEn ? { nameEn } : {}),
           lat:         e.lat,
           lng:         e.lon,
           elevation_m: elev,

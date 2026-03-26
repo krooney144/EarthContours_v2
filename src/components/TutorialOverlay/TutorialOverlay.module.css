@@ -1,0 +1,429 @@
+/**
+ * TutorialOverlay — semi-transparent with icon-anchored callouts.
+ *
+ * Callout positions match actual control positions using the same
+ * CSS variables (--ec-nav-height, --space-2, etc.) so they align
+ * on both mobile and desktop.
+ */
+
+/* ── Base Overlay ─────────────────────────────────────────────────────────── */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+  cursor: pointer;
+  animation: fadeIn 0.3s ease-out;
+  overflow: hidden;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── Title Block ──────────────────────────────────────────────────────────── */
+
+.titleBlock {
+  position: absolute;
+  top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: 300px;
+  width: 85%;
+  pointer-events: none;
+}
+
+/* SCAN title is lower to avoid overlapping compass */
+.scanTitleBlock {
+  position: absolute;
+  top: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: 300px;
+  width: 85%;
+  pointer-events: none;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: #fff;
+  text-shadow: 0 0 16px rgba(132, 209, 219, 0.4);
+  margin-bottom: 4px;
+}
+
+.desc {
+  font-family: var(--font-body);
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.75);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Center Block (viewpoint tap) ─────────────────────────────────────────── */
+
+.centerBlock {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.centerLabel {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+/* ── Callout Block ────────────────────────────────────────────────────────── */
+
+.callout {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.calloutContent {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.calloutLabel {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+}
+
+.calloutSub {
+  font-family: var(--font-body);
+  font-size: 9px;
+  color: rgba(132, 209, 219, 0.75);
+  white-space: nowrap;
+}
+
+/* ── Button Preview (mini icon box) ───────────────────────────────────────── */
+
+.btnPreview {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(132, 209, 219, 0.5);
+  background: rgba(13, 30, 46, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #84D1DB;
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.25);
+}
+
+.icon, .iconLarge {
+  display: block;
+}
+
+/* ── Slider Preview (tall vertical for scan sliders) ──────────────────────── */
+
+.sliderPreview {
+  display: block;
+}
+
+.sliderPreviewBox {
+  flex-shrink: 0;
+  width: 28px;
+  height: 86px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(132, 209, 219, 0.4);
+  background: rgba(13, 30, 46, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #84D1DB;
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.2);
+}
+
+/* ── Exaggeration Picker Preview ──────────────────────────────────────────── */
+
+.exagPreview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  border: 1.5px solid rgba(132, 209, 219, 0.4);
+  background: rgba(13, 30, 46, 0.7);
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: #84D1DB;
+  box-shadow: 0 0 8px rgba(132, 209, 219, 0.2);
+}
+
+.exagLabel {
+  font-family: var(--font-display);
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  color: rgba(132, 209, 219, 0.6);
+}
+
+.exagOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: var(--font-display);
+  font-size: 8px;
+  color: rgba(132, 209, 219, 0.5);
+}
+
+.exagOptions span {
+  padding: 1px 4px;
+  border-radius: 2px;
+  text-align: center;
+}
+
+.exagActive {
+  background: rgba(132, 209, 219, 0.18);
+  color: #84D1DB !important;
+  font-weight: 600;
+}
+
+/* ── Controls Box (Explore) ───────────────────────────────────────────────── */
+
+.controlsBox {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(8, 20, 35, 0.8);
+  border: 1px solid rgba(132, 209, 219, 0.2);
+  border-radius: 6px;
+  padding: 10px 14px;
+  pointer-events: none;
+  min-width: 200px;
+}
+
+.controlsTitle {
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: rgba(132, 209, 219, 0.7);
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.controlRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 0;
+}
+
+.controlKey {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 500;
+}
+
+.controlVal {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: rgba(132, 209, 219, 0.8);
+}
+
+/* ── Settings Note ────────────────────────────────────────────────────────── */
+
+.settingsNote {
+  position: absolute;
+  bottom: calc(var(--ec-nav-height, 64px) + 28px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: rgba(167, 221, 229, 0.6);
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ── Dismiss Hint (bottom center) ─────────────────────────────────────────── */
+
+.dismissHint {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: rgba(132, 209, 219, 0.2);
+  border: 1px solid rgba(132, 209, 219, 0.35);
+  padding: 6px 20px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  animation: pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAP — callout positions
+   Actual buttons: right: var(--space-2) (8px), stacked in .controls
+   container at bottom: calc(nav + space-10). Order top→bottom:
+   GPS (44px) → gap (8px) → Area (44px) → gap → +(44px) → slider(120px) → −(44px)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* GPS button — topmost in stack */
+.mapGps {
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 268px);
+}
+
+/* Area select — second button */
+.mapArea {
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 216px);
+}
+
+/* Zoom — near the + button / slider area */
+.mapZoom {
+  right: 56px;
+  bottom: calc(var(--ec-nav-height, 64px) + var(--space-10, 40px) + 130px);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPLORE — callout positions
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Exaggeration picker — right side, above recenter */
+.exploreExag {
+  right: 16px;
+  bottom: calc(var(--ec-nav-height, 64px) + 80px);
+}
+
+/* Recenter — bottom right, matches actual .recenterBtn position */
+.exploreRecenter {
+  right: 16px;
+  bottom: calc(var(--ec-nav-height, 64px) + 14px);
+}
+
+/* GPS — bottom left, matches actual .locationBtn position */
+.exploreGps {
+  left: 16px;
+  bottom: calc(var(--ec-nav-height, 64px) + 14px);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCAN — callout positions
+   Actual layout:
+   - Compass: top: 0, height: 52px
+   - Zoom slider: left: space-3 (12px), top: 72px, width: 28px, extends to HUD
+   - Height slider: right: space-3 (12px), top: 72px, width: 36px
+   - Gyro+GPS: bottom-right, ~62px above nav, 48px circles
+   - HUD: bottom: nav-height, height: 52px
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Compass — just below compass strip (52px high) */
+.scanCompass {
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Zoom slider — to the right of the actual left-edge slider */
+.scanZoom {
+  left: 42px;
+  top: 30%;
+}
+
+/* Height slider — to the left of the actual right-edge slider */
+.scanHeight {
+  right: 48px;
+  top: 30%;
+}
+
+/* Gyro — next to actual bottom-right gyro button */
+.scanGyro {
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 110px);
+}
+
+/* GPS — next to actual bottom-right GPS button, well below gyro */
+.scanGps {
+  right: 110px;
+  bottom: calc(var(--ec-nav-height, 64px) + 68px);
+}
+
+/* HUD — just above actual HUD bar */
+.scanHud {
+  bottom: calc(var(--ec-nav-height, 64px) + 54px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile adjustments
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 480px) {
+  .calloutLabel {
+    font-size: 10px;
+  }
+
+  .calloutSub {
+    font-size: 8px;
+  }
+
+  .desc {
+    font-size: 10px;
+  }
+
+  .controlKey, .controlVal {
+    font-size: 10px;
+  }
+
+  .controlsBox {
+    min-width: 170px;
+    padding: 8px 10px;
+  }
+
+  .btnPreview {
+    width: 28px;
+    height: 28px;
+  }
+
+  .sliderPreviewBox {
+    width: 24px;
+    height: 70px;
+  }
+
+  /* Tighter right-side positioning on mobile */
+  .mapGps, .mapArea, .mapZoom {
+    right: 50px;
+  }
+}

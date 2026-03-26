@@ -45,11 +45,18 @@ interface UIStore {
   /** Whether the splash screen has finished */
   splashComplete: boolean
 
+  /** Active tutorial overlay — set when user starts a screen tutorial */
+  tutorialScreen: ScreenId | null
+
   // Actions
   navigateTo: (screen: ScreenId) => void
   enterFromPreview: (screen: ScreenId) => void
   setSplashComplete: () => void
   initializeLayout: () => void
+  /** Start a tutorial for a specific screen (navigates there + shows overlay) */
+  startTutorial: (screen: ScreenId) => void
+  /** Dismiss the active tutorial overlay */
+  dismissTutorial: () => void
 }
 
 // ─── Store Implementation ─────────────────────────────────────────────────────
@@ -61,6 +68,7 @@ export const useUIStore = create<UIStore>()((set, get) => ({
   transitionState: 'idle',
   transitionTarget: null,
   splashComplete: false,
+  tutorialScreen: null,
 
   /**
    * Initialize the layout mode based on window width.
@@ -166,5 +174,16 @@ export const useUIStore = create<UIStore>()((set, get) => ({
   setSplashComplete: () => {
     log.info('Splash screen complete — app ready')
     set({ splashComplete: true })
+  },
+
+  startTutorial: (screen) => {
+    log.info('Starting tutorial', { screen })
+    set({ tutorialScreen: screen })
+    get().navigateTo(screen)
+  },
+
+  dismissTutorial: () => {
+    log.info('Tutorial dismissed')
+    set({ tutorialScreen: null })
   },
 }))
