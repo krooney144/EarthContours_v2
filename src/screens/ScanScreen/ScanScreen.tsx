@@ -347,7 +347,11 @@ interface SilhouetteStrand {
 
 /**
  * Match silhouette layers across adjacent azimuths into continuous strands.
- * Uses distance proximity (within 30% tolerance) to connect layers.
+ * Primary match key: distance proximity — a silhouette line represents terrain
+ * at a specific distance from the viewer. Two adjacent azimuth samples belong
+ * to the same strand only if they're at approximately the same distance.
+ * Minimum peakAngle filter: skip layers whose angle is too low — near-flat
+ * ridgelines aren't meaningful silhouettes and clutter the view.
  * Returns strands sorted far→near (for painter's order fill rendering).
  */
 function matchSilhouetteStrands(
@@ -357,6 +361,10 @@ function matchSilhouetteStrands(
   cam: CameraParams,
 ): SilhouetteStrand[] {
   const { heading_deg, hfov, W } = cam
+
+  // Minimum peakAngle — skip layers below this. Terrain barely above or below
+  // the horizon isn't a meaningful silhouette and creates clutter.
+  const MIN_PEAK_ANGLE = -0.08  // ~-4.6°
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -374,7 +382,7 @@ function matchSilhouetteStrands(
   }
   const active: ActiveStrand[] = []
   const completed: SilhouetteStrand[] = []
-  const MAX_AZ_GAP = Math.ceil(resolution * 8)  // Max 8° gap before expiring — ridgelines can dip behind nearer terrain
+  const MAX_AZ_GAP = Math.ceil(resolution * 4)  // Max 4° gap before expiring
 
   // Sweep through visible azimuths
   const totalVisible = aiEnd >= aiStart
@@ -389,15 +397,20 @@ function matchSilhouetteStrands(
     const matched = new Set<number>()  // indices into active that got matched
 
     for (const layer of azLayers) {
-      // Find closest active strand by distance
+      // Skip layers below minimum angle — not meaningful silhouettes
+      if (layer.peakAngle < MIN_PEAK_ANGLE) continue
+
+      // Find closest active strand by distance — primary match key.
+      // A real ridgeline varies ±10-15% in distance across its bearing span
+      // (cosine effect of a ridge curving away). Tighter tolerance prevents
+      // connecting candidates from different ridges at different depths.
       let bestIdx = -1
       let bestDiff = Infinity
-      // Looser tolerance keeps same-ridge segments connected despite undulation
-      const distTol = layer.dist < 5_000
-        ? Math.max(300, layer.dist * 0.30)   // near: 30%, floor 300m
-        : layer.dist < 40_000
-        ? Math.max(1000, layer.dist * 0.40)  // mid: 40%, floor 1km
-        : Math.max(3000, layer.dist * 0.50)  // far: 50%, floor 3km
+      const distTol = layer.dist < 10_000
+        ? Math.max(200, layer.dist * 0.12)   // near: 12%, floor 200m
+        : layer.dist < 50_000
+        ? Math.max(500, layer.dist * 0.15)   // mid: 15%, floor 500m
+        : Math.max(1000, layer.dist * 0.18)  // far: 18%, floor 1km
 
       for (let si = 0; si < active.length; si++) {
         if (matched.has(si)) continue
@@ -575,7 +588,8 @@ function renderSilhouetteStrokes(
   // Use curvature-based line tapering for natural appearance.
 
   const MIN_STRAND_SEGS = 4   // Show more terrain detail — fewer discarded strands
-  const MAX_AZ_GAP_FOR_STROKE = 6  // Tolerate bigger gaps within strands
+  const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
+  const MIN_PEAK_ANGLE = -0.08     // Skip segments below this angle (same as matching)
 
   for (const strand of strands) {
     const segs = strand.segments
@@ -609,11 +623,16 @@ function renderSilhouetteStrokes(
     if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
 
     for (const run of runs) {
-      // Pre-project all points in this run
+      // Pre-project all points in this run, filtering out low-angle segments
       interface SilPt { x: number; y: number; rawElev: number; curvature: number }
       const projected: SilPt[] = []
       for (let i = run.start; i < run.end; i++) {
         const { ai, layer } = segs[i]
+        // Skip segments below minimum angle — safety net for any that passed matching
+        if (layer.peakAngle < MIN_PEAK_ANGLE) {
+          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
+          continue
+        }
         const bearing = ai / silResolution
         const pos = project(bearing, layer.peakAngle, cam)
         const clampedY = Math.max(0, Math.min(H, pos.y))
