@@ -210,7 +210,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
     // orbitDefaultRadius is the "full terrain in view" reference distance.
     const PAN_SENSITIVITY = 0.0025 * (orbitRadius / orbitDefaultRadius)
     // Vertical drag pans in depth — adjust for viewing angle (more top-down = more depth per pixel)
-    const vertSens = PAN_SENSITIVITY / Math.max(0.25, Math.sin(orbitPhi))
+    const vertSens = PAN_SENSITIVITY / Math.max(0.5, Math.sin(orbitPhi))
 
     const cos_t = Math.cos(orbitTheta)
     const sin_t = Math.sin(orbitTheta)
