@@ -180,7 +180,7 @@ const SettingsScreen: React.FC = () => {
     }
   }, [requestGPS])
 
-  const EXAGGERATION_OPTIONS: VerticalExaggeration[] = [1, 1.5, 2, 4]
+  const EXAGGERATION_OPTIONS: VerticalExaggeration[] = [1, 1.5, 2, 4, 10]
 
   return (
     <div className={styles.screen}>

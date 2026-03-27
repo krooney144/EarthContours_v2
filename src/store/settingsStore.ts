@@ -288,7 +288,7 @@ export const useSettingsStore = create<SettingsStore>()(
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
         if (fromVersion < 2 && typeof state.verticalExaggeration === 'number') {
-          const VALID: VerticalExaggeration[] = [1, 1.5, 2, 4]
+          const VALID: VerticalExaggeration[] = [1, 1.5, 2, 4, 10]
           const old = state.verticalExaggeration as number
           const snapped = VALID.reduce((best, v) =>
             Math.abs(v - old) < Math.abs(best - old) ? v : best
@@ -297,10 +297,10 @@ export const useSettingsStore = create<SettingsStore>()(
           state.verticalExaggeration = snapped
         }
         if (fromVersion < 8 && typeof state.verticalExaggeration === 'number') {
-          // Clamp 10× and 20× down to 4× max
-          if (state.verticalExaggeration > 4) {
-            log.info('Migrating verticalExaggeration v7→v8: capping to 4×', { from: state.verticalExaggeration })
-            state.verticalExaggeration = 4
+          // Clamp 20× down to 10× max
+          if (state.verticalExaggeration > 10) {
+            log.info('Migrating verticalExaggeration v7→v8: capping to 10×', { from: state.verticalExaggeration })
+            state.verticalExaggeration = 10
           }
         }
         if (fromVersion < 7) {
