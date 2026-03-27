@@ -320,6 +320,7 @@ function buildSilhouetteLayers(
           lat,
           lng,
           effElev,
+          baseEffElev,
           isOcean,
         })
 
@@ -570,7 +571,11 @@ const GLOW_MAX_ALPHA    = 0.55  // max glow opacity at peak prominence + near + 
 const GLOW_DIST_FLOOR   = 0.06  // even the farthest ridge gets a small glow floor
 const GLOW_ANGLE_ZERO   = -0.25 // rad — glow tapers to zero at this angle (below = no glow)
 const GLOW_ANGLE_FULL   = 0.10  // rad — glow reaches full intensity above this angle
-const GLOW_PROMINENCE_SCALE = 0.04 // rad — prominence this large = full tProminence
+const GLOW_PROMINENCE_SCALE = 150 // metres — ridge this far above its valley = full tProminence
+
+// Diagnostic counter — limits [GLOW-DIAG] output to the first 5 strands across all renders.
+// To re-trigger logs in DevTools: window._glowDiag = 0
+let _glowDiagCount = 0
 
 /**
  * Render a glow/light-catching effect behind silhouette strands.
@@ -626,6 +631,17 @@ function renderSilhouetteGlow(
 
     const angles: number[] = segs.map(s => s.layer.peakAngle)
 
+    // [GLOW-DIAG] Log first 5 strands — strand-level metrics
+    const diagThisStrand = _glowDiagCount < 5
+    if (diagThisStrand) {
+      console.log(
+        `[GLOW-DIAG] Strand ${_glowDiagCount + 1}/${strands.length}:` +
+        ` segs=${segs.length}, avgDist=${(strand.avgDist / 1000).toFixed(1)}km,` +
+        ` distT=${distT.toFixed(3)}, tDistGlow=${tDistGlow.toFixed(3)}, blur=${baseShadowBlur.toFixed(1)}px`
+      )
+      _glowDiagCount++
+    }
+
     // Build runs (same azimuth-gap logic as strokes)
     const numAzimuths = silResolution * 360
     const MAX_AZ_GAP_FOR_STROKE = 4
@@ -670,11 +686,32 @@ function renderSilhouetteGlow(
         if (i > run.start && i < run.end - 1) {
           curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
         }
-        const prominence = layer.peakAngle - layer.baseAngle
+
+        // Prominence: elevation of ridge above its valley floor.
+        // Using effElev - baseEffElev avoids the angle-based formula going negative
+        // for sub-horizon terrain (where peakAngle < baseAngle was a false negative).
+        // When baseAngle = -PI/2 (no prior valley floor — first visible layer), treat as
+        // fully prominent so the nearest ridge always glows at full intensity.
+        const hasValidBase = Math.abs(layer.baseAngle - (-Math.PI / 2)) > 0.01
+        const prominence = hasValidBase
+          ? Math.max(0, layer.effElev - layer.baseEffElev)
+          : GLOW_PROMINENCE_SCALE  // no prior valley = first visible layer = full prominence
 
         if (pos.y >= H) {
           projected.push({ x: pos.x, y: -9999, rawElev: 0, curvature: 0, prominence: 0, peakAngle: 0 })
         } else {
+          // [GLOW-DIAG] Log first 3 valid points of each diagnosed strand
+          if (diagThisStrand && projected.length < 3) {
+            const tP = Math.min(1, prominence / GLOW_PROMINENCE_SCALE)
+            const tA = Math.max(0, Math.min(1, (layer.peakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
+            const tG = tA * tDistGlow * (0.5 + 0.5 * tP)
+            console.log(
+              `  [GLOW-DIAG] Pt${projected.length}: angle=${layer.peakAngle.toFixed(3)}rad,` +
+              ` eff=${layer.effElev.toFixed(0)}m, base=${layer.baseEffElev.toFixed(0)}m,` +
+              ` prom=${prominence.toFixed(1)}m, hasBase=${hasValidBase},` +
+              ` tProm=${tP.toFixed(3)}, tAngle=${tA.toFixed(3)}, tGlow=${tG.toFixed(3)}`
+            )
+          }
           projected.push({ x: pos.x, y: clampedY, rawElev: layer.rawElev, curvature, prominence, peakAngle: layer.peakAngle })
         }
         prevPeakAngle = layer.peakAngle
@@ -691,13 +728,15 @@ function renderSilhouetteGlow(
           continue
         }
 
-        // Compute per-point glow intensity
+        // Compute per-point glow intensity.
+        // Prominence is a boost multiplier (0.5–1.0) — low-prominence terrain still gets
+        // 50% glow. Angle and distance are the primary gates.
         const tProminence = Math.min(1, Math.max(0, pt.prominence / GLOW_PROMINENCE_SCALE))
         const tAngle = Math.max(0, Math.min(1,
           (pt.peakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
-        const tGlow = tProminence * tAngle * tDistGlow
+        const tGlow = tAngle * tDistGlow * (0.5 + 0.5 * tProminence)
 
-        // Skip shadow when glow negligible — performance optimization
+        // Skip shadow only when angle puts it fully below glow threshold (tAngle = 0)
         if (tGlow < 0.01) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue

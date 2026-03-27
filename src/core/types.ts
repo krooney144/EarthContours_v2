@@ -511,6 +511,9 @@ export interface SilhouetteLayer {
   lng: number
   /** Effective elevation (rawElev - curvDrop) — for re-use */
   effElev: number
+  /** Effective elevation of the valley floor below this layer (metres).
+   *  Used for elevation-based prominence: effElev - baseEffElev = how much ridge stands above valley. */
+  baseEffElev: number
   /** Is this candidate over ocean? */
   isOcean: boolean
 }
