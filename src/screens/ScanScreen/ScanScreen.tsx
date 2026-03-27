@@ -569,7 +569,7 @@ const GLOW_BLUR_NEAR    = 20    // px — tight intense glow on very close terra
 const GLOW_BLUR_FAR     = 3     // px — subtle whisper on distant ridgelines
 const GLOW_MAX_ALPHA    = 0.55  // max glow opacity at peak prominence + near + high angle
 const GLOW_DIST_FLOOR   = 0.06  // even the farthest ridge gets a small glow floor
-const GLOW_ANGLE_ZERO   = -0.25 // rad — glow tapers to zero at this angle (below = no glow)
+const GLOW_ANGLE_ZERO   = -0.35 // rad — matches MIN_PEAK_ANGLE; all visible silhouette terrain gets glow
 const GLOW_ANGLE_FULL   = 0.10  // rad — glow reaches full intensity above this angle
 const GLOW_PROMINENCE_SCALE = 150 // metres — ridge this far above its valley = full tProminence
 
