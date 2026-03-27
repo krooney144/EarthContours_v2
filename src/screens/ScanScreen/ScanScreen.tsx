@@ -320,6 +320,7 @@ function buildSilhouetteLayers(
           lat,
           lng,
           effElev,
+          baseEffElev,
           isOcean,
         })
 
@@ -366,7 +367,7 @@ function matchSilhouetteStrands(
   // peakAngle by buildSilhouetteLayers (atan2(effElev - viewerElev, dist)).
   // Camera pitch only affects where on screen things are drawn, not whether
   // silhouette lines exist. Same mountain at same AGL = same silhouettes.
-  const MIN_PEAK_ANGLE = -0.25  // ~-14.3° below horizon
+  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -562,6 +563,211 @@ function renderNearFieldOcclusion(
   }
 }
 
+// ─── Silhouette Glow Constants (easy to tune) ─────────────────────────────────
+// Blur values interpolate logarithmically from near to far.
+const GLOW_BLUR_NEAR    = 20    // px — tight intense glow on very close terrain (<2km)
+const GLOW_BLUR_FAR     = 3     // px — subtle whisper on distant ridgelines
+const GLOW_MAX_ALPHA    = 0.55  // max glow opacity at peak prominence + near + high angle
+const GLOW_DIST_FLOOR   = 0.06  // even the farthest ridge gets a small glow floor
+const GLOW_ANGLE_ZERO   = -0.35 // rad — matches MIN_PEAK_ANGLE; all visible silhouette terrain gets glow
+const GLOW_ANGLE_FULL   = 0.10  // rad — glow reaches full intensity above this angle
+const GLOW_PROMINENCE_SCALE = 150 // metres — ridge this far above its valley = full tProminence
+
+// Diagnostic counter — limits [GLOW-DIAG] output to the first 5 strands across all renders.
+// To re-trigger logs in DevTools: window._glowDiag = 0
+let _glowDiagCount = 0
+
+/**
+ * Render a glow/light-catching effect behind silhouette strands.
+ *
+ * Multi-pass thick-line approach: draws 3 progressively narrower/brighter
+ * strokes per strand, replacing Canvas shadowBlur (which spreads too thin
+ * on sub-2px lines to be visible).
+ *
+ * Asymmetric Y offset per pass:
+ *   - Sky side (upward): tighter, brighter passes → defined sky edge
+ *   - Terrain side (downward): wider, dimmer pass → diffused bleed
+ *
+ * Glow intensity driven by angle × distance × prominence(boost):
+ *   - Angle: high ridgelines glow strong, flat terrain near threshold = zero
+ *   - Distance: near = intense tight glow, far = subtle soft whisper
+ *   - Prominence (effElev - baseEffElev): 0.5–1.0 boost multiplier
+ *
+ * Called BEFORE renderSilhouetteStrokes so the crisp line draws on top.
+ */
+function renderSilhouetteGlow(
+  ctx: CanvasRenderingContext2D,
+  strands: SilhouetteStrand[],
+  cam: CameraParams,
+  globalElevMin: number,
+  globalElevMax: number,
+  silResolution: number,
+  darkMode: boolean = true,
+): void {
+  const { W, H } = cam
+  const elevRange = globalElevMax - globalElevMin
+  const hasElevRange = elevRange > 1
+  const maxDist = 400_000
+  const MIN_PEAK_ANGLE = -0.35
+  const MAX_ANGLE_JUMP = 0.005
+  const MIN_STRAND_SEGS = 8
+  const numAzimuths = silResolution * 360
+  const MAX_AZ_GAP = 4
+
+  ctx.save()
+  ctx.lineCap  = 'round'
+  ctx.lineJoin = 'round'
+
+  for (let si = 0; si < strands.length; si++) {
+    const strand = strands[si]
+    const segs = strand.segments
+    if (segs.length < MIN_STRAND_SEGS) continue
+
+    const distT = Math.sqrt(Math.min(1, strand.avgDist / maxDist))
+    const tDistGlow = GLOW_DIST_FLOOR + (1 - GLOW_DIST_FLOOR) * (1 - distT)
+
+    // Strand-level base width (midpoint of near/far range — glow is atmospheric,
+    // doesn't need curvature tapering)
+    const maxWidth = 1.5 + (1 - distT) * 3.5
+    const minWidth = 0.4 + (1 - distT) * 1.6
+    const baseGlowWidth = (minWidth + maxWidth) * 0.5
+
+    // Strand-level color from average elevation
+    const avgElev = segs.reduce((s, seg) => s + seg.layer.rawElev, 0) / segs.length
+    const tElev = hasElevRange
+      ? Math.max(0, Math.min(1, (avgElev - globalElevMin) / elevRange)) : 0.5
+    const baseColor = elevToRidgeColor(tElev)
+    const rgbMatch = baseColor.match(/\d+/g)
+    const gr = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[0]) * 0.9 + 40)) : 140
+    const gg = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[1]) * 0.9 + 30)) : 190
+    const gb = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[2]) * 0.95 + 50)) : 220
+
+    // Strand-level tGlow from average peakAngle + average prominence
+    const avgPeakAngle = segs.reduce((s, seg) => s + seg.layer.peakAngle, 0) / segs.length
+    let promSum = 0
+    for (const seg of segs) {
+      const hasBase = Math.abs(seg.layer.baseAngle - (-Math.PI / 2)) > 0.01
+      promSum += hasBase
+        ? Math.max(0, seg.layer.effElev - seg.layer.baseEffElev)
+        : GLOW_PROMINENCE_SCALE
+    }
+    const avgProm = promSum / segs.length
+    const tProminence = Math.min(1, Math.max(0, avgProm / GLOW_PROMINENCE_SCALE))
+    // Ease-out power curve: steep rise from threshold, gentle plateau toward full.
+    // At -0.30 rad: 0.44 glow.  At -0.20 rad: 0.87.  At -0.10 rad: 0.98.
+    const tLinear = Math.max(0, Math.min(1,
+      (avgPeakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
+    const tAngle = 1 - Math.pow(1 - tLinear, 5)
+    const tGlow = tAngle * tDistGlow * (0.5 + 0.5 * tProminence)
+
+    if (tGlow < 0.01) continue
+
+    const glowAlpha = tGlow * GLOW_MAX_ALPHA
+
+    // Asymmetric Y offset: sky (up) gets tight bright passes, terrain (down) gets diffused bleed.
+    // Scales with distance so offset is proportional at all depths.
+    const baseOffset = 2 + (1 - distT) * 2  // near: 4px, far: 2px
+
+    // Glow passes: drawn wide→narrow so narrower overlays wider.
+    // Y offset: negative = sky (up), positive = terrain (down).
+    const passes = [
+      { widthMul: 6,   alphaMul: 0.10, yOff: +baseOffset },        // terrain bleed (wide, dim, down)
+      { widthMul: 3,   alphaMul: 0.22, yOff: -baseOffset * 0.7 },  // sky halo (medium, brighter, up)
+      { widthMul: 1.5, alphaMul: 0.45, yOff: -baseOffset * 0.3 },  // sky core (tight, brightest, slight up)
+    ]
+
+    // [GLOW-DIAG] Log first 3 strands (far) + last 2 (near) — shows full distance range
+    const diagThis = _glowDiagCount < 3 || (si >= strands.length - 2 && _glowDiagCount < 5)
+    if (diagThis) {
+      console.log(
+        `[GLOW-DIAG] Strand ${si + 1}/${strands.length}:` +
+        ` segs=${segs.length}, avgDist=${(strand.avgDist / 1000).toFixed(1)}km,` +
+        ` distT=${distT.toFixed(3)}, baseWidth=${baseGlowWidth.toFixed(1)}px,` +
+        ` passes=[${passes.map(p => (baseGlowWidth * p.widthMul).toFixed(1) + 'px').join(', ')}],` +
+        ` offset=${baseOffset.toFixed(1)}px, tGlow=${tGlow.toFixed(3)},` +
+        ` glowAlpha=${glowAlpha.toFixed(3)}, color=rgb(${gr},${gg},${gb})`
+      )
+      _glowDiagCount++
+    }
+
+    // Build runs (same azimuth-gap logic as strokes)
+    const runs: Array<{ start: number; end: number }> = []
+    let runStart = 0
+    for (let i = 1; i < segs.length; i++) {
+      const prevAi = segs[i - 1].ai
+      const currAi = segs[i].ai
+      const gap = currAi >= prevAi ? currAi - prevAi : (numAzimuths - prevAi + currAi)
+      if (gap > MAX_AZ_GAP) {
+        if (i - runStart >= 3) runs.push({ start: runStart, end: i })
+        runStart = i
+      }
+    }
+    if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
+
+    for (const run of runs) {
+      // Project points — angle continuity check keeps the path smooth
+      const projected: Array<{ x: number; y: number }> = []
+      let prevPeakAngle = -999
+
+      for (let i = run.start; i < run.end; i++) {
+        const { ai, layer } = segs[i]
+        if (layer.peakAngle < MIN_PEAK_ANGLE) {
+          projected.push({ x: 0, y: -9999 })
+          prevPeakAngle = -999
+          continue
+        }
+        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
+          projected.push({ x: 0, y: -9999 })
+          prevPeakAngle = layer.peakAngle
+          continue
+        }
+        const bearing = ai / silResolution
+        const pos = project(bearing, layer.peakAngle, cam)
+        if (pos.y >= H) {
+          projected.push({ x: pos.x, y: -9999 })
+        } else {
+          projected.push({ x: pos.x, y: Math.max(0, Math.min(H, pos.y)) })
+        }
+        prevPeakAngle = layer.peakAngle
+      }
+
+      // Draw 3 glow passes over the same projected path
+      for (const pass of passes) {
+        const passWidth = baseGlowWidth * pass.widthMul
+        const passAlpha = glowAlpha * pass.alphaMul
+
+        ctx.lineWidth = passWidth
+        ctx.strokeStyle = `rgba(${gr},${gg},${gb},${passAlpha.toFixed(3)})`
+        ctx.beginPath()
+        let started = false
+
+        for (let j = 0; j < projected.length; j++) {
+          const pt = projected[j]
+          if (pt.y < -9000) {
+            if (started) { ctx.stroke(); ctx.beginPath(); started = false }
+            continue
+          }
+
+          const yShifted = pt.y + pass.yOff
+
+          if (!started) {
+            ctx.moveTo(pt.x, yShifted)
+            started = true
+          } else if (j + 1 < projected.length && projected[j + 1].y > -9000) {
+            const next = projected[j + 1]
+            ctx.quadraticCurveTo(pt.x, yShifted, (pt.x + next.x) / 2, (yShifted + next.y + pass.yOff) / 2)
+          } else {
+            ctx.lineTo(pt.x, yShifted)
+          }
+        }
+        if (started) ctx.stroke()
+      }
+    }
+  }
+
+  ctx.restore()
+}
+
 /**
  * Render silhouette edge strokes only.
  *
@@ -592,19 +798,23 @@ function renderSilhouetteStrokes(
   const MIN_STRAND_SEGS = 8   // Eliminate short dash artifacts — 8 segs = 1° bearing
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
   // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
-  const MIN_PEAK_ANGLE = -0.25  // ~-14.3° below horizon
+  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
 
   for (const strand of strands) {
     const segs = strand.segments
     if (segs.length < MIN_STRAND_SEGS) continue
 
-    const distT = Math.min(1, strand.avgDist / maxDist)
+    // Sqrt distance scaling — spreads the 0-100km range across more of 0-1,
+    // giving much better near/far width separation. Linear was compressing
+    // everything under 100km into distT < 0.25.
+    const distT = Math.sqrt(Math.min(1, strand.avgDist / maxDist))
+    // 1km→0.05, 5km→0.11, 30km→0.27, 100km→0.50, 400km→1.0
 
     const angles: number[] = segs.map(s => s.layer.peakAngle)
     const baseOpacity = 0.25 + (1 - distT) * 0.55    // near: 0.80, far: 0.25
     const maxWidth    = 1.5 + (1 - distT) * 3.5       // near: 5.0px, far: 1.5px
-    const minWidth    = 0.4 + (1 - distT) * 1.6       // near: 2.0px, far: 0.4px — close features always bold
-    const CURVATURE_THRESHOLD = 0.008  // Only genuinely sharp features get thick lines
+    const minWidth    = 0.4 + (1 - distT) * 1.6       // near: 2.0px, far: 0.4px
+    const CURVATURE_THRESHOLD = 0.008
 
     ctx.lineCap  = 'round'
     ctx.lineJoin = 'round'
@@ -2143,7 +2353,8 @@ function drawScanCanvas(
       silhouetteLayers, silRes, silElevMin, silElevMax)
   }
 
-  // ── 2b. Silhouette edge strokes (on top of everything) ─────────────────
+  // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
+  // Glow renders first (behind), then crisp strokes on top.
   if (showSilhouetteLines && silhouetteLayers && skylineData?.silhouette) {
     const strands = matchSilhouetteStrands(
       silhouetteLayers,
@@ -2151,6 +2362,7 @@ function drawScanCanvas(
       skylineData.silhouette.resolution,
       cam,
     )
+    renderSilhouetteGlow(ctx, strands, cam, silElevMin, silElevMax, silRes, darkMode)
     renderSilhouetteStrokes(ctx, silhouetteLayers, strands, cam, silElevMin, silElevMax,
       silRes, darkMode)
   }
