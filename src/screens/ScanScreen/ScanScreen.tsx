@@ -362,9 +362,11 @@ function matchSilhouetteStrands(
 ): SilhouetteStrand[] {
   const { heading_deg, hfov, W } = cam
 
-  // Minimum peakAngle — skip layers below this. Terrain barely above or below
-  // the horizon isn't a meaningful silhouette and creates clutter.
-  const MIN_PEAK_ANGLE = -0.08  // ~-4.6°
+  // Minimum peakAngle — pitch-relative so silhouettes appear further down
+  // the screen when looking down (higher AGL / steeper pitch). Moves with
+  // camera pitch so the threshold is always relative to the viewing angle.
+  const pitchRad = cam.pitch_deg * (Math.PI / 180)
+  const MIN_PEAK_ANGLE = pitchRad - 0.15  // ~-8.6° below camera pitch
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -589,7 +591,9 @@ function renderSilhouetteStrokes(
 
   const MIN_STRAND_SEGS = 4   // Show more terrain detail — fewer discarded strands
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
-  const MIN_PEAK_ANGLE = -0.08     // Skip segments below this angle (same as matching)
+  // Pitch-relative min angle — same formula as matching
+  const pitchRad = cam.pitch_deg * (Math.PI / 180)
+  const MIN_PEAK_ANGLE = pitchRad - 0.15
 
   for (const strand of strands) {
     const segs = strand.segments
@@ -599,9 +603,9 @@ function renderSilhouetteStrokes(
 
     const angles: number[] = segs.map(s => s.layer.peakAngle)
     const baseOpacity = 0.25 + (1 - distT) * 0.55    // near: 0.80, far: 0.25
-    const maxWidth    = 1.0 + (1 - distT) * 3.0       // near: 4.0px, far: 1.0px
-    const minWidth    = 0.1 + (1 - distT) * 0.2       // near: 0.3px, far: 0.1px
-    const CURVATURE_THRESHOLD = 0.003  // Lower threshold = more lines reach visible width
+    const maxWidth    = 1.5 + (1 - distT) * 3.0       // near: 4.5px, far: 1.5px
+    const minWidth    = 0.3 + (1 - distT) * 1.2       // near: 1.5px, far: 0.3px — near features always visible
+    const CURVATURE_THRESHOLD = 0.008  // Higher = only genuinely sharp features get thick lines
 
     ctx.lineCap  = 'round'
     ctx.lineJoin = 'round'
