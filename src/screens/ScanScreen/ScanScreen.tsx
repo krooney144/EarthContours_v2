@@ -1481,54 +1481,9 @@ function renderTerrain(
   // far bands use long segments to avoid dotty appearance from stroke gaps
   const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
 
-  // ── Pre-bucket silhouette layers by band distance ──────────────────────
-  // For each azimuth, classify each layer into the band whose distance range
-  // contains it. This enables interleaved painter's order: per band,
-  // silhouette fills draw BEFORE contours, so nearer bands' fills cover
-  // farther bands' contours correctly.
-  const hasSilhouettes = !!(silhouetteLayers && silResolution > 0)
-  const numSilAz = hasSilhouettes ? silResolution * 360 : 0
-  const silMaxDist = 400_000
-  const silElevRange = silElevMax - silElevMin
-  const hasSilElevRange = silElevRange > 1
-
-  // Per-band per-azimuth layer lists: silByBand[bi][ai] = layers in that band
-  // Also track which azimuth has ANY near layer (for ground fill)
-  let silByBand: SilhouetteLayer[][][] | null = null
-  // Per-azimuth: the nearest layer overall (for ground-fill to screen bottom)
-  let nearestLayerPerAz: (SilhouetteLayer | null)[] | null = null
-
-  if (hasSilhouettes && silhouetteLayers) {
-    silByBand = new Array(numBands)
-    for (let bi = 0; bi < numBands; bi++) {
-      silByBand[bi] = new Array(numSilAz)
-      for (let ai = 0; ai < numSilAz; ai++) {
-        silByBand[bi][ai] = []
-      }
-    }
-    nearestLayerPerAz = new Array(numSilAz).fill(null)
-
-    for (let ai = 0; ai < numSilAz; ai++) {
-      const layers = silhouetteLayers[ai]
-      if (!layers) continue
-      for (let li = 0; li < layers.length; li++) {
-        const layer = layers[li]
-        if (layer.isOcean) continue
-        // Find which band this layer belongs to
-        for (let bi = 0; bi < numBands; bi++) {
-          const cfg = DEPTH_BANDS[bi]
-          if (cfg && layer.dist >= cfg.minDist && layer.dist < cfg.maxDist) {
-            silByBand[bi][ai].push(layer)
-            break
-          }
-        }
-        // Track nearest layer per azimuth (li=0 is nearest in the sorted array)
-        if (li === 0) {
-          nearestLayerPerAz[ai] = layer
-        }
-      }
-    }
-  }
+  // Silhouette pre-bucketing removed — with unified flat terrain fill,
+  // band fill polygons provide full coverage. Silhouette layer fills are
+  // no longer needed (were the largest per-frame cost).
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -1565,60 +1520,19 @@ function renderTerrain(
 
     ctx.lineTo(W, H)
     ctx.closePath()
-    // Band fills only render if no silhouettes — silhouettes replace them
-    if (hasVisiblePixels && showFill && !hasSilhouettes) {
+    // Band fill: always draw as base coat (unified terrain color).
+    // Covers sky completely from ridgeline to canvas bottom.
+    // Silhouette layer fills draw on top but are no longer needed for coverage.
+    if (hasVisiblePixels && showFill) {
       ctx.fillStyle = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
       ctx.fill()
     }
 
-    // ── Silhouette fills for this band's distance range ───────────────────
-    // Interleaved with bands in painter's order: these fills cover farther
-    // bands' contours, then THIS band's contours draw on top.
-    if (hasSilhouettes && silByBand && nearestLayerPerAz) {
-      const isNearestBand = (bi === 0)
-      // Unified terrain fill — one flat color for all silhouette surfaces.
-      // Eliminates per-pixel RGB computation (perf win on mobile).
-      const fillColor = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
-      ctx.fillStyle = fillColor
-
-      for (let col = 0; col < W; col++) {
-        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-        const normBearing = ((bearingDeg % 360) + 360) % 360
-        const fracIdx = normBearing * silResolution
-        const ai = Math.round(fracIdx) % numSilAz
-
-        const bandLayers = silByBand[bi][ai]
-
-        // For the nearest band, also draw the ground fill (nearest layer → H)
-        if (isNearestBand) {
-          const nearest = nearestLayerPerAz[ai]
-          if (nearest) {
-            const peakPos = project(bearingDeg, nearest.peakAngle, cam)
-            const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
-            if (peakY < H) {
-              ctx.fillRect(col, peakY, 1, H - peakY)
-            }
-          }
-        }
-
-        // Draw silhouette layers in this band (far→near within band)
-        if (bandLayers.length > 0) {
-          for (let li = bandLayers.length - 1; li >= 0; li--) {
-            const layer = bandLayers[li]
-
-            const peakPos = project(bearingDeg, layer.peakAngle, cam)
-            const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
-
-            const clampedBase = Math.max(layer.baseAngle, -0.35)
-            const basePos = project(bearingDeg, clampedBase, cam)
-            const baseY = Math.max(0, Math.min(H, Math.round(basePos.y)))
-
-            if (baseY <= peakY) continue
-            ctx.fillRect(col, peakY, 1, baseY - peakY)
-          }
-        }
-      }
-    }
+    // ── Silhouette fills REMOVED ──────────────────────────────────────────
+    // With unified terrain fill, the band fill polygon above provides full
+    // coverage from ridgeline to canvas bottom. Per-column silhouette fillRects
+    // are redundant (same flat color on same flat color) and were the largest
+    // per-frame cost (W × layers project() calls + fillRects). Removed entirely.
 
     // ── Contour lines for THIS band (drawn between fill and stroke) ─────
     // Contours sit on top of their own band's silhouette fill but below the
