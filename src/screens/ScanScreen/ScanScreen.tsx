@@ -589,7 +589,7 @@ function renderSilhouetteStrokes(
   // Only draw strokes for strands with enough segments.
   // Use curvature-based line tapering for natural appearance.
 
-  const MIN_STRAND_SEGS = 4   // Show more terrain detail — fewer discarded strands
+  const MIN_STRAND_SEGS = 8   // Eliminate short dash artifacts — 8 segs = 1° bearing
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
   // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
   const MIN_PEAK_ANGLE = -0.15
@@ -602,9 +602,9 @@ function renderSilhouetteStrokes(
 
     const angles: number[] = segs.map(s => s.layer.peakAngle)
     const baseOpacity = 0.25 + (1 - distT) * 0.55    // near: 0.80, far: 0.25
-    const maxWidth    = 1.5 + (1 - distT) * 3.0       // near: 4.5px, far: 1.5px
-    const minWidth    = 0.3 + (1 - distT) * 1.2       // near: 1.5px, far: 0.3px — near features always visible
-    const CURVATURE_THRESHOLD = 0.008  // Higher = only genuinely sharp features get thick lines
+    const maxWidth    = 1.5 + (1 - distT) * 3.5       // near: 5.0px, far: 1.5px
+    const minWidth    = 0.4 + (1 - distT) * 1.6       // near: 2.0px, far: 0.4px — close features always bold
+    const CURVATURE_THRESHOLD = 0.008  // Only genuinely sharp features get thick lines
 
     ctx.lineCap  = 'round'
     ctx.lineJoin = 'round'
@@ -627,15 +627,31 @@ function renderSilhouetteStrokes(
 
     for (const run of runs) {
       // Pre-project all points in this run, filtering out low-angle segments
+      // and marking angle discontinuities as path breaks
+      const MAX_ANGLE_JUMP = 0.005  // rad — max natural peakAngle change per 0.125° azimuth step
       interface SilPt { x: number; y: number; rawElev: number; curvature: number }
       const projected: SilPt[] = []
+      let prevPeakAngle = -999  // sentinel for first point
+
       for (let i = run.start; i < run.end; i++) {
         const { ai, layer } = segs[i]
-        // Skip segments below minimum angle — safety net for any that passed matching
+        // Skip segments below minimum angle
         if (layer.peakAngle < MIN_PEAK_ANGLE) {
           projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
+          prevPeakAngle = -999
           continue
         }
+
+        // Angle continuity check — break path if peakAngle jumps too much
+        // between adjacent strand segments. This catches cross-ridge mismatches
+        // that slipped through distance-based matching. AGL-stable because
+        // peakAngle already encodes viewer elevation.
+        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
+          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
+          prevPeakAngle = layer.peakAngle  // reset for next segment
+          continue
+        }
+
         const bearing = ai / silResolution
         const pos = project(bearing, layer.peakAngle, cam)
         const clampedY = Math.max(0, Math.min(H, pos.y))
@@ -643,7 +659,12 @@ function renderSilhouetteStrokes(
         if (i > run.start && i < run.end - 1) {
           curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
         }
-        projected.push({ x: pos.x, y: pos.y >= H ? -9999 : clampedY, rawElev: layer.rawElev, curvature })
+        if (pos.y >= H) {
+          projected.push({ x: pos.x, y: -9999, rawElev: 0, curvature: 0 })
+        } else {
+          projected.push({ x: pos.x, y: clampedY, rawElev: layer.rawElev, curvature })
+        }
+        prevPeakAngle = layer.peakAngle
       }
 
       // Draw smooth curves through valid points
@@ -661,7 +682,7 @@ function renderSilhouetteStrokes(
           const tElev = hasElevRange && pt.rawElev > 0
             ? Math.max(0, Math.min(1, (pt.rawElev - globalElevMin) / elevRange)) : 0.5
           const tCurvature = Math.min(1, pt.curvature / CURVATURE_THRESHOLD)
-          const lineWidth = minWidth + (maxWidth - minWidth) * (0.05 + 0.95 * tCurvature)
+          const lineWidth = minWidth + (maxWidth - minWidth) * (0.2 + 0.8 * tCurvature)
           ctx.beginPath()
           ctx.lineWidth = lineWidth
           ctx.globalAlpha = baseOpacity
@@ -674,7 +695,7 @@ function renderSilhouetteStrokes(
           const tElev = hasElevRange && pt.rawElev > 0
             ? Math.max(0, Math.min(1, (pt.rawElev - globalElevMin) / elevRange)) : 0.5
           const tCurvature = Math.min(1, pt.curvature / CURVATURE_THRESHOLD)
-          const lineWidth = minWidth + (maxWidth - minWidth) * (0.05 + 0.95 * tCurvature)
+          const lineWidth = minWidth + (maxWidth - minWidth) * (0.2 + 0.8 * tCurvature)
           ctx.beginPath()
           ctx.lineWidth = lineWidth
           ctx.strokeStyle = elevToRidgeColor(tElev)
@@ -1653,7 +1674,7 @@ function renderTerrain(
             const tElev0 = hasElevRange && firstPt.elev > -Infinity
               ? (firstPt.elev - globalElevMin) / elevRange : 0.5
             const tCurv0 = Math.min(1, firstPt.curvature / BAND_CURV_THRESHOLD)
-            ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.05 + 0.95 * tCurv0)
+            ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.2 + 0.8 * tCurv0)
             ctx.strokeStyle = elevToRidgeColor(tElev0)
             ctx.beginPath()
             ctx.moveTo(firstPt.col, firstPt.y)
@@ -1667,7 +1688,7 @@ function renderTerrain(
                 const tE = hasElevRange && curr.elev > -Infinity
                   ? (curr.elev - globalElevMin) / elevRange : 0.5
                 const tC = Math.min(1, curr.curvature / BAND_CURV_THRESHOLD)
-                ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.05 + 0.95 * tC)
+                ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.2 + 0.8 * tC)
                 ctx.strokeStyle = elevToRidgeColor(tE)
                 ctx.beginPath()
                 ctx.moveTo(prev.col, prev.y)
