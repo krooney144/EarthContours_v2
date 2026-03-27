@@ -2340,12 +2340,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ exhibitMode = false }) => {
                   // Auto-set vertical exaggeration based on area size:
                   // small areas have enough natural relief, large areas need amplification
                   const maxKm = selectionDims.maxSideKm
-                  const autoExag: 1 | 1.5 | 2 | 4 | 10 | 20 =
+                  const autoExag: 1 | 1.5 | 2 | 4 =
                     maxKm < 10  ? 1 :
                     maxKm < 30  ? 1.5 :
-                    maxKm < 80  ? 2 :
-                    maxKm < 300 ? 4 :
-                    maxKm < 500 ? 10 : 20
+                    maxKm < 80  ? 2 : 4
                   setVerticalExaggeration(autoExag)
                   // Start loading custom bounds and navigate to EXPLORE
                   loadCustomBounds(bounds)
