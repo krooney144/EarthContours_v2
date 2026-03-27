@@ -223,7 +223,7 @@ export interface AppSettings {
   showContourLines: boolean
   showBandLines: boolean
   showFill: boolean
-  solidTerrain: boolean
+  showSilhouetteLines: boolean
   contourAnimation: boolean
   verticalExaggeration: VerticalExaggeration
 

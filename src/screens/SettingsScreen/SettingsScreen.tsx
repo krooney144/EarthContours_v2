@@ -298,17 +298,17 @@ const SettingsScreen: React.FC = () => {
           <Row label="Coastlines" description="Show coastline outlines on map">
             <Toggle id="toggle-coastlines" label="Toggle coastlines" checked={settings.showCoastlines} onChange={settings.toggleCoastlines} />
           </Row>
-          <Row label="Contour Lines" description="Show elevation contour lines on terrain">
+          <Row label="Contour Lines" description="Show elevation contour lines in Scan view">
             <Toggle id="toggle-contours" label="Toggle contour lines" checked={settings.showContourLines} onChange={settings.toggleContourLines} />
           </Row>
-          <Row label="Solid Terrain" description="Show solid 3D mesh in Explore (off = contour lines only)">
-            <Toggle id="toggle-solid-terrain" label="Toggle solid terrain" checked={settings.solidTerrain} onChange={settings.toggleSolidTerrain} />
+          <Row label="Scan Terrain Fill" description="Show solid terrain fill below ridgelines in Scan view">
+            <Toggle id="toggle-fill" label="Toggle terrain fill" checked={settings.showFill} onChange={settings.toggleFill} />
           </Row>
           <Row label="Band Lines" description="Show depth band ridgeline strokes in Scan view">
             <Toggle id="toggle-band-lines" label="Toggle band lines" checked={settings.showBandLines} onChange={settings.toggleBandLines} />
           </Row>
-          <Row label="Terrain Fill" description="Show solid fill below ridgelines in Scan view">
-            <Toggle id="toggle-fill" label="Toggle terrain fill" checked={settings.showFill} onChange={settings.toggleFill} />
+          <Row label="Silhouette Lines" description="Show silhouette edge strokes in Scan view">
+            <Toggle id="toggle-silhouette-lines" label="Toggle silhouette lines" checked={settings.showSilhouetteLines} onChange={settings.toggleSilhouetteLines} />
           </Row>
           <Row label="Debug Panel" description="Show diagnostics overlay on Scan screen">
             <Toggle id="toggle-debug-panel" label="Toggle debug panel" checked={settings.showDebugPanel} onChange={settings.toggleDebugPanel} />

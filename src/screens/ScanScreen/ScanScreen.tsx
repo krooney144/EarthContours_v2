@@ -74,6 +74,13 @@ const REFRACTION_K      = 0.13       // Atmospheric refraction coefficient
 const DEG_TO_RAD        = Math.PI / 180
 const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full 360°
 
+// ─── Unified Terrain Fill ─────────────────────────────────────────────────────
+// Single flat base color for ALL terrain surfaces (band fills, silhouette fills,
+// near-field occlusion). Contour/ridgeline strokes sit on top with elevation-based
+// coloring. One color per theme eliminates blocky multi-band fill appearance.
+const TERRAIN_FILL_DARK  = 'rgb(4, 10, 18)'     // Deep navy — darker than sky gradient, contour lines visible
+const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
+
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
 /**
@@ -486,8 +493,8 @@ function renderNearFieldOcclusion(
   const { W, H } = cam
   const { envelope, sampleCounts, numAzimuths, resolution } = projectedProfile
 
-  // Near-terrain fill color — matches the darkest band fill
-  const fillColor = darkMode ? 'rgb(2, 12, 20)' : 'rgb(85, 100, 80)'
+  // Unified terrain fill — same flat color as all other terrain surfaces
+  const fillColor = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
 
   // Build a polygon: trace the near terrain "max angle" across screen columns
   ctx.beginPath()
@@ -1474,54 +1481,9 @@ function renderTerrain(
   // far bands use long segments to avoid dotty appearance from stroke gaps
   const SEGMENT_SIZES = [3, 4, 6, 12, 24, 48]  // ultra-near → far
 
-  // ── Pre-bucket silhouette layers by band distance ──────────────────────
-  // For each azimuth, classify each layer into the band whose distance range
-  // contains it. This enables interleaved painter's order: per band,
-  // silhouette fills draw BEFORE contours, so nearer bands' fills cover
-  // farther bands' contours correctly.
-  const hasSilhouettes = !!(silhouetteLayers && silResolution > 0)
-  const numSilAz = hasSilhouettes ? silResolution * 360 : 0
-  const silMaxDist = 400_000
-  const silElevRange = silElevMax - silElevMin
-  const hasSilElevRange = silElevRange > 1
-
-  // Per-band per-azimuth layer lists: silByBand[bi][ai] = layers in that band
-  // Also track which azimuth has ANY near layer (for ground fill)
-  let silByBand: SilhouetteLayer[][][] | null = null
-  // Per-azimuth: the nearest layer overall (for ground-fill to screen bottom)
-  let nearestLayerPerAz: (SilhouetteLayer | null)[] | null = null
-
-  if (hasSilhouettes && silhouetteLayers) {
-    silByBand = new Array(numBands)
-    for (let bi = 0; bi < numBands; bi++) {
-      silByBand[bi] = new Array(numSilAz)
-      for (let ai = 0; ai < numSilAz; ai++) {
-        silByBand[bi][ai] = []
-      }
-    }
-    nearestLayerPerAz = new Array(numSilAz).fill(null)
-
-    for (let ai = 0; ai < numSilAz; ai++) {
-      const layers = silhouetteLayers[ai]
-      if (!layers) continue
-      for (let li = 0; li < layers.length; li++) {
-        const layer = layers[li]
-        if (layer.isOcean) continue
-        // Find which band this layer belongs to
-        for (let bi = 0; bi < numBands; bi++) {
-          const cfg = DEPTH_BANDS[bi]
-          if (cfg && layer.dist >= cfg.minDist && layer.dist < cfg.maxDist) {
-            silByBand[bi][ai].push(layer)
-            break
-          }
-        }
-        // Track nearest layer per azimuth (li=0 is nearest in the sorted array)
-        if (li === 0) {
-          nearestLayerPerAz[ai] = layer
-        }
-      }
-    }
-  }
+  // Silhouette pre-bucketing removed — with unified flat terrain fill,
+  // band fill polygons provide full coverage. Silhouette layer fills are
+  // no longer needed (were the largest per-frame cost).
 
   // Draw bands far→near (painter's order: far gets painted first, near overlaps)
   // Reverse iteration: DEPTH_BANDS[0]=near, [1]=mid, [2]=far → draw [2],[1],[0]
@@ -1558,74 +1520,19 @@ function renderTerrain(
 
     ctx.lineTo(W, H)
     ctx.closePath()
-    // Band fills only render if no silhouettes — silhouettes replace them
-    if (hasVisiblePixels && showFill && !hasSilhouettes) {
-      ctx.fillStyle = style.fillColor
+    // Band fill: always draw as base coat (unified terrain color).
+    // Covers sky completely from ridgeline to canvas bottom.
+    // Silhouette layer fills draw on top but are no longer needed for coverage.
+    if (hasVisiblePixels && showFill) {
+      ctx.fillStyle = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
       ctx.fill()
     }
 
-    // ── Silhouette fills for this band's distance range ───────────────────
-    // Interleaved with bands in painter's order: these fills cover farther
-    // bands' contours, then THIS band's contours draw on top.
-    if (hasSilhouettes && silByBand && nearestLayerPerAz) {
-      const isNearestBand = (bi === 0)
-
-      for (let col = 0; col < W; col++) {
-        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-        const normBearing = ((bearingDeg % 360) + 360) % 360
-        const fracIdx = normBearing * silResolution
-        const ai = Math.round(fracIdx) % numSilAz
-
-        const bandLayers = silByBand[bi][ai]
-
-        // For the nearest band, also draw the ground fill (nearest layer → H)
-        if (isNearestBand) {
-          const nearest = nearestLayerPerAz[ai]
-          if (nearest) {
-            const peakPos = project(bearingDeg, nearest.peakAngle, cam)
-            const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
-            if (peakY < H) {
-              const distT = Math.min(1, nearest.dist / silMaxDist)
-              const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (nearest.rawElev - silElevMin) / silElevRange)) : 0.5
-              // Distance-based fill: near=dark deep blue, far=slightly brighter slate
-              const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
-              const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
-              const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
-              ctx.fillStyle = `rgb(${r},${g},${b})`
-              ctx.fillRect(col, peakY, 1, H - peakY)
-            }
-          }
-        }
-
-        // Draw silhouette layers in this band (far→near within band)
-        // These are layers whose distance falls in this band's range
-        if (bandLayers.length > 0) {
-          // Sort by distance descending (far first) for painter's order
-          // Layers are already near→far from buildSilhouetteLayers, reverse
-          for (let li = bandLayers.length - 1; li >= 0; li--) {
-            const layer = bandLayers[li]
-
-            const peakPos = project(bearingDeg, layer.peakAngle, cam)
-            const peakY = Math.max(0, Math.min(H, Math.round(peakPos.y)))
-
-            const clampedBase = Math.max(layer.baseAngle, -0.35)
-            const basePos = project(bearingDeg, clampedBase, cam)
-            const baseY = Math.max(0, Math.min(H, Math.round(basePos.y)))
-
-            if (baseY <= peakY) continue
-
-            const distT = Math.min(1, layer.dist / silMaxDist)
-            const elevT = hasSilElevRange ? Math.min(1, Math.max(0, (layer.rawElev - silElevMin) / silElevRange)) : 0.5
-            // Distance-based fill: near=dark deep blue, far=slightly brighter slate
-            const r = darkMode ? Math.round(2 + distT * 12 + elevT * 6)  : Math.round(70 + distT * 50 + elevT * 30)
-            const g = darkMode ? Math.round(8 + distT * 30 + elevT * 12) : Math.round(85 + distT * 45 + elevT * 25)
-            const b = darkMode ? Math.round(16 + distT * 42 + elevT * 14): Math.round(75 + distT * 35 + elevT * 20)
-            ctx.fillStyle = `rgb(${r},${g},${b})`
-            ctx.fillRect(col, peakY, 1, baseY - peakY)
-          }
-        }
-      }
-    }
+    // ── Silhouette fills REMOVED ──────────────────────────────────────────
+    // With unified terrain fill, the band fill polygon above provides full
+    // coverage from ridgeline to canvas bottom. Per-column silhouette fillRects
+    // are redundant (same flat color on same flat color) and were the largest
+    // per-frame cost (W × layers project() calls + fillRects). Removed entirely.
 
     // ── Contour lines for THIS band (drawn between fill and stroke) ─────
     // Contours sit on top of their own band's silhouette fill but below the
@@ -1641,11 +1548,15 @@ function renderTerrain(
     }
 
     // ── Ridgeline stroke — continuous paths with periodic color updates ──
+    // Distance-proximity gating: break path when adjacent columns jump to a
+    // different depth (same fix that prevents contour strand jumping).
+    // Ratio threshold: if dist changes by more than 2× between columns, break.
     if (hasVisiblePixels && showBandLines) {
       ctx.lineCap = 'butt'
       ctx.lineJoin = 'round'
 
       let segStartCol = -1
+      let prevDist = 0
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
@@ -1654,6 +1565,7 @@ function renderTerrain(
         if (angle <= -Math.PI / 2 + 0.001) {
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
+          prevDist = 0
           continue
         }
 
@@ -1663,10 +1575,22 @@ function renderTerrain(
         if (screenY >= H) {
           if (segStartCol >= 0) ctx.stroke()
           segStartCol = -1
+          prevDist = 0
           continue
         }
 
         const clampedY = Math.max(0, screenY)
+        const dist = bandDistAt(skyline, bi, bearingDeg)
+
+        // Distance jump detection: break path if depth changes drastically
+        // between adjacent columns (prevents lines connecting unrelated terrain)
+        if (segStartCol >= 0 && prevDist > 0 && dist > 0) {
+          const ratio = dist > prevDist ? dist / prevDist : prevDist / dist
+          if (ratio > 2.0) {
+            ctx.stroke()
+            segStartCol = -1
+          }
+        }
 
         if (segStartCol < 0) {
           // Start a new segment — compute color + distance-based line width
@@ -1674,7 +1598,6 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
           ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
@@ -1683,7 +1606,6 @@ function renderTerrain(
           segStartCol = col
         } else if (col - segStartCol >= segSize) {
           // Flush current segment, start new one with updated color + width.
-          // Overlap by 1px: lineTo then moveTo at same point prevents gaps.
           ctx.lineTo(col, clampedY)
           ctx.stroke()
 
@@ -1691,7 +1613,6 @@ function renderTerrain(
           const tElev = hasElevRange && elev > -Infinity
             ? (elev - globalElevMin) / elevRange
             : 0.5
-          const dist = bandDistAt(skyline, bi, bearingDeg)
           const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
           ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
           ctx.beginPath()
@@ -1701,6 +1622,8 @@ function renderTerrain(
         } else {
           ctx.lineTo(col, clampedY)
         }
+
+        prevDist = dist
       }
 
       // Flush final segment
@@ -2046,6 +1969,7 @@ function drawScanCanvas(
   showFill: boolean = true,
   showPeakLabels: boolean = true,
   showContourLines: boolean = true,
+  showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
@@ -2136,7 +2060,7 @@ function drawScanCanvas(
   }
 
   // ── 2b. Silhouette edge strokes (on top of everything) ─────────────────
-  if (silhouetteLayers && skylineData?.silhouette) {
+  if (showSilhouetteLines && silhouetteLayers && skylineData?.silhouette) {
     const strands = matchSilhouetteStrands(
       silhouetteLayers,
       skylineData.silhouette.numAzimuths,
@@ -2313,7 +2237,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng, mode, gpsLat, requestGPS, switchToGPS } = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, darkMode } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -2753,7 +2677,7 @@ const ScanScreen: React.FC = () => {
       silhouetteLayers,
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
-      showContourLines, darkMode,
+      showContourLines, showSilhouetteLines, darkMode,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -2767,7 +2691,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, darkMode,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
