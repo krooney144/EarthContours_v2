@@ -226,13 +226,15 @@
   position: absolute;
   left: 0;
   top: 0;
-  /* JS sets transform: translate(sx, sy) to position at the projected point.
+  /* JS sets --peak-x / --peak-y via inline transform.
+     translate(-50%, -100%) anchors the bottom-center (dot) at the projected point.
      will-change: transform enables GPU compositing for smooth orbit. */
   will-change: transform;
   display: flex;
   flex-direction: column;
   align-items: center;
   pointer-events: none;
+  transform-origin: bottom center;
 }
 
 .peakLabelCard {

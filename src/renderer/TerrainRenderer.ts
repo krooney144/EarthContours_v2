@@ -303,7 +303,7 @@ export class TerrainRenderer {
       const cg = c.g / 255
       const cb = c.b / 255
 
-      const y = (elev - minElevation_m) * verticalExaggeration + yOffset
+      const y = (elev - Math.max(0, minElevation_m)) * verticalExaggeration + yOffset
       const isMajor = elev % 500 === 0
 
       // Slightly brighter for major contours
@@ -424,7 +424,7 @@ export class TerrainRenderer {
 
     return {
       x: (nx - 0.5) * this.terrainWidth_m,
-      y: (elev - minElevation_m) * verticalExaggeration + yOffset,
+      y: (Math.max(0, elev) - Math.max(0, minElevation_m)) * verticalExaggeration + yOffset,
       z: (ny - 0.5) * this.terrainDepth_m,
     }
   }
@@ -723,9 +723,11 @@ export class TerrainRenderer {
 
     const { width, height, minElevation_m } = mesh
 
-    // ENU world coordinates (same as what buildTerrain produces)
+    // ENU world coordinates (same as what buildTerrain produces — with ocean clamp)
+    const clampedElev = Math.max(0, elevation_m)
+    const clampedMin = Math.max(0, minElevation_m)
     const x = (col / (width - 1) - 0.5) * this.terrainWidth_m
-    const y = (elevation_m - minElevation_m) * verticalExaggeration
+    const y = (clampedElev - clampedMin) * verticalExaggeration
     const z = (row / (height - 1) - 0.5) * this.terrainDepth_m
 
     const vec = new THREE.Vector3(x, y, z)

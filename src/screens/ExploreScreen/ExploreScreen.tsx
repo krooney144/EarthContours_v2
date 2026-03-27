@@ -77,7 +77,8 @@ const ExploreScreen: React.FC = () => {
   const [labelTick, setLabelTick] = useState(0)
   const labelThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (labelThrottleRef.current) return  // already scheduled
+    // Clear any pending tick so the latest camera state is always picked up
+    if (labelThrottleRef.current) clearTimeout(labelThrottleRef.current)
     labelThrottleRef.current = setTimeout(() => {
       setLabelTick(t => t + 1)
       labelThrottleRef.current = null
@@ -299,7 +300,9 @@ const ExploreScreen: React.FC = () => {
 
       const isTouch = e.pointerType === 'touch'
       if (isTouch || isRightClickRef.current || e.buttons === 2) {
-        applyOrbitDrag(deltaX, deltaY)
+        // Touch drags produce larger deltas than mouse — dampen to avoid oversensitivity
+        const damping = isTouch ? 0.5 : 1
+        applyOrbitDrag(deltaX * damping, deltaY * damping)
       } else {
         applyOrbitPan(deltaX, deltaY)
       }
@@ -329,6 +332,9 @@ const ExploreScreen: React.FC = () => {
       const td = renderer.getTerrainDepth()
       if (tw > 0 && td > 0) {
         setOrbitPan(hit.x / tw, hit.z / td)
+        // Zoom in 20% closer for a visible fly-to effect
+        const currentRadius = useCameraStore.getState().orbitRadius
+        useCameraStore.setState({ orbitRadius: currentRadius * 0.8 })
         log.debug('Fly-to raycast hit', {
           x: hit.x.toFixed(0), z: hit.z.toFixed(0),
           panX: (hit.x / tw).toFixed(3),
@@ -768,7 +774,7 @@ const PeakLabels3D: React.FC<{
         <div
           key={peak.id}
           className={styles.peakLabel3D}
-          style={{ transform: `translate(${sx}px, ${sy}px)` }}
+          style={{ transform: `translate(${sx}px, ${sy}px) translate(-50%, -100%)` }}
         >
           {showLabel && (
             <>
