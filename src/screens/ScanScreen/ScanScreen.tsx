@@ -653,8 +653,11 @@ function renderSilhouetteGlow(
     }
     const avgProm = promSum / segs.length
     const tProminence = Math.min(1, Math.max(0, avgProm / GLOW_PROMINENCE_SCALE))
-    const tAngle = Math.max(0, Math.min(1,
+    // Ease-out power curve: steep rise from threshold, gentle plateau toward full.
+    // At -0.30 rad: 0.44 glow.  At -0.20 rad: 0.87.  At -0.10 rad: 0.98.
+    const tLinear = Math.max(0, Math.min(1,
       (avgPeakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
+    const tAngle = 1 - Math.pow(1 - tLinear, 5)
     const tGlow = tAngle * tDistGlow * (0.5 + 0.5 * tProminence)
 
     if (tGlow < 0.01) continue
