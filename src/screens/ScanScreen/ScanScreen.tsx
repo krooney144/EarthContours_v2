@@ -1969,6 +1969,7 @@ function drawScanCanvas(
   showFill: boolean = true,
   showPeakLabels: boolean = true,
   showContourLines: boolean = true,
+  showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
@@ -2059,7 +2060,7 @@ function drawScanCanvas(
   }
 
   // ── 2b. Silhouette edge strokes (on top of everything) ─────────────────
-  if (silhouetteLayers && skylineData?.silhouette) {
+  if (showSilhouetteLines && silhouetteLayers && skylineData?.silhouette) {
     const strands = matchSilhouetteStrands(
       silhouetteLayers,
       skylineData.silhouette.numAzimuths,
@@ -2236,7 +2237,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng, mode, gpsLat, requestGPS, switchToGPS } = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, darkMode } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -2676,7 +2677,7 @@ const ScanScreen: React.FC = () => {
       silhouetteLayers,
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
-      showContourLines, darkMode,
+      showContourLines, showSilhouetteLines, darkMode,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -2690,7 +2691,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, darkMode,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame

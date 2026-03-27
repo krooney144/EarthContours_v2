@@ -47,7 +47,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showContourLines: true,
   showBandLines: true,            // Depth band ridgeline strokes in SCAN
   showFill: true,                 // Terrain fill below ridgelines in SCAN
-  solidTerrain: true,            // Solid terrain mesh in EXPLORE (off = contour lines only)
+  showSilhouetteLines: true,      // Silhouette edge strokes in SCAN
   contourAnimation: true,       // Slow pulse on by default
   verticalExaggeration: 4,     // 4× default — real mountains visible without being overwhelming
 
@@ -89,7 +89,7 @@ interface SettingsStore extends AppSettings {
   toggleContourLines: () => void
   toggleBandLines: () => void
   toggleFill: () => void
-  toggleSolidTerrain: () => void
+  toggleSilhouetteLines: () => void
   toggleContourAnimation: () => void
   setVerticalExaggeration: (v: VerticalExaggeration) => void
   toggleDarkMode: () => void
@@ -184,10 +184,10 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ showFill: next })
       },
 
-      toggleSolidTerrain: () => {
-        const next = !get().solidTerrain
-        log.info('Solid terrain toggled', { now: next })
-        set({ solidTerrain: next })
+      toggleSilhouetteLines: () => {
+        const next = !get().showSilhouetteLines
+        log.info('Silhouette lines toggled', { now: next })
+        set({ showSilhouetteLines: next })
       },
 
       toggleContourAnimation: () => {
@@ -273,7 +273,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 6,                          // bump when persisted shape changes
+      version: 7,                          // bump when persisted shape changes
       /**
        * Migrations:
        * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
@@ -282,6 +282,7 @@ export const useSettingsStore = create<SettingsStore>()(
        * v4→v5: add darkMode.
        * v5→v6: fix showFill/showBandLines defaults — v4 wrongly set them to false,
        *        making terrain invisible for existing users.
+       * v6→v7: replace solidTerrain (unused) with showSilhouetteLines.
        */
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
@@ -293,6 +294,11 @@ export const useSettingsStore = create<SettingsStore>()(
           )
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
+        }
+        if (fromVersion < 7) {
+          log.info('Migrating settings v6→v7: replace solidTerrain with showSilhouetteLines')
+          delete state.solidTerrain
+          if (state.showSilhouetteLines === undefined) state.showSilhouetteLines = true
         }
         if (fromVersion < 6) {
           log.info('Migrating settings v5→v6: fix showFill/showBandLines defaults to true')
@@ -345,7 +351,7 @@ export const useSettingsStore = create<SettingsStore>()(
         showContourLines: state.showContourLines,
         showBandLines: state.showBandLines,
         showFill: state.showFill,
-        solidTerrain: state.solidTerrain,
+        showSilhouetteLines: state.showSilhouetteLines,
         contourAnimation: state.contourAnimation,
         verticalExaggeration: state.verticalExaggeration,
         darkMode: state.darkMode,
