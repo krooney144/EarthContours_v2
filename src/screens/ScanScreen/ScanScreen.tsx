@@ -347,7 +347,11 @@ interface SilhouetteStrand {
 
 /**
  * Match silhouette layers across adjacent azimuths into continuous strands.
- * Uses distance proximity (within 30% tolerance) to connect layers.
+ * Primary match key: distance proximity — a silhouette line represents terrain
+ * at a specific distance from the viewer. Two adjacent azimuth samples belong
+ * to the same strand only if they're at approximately the same distance.
+ * Minimum peakAngle filter: skip layers whose angle is too low — near-flat
+ * ridgelines aren't meaningful silhouettes and clutter the view.
  * Returns strands sorted far→near (for painter's order fill rendering).
  */
 function matchSilhouetteStrands(
@@ -357,6 +361,12 @@ function matchSilhouetteStrands(
   cam: CameraParams,
 ): SilhouetteStrand[] {
   const { heading_deg, hfov, W } = cam
+
+  // Minimum peakAngle — fixed relative to horizon. AGL is already baked into
+  // peakAngle by buildSilhouetteLayers (atan2(effElev - viewerElev, dist)).
+  // Camera pitch only affects where on screen things are drawn, not whether
+  // silhouette lines exist. Same mountain at same AGL = same silhouettes.
+  const MIN_PEAK_ANGLE = -0.15  // ~-8.6° below horizon
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -374,7 +384,7 @@ function matchSilhouetteStrands(
   }
   const active: ActiveStrand[] = []
   const completed: SilhouetteStrand[] = []
-  const MAX_AZ_GAP = Math.ceil(resolution * 3)  // Max 3° gap before expiring
+  const MAX_AZ_GAP = Math.ceil(resolution * 4)  // Max 4° gap before expiring
 
   // Sweep through visible azimuths
   const totalVisible = aiEnd >= aiStart
@@ -389,15 +399,20 @@ function matchSilhouetteStrands(
     const matched = new Set<number>()  // indices into active that got matched
 
     for (const layer of azLayers) {
-      // Find closest active strand by distance
+      // Skip layers below minimum angle — not meaningful silhouettes
+      if (layer.peakAngle < MIN_PEAK_ANGLE) continue
+
+      // Find closest active strand by distance — primary match key.
+      // A real ridgeline varies ±10-15% in distance across its bearing span
+      // (cosine effect of a ridge curving away). Tighter tolerance prevents
+      // connecting candidates from different ridges at different depths.
       let bestIdx = -1
       let bestDiff = Infinity
-      // Tighter tolerance for near terrain, looser for far
-      const distTol = layer.dist < 5_000
-        ? Math.max(100, layer.dist * 0.15)   // near: 15%, floor 100m
-        : layer.dist < 40_000
-        ? Math.max(300, layer.dist * 0.20)   // mid: 20%, floor 300m
-        : Math.max(500, layer.dist * 0.25)   // far: 25%, floor 500m
+      const distTol = layer.dist < 10_000
+        ? Math.max(200, layer.dist * 0.12)   // near: 12%, floor 200m
+        : layer.dist < 50_000
+        ? Math.max(500, layer.dist * 0.15)   // mid: 15%, floor 500m
+        : Math.max(1000, layer.dist * 0.18)  // far: 18%, floor 1km
 
       for (let si = 0; si < active.length; si++) {
         if (matched.has(si)) continue
@@ -574,8 +589,10 @@ function renderSilhouetteStrokes(
   // Only draw strokes for strands with enough segments.
   // Use curvature-based line tapering for natural appearance.
 
-  const MIN_STRAND_SEGS = 12  // Only draw longer, more meaningful strands
-  const MAX_AZ_GAP_FOR_STROKE = 3
+  const MIN_STRAND_SEGS = 8   // Eliminate short dash artifacts — 8 segs = 1° bearing
+  const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
+  // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
+  const MIN_PEAK_ANGLE = -0.15
 
   for (const strand of strands) {
     const segs = strand.segments
@@ -584,10 +601,10 @@ function renderSilhouetteStrokes(
     const distT = Math.min(1, strand.avgDist / maxDist)
 
     const angles: number[] = segs.map(s => s.layer.peakAngle)
-    const baseOpacity = 0.20 + (1 - distT) * 0.60    // near: 0.80, far: 0.20
-    const maxWidth    = 0.6 + (1 - distT) * 2.4       // near: 3.0px, far: 0.6px
-    const minWidth    = 0.2 + (1 - distT) * 0.3       // near: 0.5px, far: 0.2px
-    const CURVATURE_THRESHOLD = 0.005
+    const baseOpacity = 0.25 + (1 - distT) * 0.55    // near: 0.80, far: 0.25
+    const maxWidth    = 1.5 + (1 - distT) * 3.5       // near: 5.0px, far: 1.5px
+    const minWidth    = 0.4 + (1 - distT) * 1.6       // near: 2.0px, far: 0.4px — close features always bold
+    const CURVATURE_THRESHOLD = 0.008  // Only genuinely sharp features get thick lines
 
     ctx.lineCap  = 'round'
     ctx.lineJoin = 'round'
@@ -602,49 +619,101 @@ function renderSilhouetteStrokes(
         ? currAi - prevAi
         : (numAzimuths - prevAi + currAi)
       if (gap > MAX_AZ_GAP_FOR_STROKE) {
-        if (i - runStart >= 6) runs.push({ start: runStart, end: i })
+        if (i - runStart >= 3) runs.push({ start: runStart, end: i })
         runStart = i
       }
     }
-    if (segs.length - runStart >= 6) runs.push({ start: runStart, end: segs.length })
+    if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
 
     for (const run of runs) {
-      let pathStarted = false
-      const STROKE_SEG_SIZE = 6
+      // Pre-project all points in this run, filtering out low-angle segments
+      // and marking angle discontinuities as path breaks
+      const MAX_ANGLE_JUMP = 0.005  // rad — max natural peakAngle change per 0.125° azimuth step
+      interface SilPt { x: number; y: number; rawElev: number; curvature: number }
+      const projected: SilPt[] = []
+      let prevPeakAngle = -999  // sentinel for first point
 
       for (let i = run.start; i < run.end; i++) {
         const { ai, layer } = segs[i]
+        // Skip segments below minimum angle
+        if (layer.peakAngle < MIN_PEAK_ANGLE) {
+          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
+          prevPeakAngle = -999
+          continue
+        }
+
+        // Angle continuity check — break path if peakAngle jumps too much
+        // between adjacent strand segments. This catches cross-ridge mismatches
+        // that slipped through distance-based matching. AGL-stable because
+        // peakAngle already encodes viewer elevation.
+        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
+          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
+          prevPeakAngle = layer.peakAngle  // reset for next segment
+          continue
+        }
+
         const bearing = ai / silResolution
         const pos = project(bearing, layer.peakAngle, cam)
+        const clampedY = Math.max(0, Math.min(H, pos.y))
+        let curvature = 0
+        if (i > run.start && i < run.end - 1) {
+          curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
+        }
         if (pos.y >= H) {
+          projected.push({ x: pos.x, y: -9999, rawElev: 0, curvature: 0 })
+        } else {
+          projected.push({ x: pos.x, y: clampedY, rawElev: layer.rawElev, curvature })
+        }
+        prevPeakAngle = layer.peakAngle
+      }
+
+      // Draw smooth curves through valid points
+      let pathStarted = false
+      const SEG_SIZE = 8  // Update color/width every 8 points
+
+      for (let j = 0; j < projected.length; j++) {
+        const pt = projected[j]
+        if (pt.y < -9000) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue
         }
-        const clampedY = Math.max(0, Math.min(H, pos.y))
-        const relIdx = i - run.start
 
-        if (!pathStarted || relIdx % STROKE_SEG_SIZE === 0) {
-          if (pathStarted) ctx.stroke()
-
-          let curvature = 0
-          if (i > 0 && i < segs.length - 1) {
-            curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
-          }
-          const tCurvature = Math.min(1, curvature / CURVATURE_THRESHOLD)
-          const lineWidth = minWidth + (maxWidth - minWidth) * (0.3 + 0.7 * tCurvature)
-
-          const tElev = hasElevRange && layer.rawElev > 0
-            ? Math.max(0, Math.min(1, (layer.rawElev - globalElevMin) / elevRange))
-            : 0.5
-
+        if (!pathStarted) {
+          const tElev = hasElevRange && pt.rawElev > 0
+            ? Math.max(0, Math.min(1, (pt.rawElev - globalElevMin) / elevRange)) : 0.5
+          const tCurvature = Math.min(1, pt.curvature / CURVATURE_THRESHOLD)
+          const lineWidth = minWidth + (maxWidth - minWidth) * (0.2 + 0.8 * tCurvature)
           ctx.beginPath()
           ctx.lineWidth = lineWidth
           ctx.globalAlpha = baseOpacity
           ctx.strokeStyle = elevToRidgeColor(tElev)
-          ctx.moveTo(pos.x, clampedY)
+          ctx.moveTo(pt.x, pt.y)
           pathStarted = true
+        } else if (j % SEG_SIZE === 0) {
+          // Flush and update style
+          ctx.stroke()
+          const tElev = hasElevRange && pt.rawElev > 0
+            ? Math.max(0, Math.min(1, (pt.rawElev - globalElevMin) / elevRange)) : 0.5
+          const tCurvature = Math.min(1, pt.curvature / CURVATURE_THRESHOLD)
+          const lineWidth = minWidth + (maxWidth - minWidth) * (0.2 + 0.8 * tCurvature)
+          ctx.beginPath()
+          ctx.lineWidth = lineWidth
+          ctx.strokeStyle = elevToRidgeColor(tElev)
+          ctx.moveTo(projected[j - 1].x, projected[j - 1].y)
+          // quadraticCurveTo to this point via midpoint
+          if (j + 1 < projected.length && projected[j + 1].y > -9000) {
+            const next = projected[j + 1]
+            ctx.quadraticCurveTo(pt.x, pt.y, (pt.x + next.x) / 2, (pt.y + next.y) / 2)
+          } else {
+            ctx.lineTo(pt.x, pt.y)
+          }
+        } else if (j + 1 < projected.length && projected[j + 1].y > -9000) {
+          // Smooth curve: control=current, end=midpoint to next
+          const next = projected[j + 1]
+          ctx.quadraticCurveTo(pt.x, pt.y, (pt.x + next.x) / 2, (pt.y + next.y) / 2)
         } else {
-          ctx.lineTo(pos.x, clampedY)
+          // Last valid point or next is invalid: line to exact position
+          ctx.lineTo(pt.x, pt.y)
         }
       }
       if (pathStarted) ctx.stroke()
@@ -1547,87 +1616,102 @@ function renderTerrain(
       }
     }
 
-    // ── Ridgeline stroke — continuous paths with periodic color updates ──
-    // Distance-proximity gating: break path when adjacent columns jump to a
-    // different depth (same fix that prevents contour strand jumping).
-    // Ratio threshold: if dist changes by more than 2× between columns, break.
+    // ── Ridgeline stroke — subsampled quadratic curves with curvature tapering ─
+    // Subsample every 3 pixels, connect with quadraticCurveTo for smooth
+    // flowing curves. Break path on screen-Y jumps >40px (different ridgeline).
+    // Line width driven by curvature: sharp peaks = thick, flat = nearly invisible.
     if (hasVisiblePixels && showBandLines) {
-      ctx.lineCap = 'butt'
+      ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
-      let segStartCol = -1
-      let prevDist = 0
+      const SUBSAMPLE = 3
+      const BAND_CURV_THRESHOLD = 0.003
+      // Per-band max width: near bands thicker than far
+      const bandMaxWidth = style.lineWidthNear
+      const bandMinWidth = 0.1
 
-      for (let col = 0; col < W; col++) {
+      interface RidgePt { col: number; y: number; elev: number; dist: number; curvature: number; angle: number }
+      const pts: RidgePt[] = []
+
+      // Collect subsampled points
+      for (let col = 0; col < W; col += SUBSAMPLE) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
         const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
-
         if (angle <= -Math.PI / 2 + 0.001) {
-          if (segStartCol >= 0) ctx.stroke()
-          segStartCol = -1
-          prevDist = 0
+          pts.push({ col, y: -9999, elev: 0, dist: 0, curvature: 0, angle: 0 })
           continue
         }
-
         const { y } = project(bearingDeg, angle, cam)
-        const screenY = Math.round(y)
-
-        if (screenY >= H) {
-          if (segStartCol >= 0) ctx.stroke()
-          segStartCol = -1
-          prevDist = 0
+        if (y >= H) {
+          pts.push({ col, y: -9999, elev: 0, dist: 0, curvature: 0, angle: 0 })
           continue
         }
-
-        const clampedY = Math.max(0, screenY)
+        const clampedY = Math.max(0, y)
+        const elev = bandElevAt(skyline, bi, bearingDeg)
         const dist = bandDistAt(skyline, bi, bearingDeg)
-
-        // Distance jump detection: break path if depth changes drastically
-        // between adjacent columns (prevents lines connecting unrelated terrain)
-        if (segStartCol >= 0 && prevDist > 0 && dist > 0) {
-          const ratio = dist > prevDist ? dist / prevDist : prevDist / dist
-          if (ratio > 2.0) {
-            ctx.stroke()
-            segStartCol = -1
-          }
-        }
-
-        if (segStartCol < 0) {
-          // Start a new segment — compute color + distance-based line width
-          const elev = bandElevAt(skyline, bi, bearingDeg)
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange
-            : 0.5
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
-          ctx.beginPath()
-          ctx.strokeStyle = elevToRidgeColor(tElev)
-          ctx.moveTo(col, clampedY)
-          segStartCol = col
-        } else if (col - segStartCol >= segSize) {
-          // Flush current segment, start new one with updated color + width.
-          ctx.lineTo(col, clampedY)
-          ctx.stroke()
-
-          const elev = bandElevAt(skyline, bi, bearingDeg)
-          const tElev = hasElevRange && elev > -Infinity
-            ? (elev - globalElevMin) / elevRange
-            : 0.5
-          const tDist = lwRange > 0 ? Math.max(0, Math.min(1, (dist - lwMin) / lwRange)) : 0
-          ctx.lineWidth = style.lineWidthNear + tDist * (style.lineWidthFar - style.lineWidthNear)
-          ctx.beginPath()
-          ctx.strokeStyle = elevToRidgeColor(tElev)
-          ctx.moveTo(col, clampedY)
-          segStartCol = col
-        } else {
-          ctx.lineTo(col, clampedY)
-        }
-
-        prevDist = dist
+        pts.push({ col, y: clampedY, elev, dist, curvature: 0, angle })
       }
 
-      // Flush final segment
-      if (segStartCol >= 0) ctx.stroke()
+      // Compute curvature (second derivative of angle) per valid point
+      for (let i = 1; i < pts.length - 1; i++) {
+        if (pts[i].y > -9000 && pts[i - 1].y > -9000 && pts[i + 1].y > -9000) {
+          pts[i].curvature = Math.abs(pts[i + 1].angle - 2 * pts[i].angle + pts[i - 1].angle)
+        }
+      }
+
+      // Draw runs of valid points as smooth curves
+      let runStart = -1
+      for (let i = 0; i <= pts.length; i++) {
+        const invalid = i >= pts.length || pts[i].y < -9000
+        const jumpBreak = !invalid && runStart >= 0 && i > runStart &&
+          Math.abs(pts[i].y - pts[i - 1].y) > 40
+
+        if (invalid || jumpBreak) {
+          if (runStart >= 0 && i - runStart >= 2) {
+            const runEnd = i
+            // Initial color from first point
+            const firstPt = pts[runStart]
+            const tElev0 = hasElevRange && firstPt.elev > -Infinity
+              ? (firstPt.elev - globalElevMin) / elevRange : 0.5
+            const tCurv0 = Math.min(1, firstPt.curvature / BAND_CURV_THRESHOLD)
+            ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.2 + 0.8 * tCurv0)
+            ctx.strokeStyle = elevToRidgeColor(tElev0)
+            ctx.beginPath()
+            ctx.moveTo(firstPt.col, firstPt.y)
+
+            for (let j = runStart + 1; j < runEnd; j++) {
+              const prev = pts[j - 1]
+              const curr = pts[j]
+              // Update color/width at segment boundaries
+              if ((j - runStart) % segSize === 0 && j + 1 < runEnd) {
+                ctx.stroke()
+                const tE = hasElevRange && curr.elev > -Infinity
+                  ? (curr.elev - globalElevMin) / elevRange : 0.5
+                const tC = Math.min(1, curr.curvature / BAND_CURV_THRESHOLD)
+                ctx.lineWidth = bandMinWidth + (bandMaxWidth - bandMinWidth) * (0.2 + 0.8 * tC)
+                ctx.strokeStyle = elevToRidgeColor(tE)
+                ctx.beginPath()
+                ctx.moveTo(prev.col, prev.y)
+              }
+              if (j + 1 < runEnd) {
+                const next = pts[j + 1]
+                const midX = (curr.col + next.col) / 2
+                const midY = (curr.y + next.y) / 2
+                ctx.quadraticCurveTo(curr.col, curr.y, midX, midY)
+              } else {
+                ctx.lineTo(curr.col, curr.y)
+              }
+            }
+            ctx.stroke()
+          }
+          runStart = jumpBreak ? i : -1
+          if (jumpBreak) continue
+        }
+
+        if (!invalid && runStart < 0) {
+          runStart = i
+        }
+      }
     }
   }
 }
