@@ -580,14 +580,20 @@ let _glowDiagCount = 0
 /**
  * Render a glow/light-catching effect behind silhouette strands.
  *
- * Each silhouette strand gets a canvas shadow that simulates ridge light.
- * Glow intensity driven by prominence × angle × distance:
- *   - Prominence (peakAngle - baseAngle): dramatic ridges glow brightest
+ * Multi-pass thick-line approach: draws 3 progressively narrower/brighter
+ * strokes per strand, replacing Canvas shadowBlur (which spreads too thin
+ * on sub-2px lines to be visible).
+ *
+ * Asymmetric Y offset per pass:
+ *   - Sky side (upward): tighter, brighter passes → defined sky edge
+ *   - Terrain side (downward): wider, dimmer pass → diffused bleed
+ *
+ * Glow intensity driven by angle × distance × prominence(boost):
  *   - Angle: high ridgelines glow strong, flat terrain near threshold = zero
  *   - Distance: near = intense tight glow, far = subtle soft whisper
+ *   - Prominence (effElev - baseEffElev): 0.5–1.0 boost multiplier
  *
  * Called BEFORE renderSilhouetteStrokes so the crisp line draws on top.
- * Structured as a separate function for future asymmetric glow support.
  */
 function renderSilhouetteGlow(
   ctx: CanvasRenderingContext2D,
@@ -605,53 +611,90 @@ function renderSilhouetteGlow(
   const MIN_PEAK_ANGLE = -0.35
   const MAX_ANGLE_JUMP = 0.005
   const MIN_STRAND_SEGS = 8
+  const numAzimuths = silResolution * 360
+  const MAX_AZ_GAP = 4
 
   ctx.save()
   ctx.lineCap  = 'round'
   ctx.lineJoin = 'round'
 
-  for (const strand of strands) {
+  for (let si = 0; si < strands.length; si++) {
+    const strand = strands[si]
     const segs = strand.segments
     if (segs.length < MIN_STRAND_SEGS) continue
 
     const distT = Math.sqrt(Math.min(1, strand.avgDist / maxDist))
-
-    // Distance-based blur: log interpolation from near to far
-    // Near (<2km): GLOW_BLUR_NEAR, Far (400km): GLOW_BLUR_FAR
-    const blurT = Math.log10(1 + strand.avgDist / 200) / Math.log10(1 + maxDist / 200)
-    const baseShadowBlur = GLOW_BLUR_NEAR + (GLOW_BLUR_FAR - GLOW_BLUR_NEAR) * blurT
-
-    // Distance factor for glow intensity — small floor so far ridgelines aren't dark
     const tDistGlow = GLOW_DIST_FLOOR + (1 - GLOW_DIST_FLOOR) * (1 - distT)
 
-    // Line width (same formula as strokes for path alignment)
+    // Strand-level base width (midpoint of near/far range — glow is atmospheric,
+    // doesn't need curvature tapering)
     const maxWidth = 1.5 + (1 - distT) * 3.5
     const minWidth = 0.4 + (1 - distT) * 1.6
-    const CURVATURE_THRESHOLD = 0.008
+    const baseGlowWidth = (minWidth + maxWidth) * 0.5
 
-    const angles: number[] = segs.map(s => s.layer.peakAngle)
+    // Strand-level color from average elevation
+    const avgElev = segs.reduce((s, seg) => s + seg.layer.rawElev, 0) / segs.length
+    const tElev = hasElevRange
+      ? Math.max(0, Math.min(1, (avgElev - globalElevMin) / elevRange)) : 0.5
+    const baseColor = elevToRidgeColor(tElev)
+    const rgbMatch = baseColor.match(/\d+/g)
+    const gr = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[0]) * 0.9 + 40)) : 140
+    const gg = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[1]) * 0.9 + 30)) : 190
+    const gb = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[2]) * 0.95 + 50)) : 220
 
-    // [GLOW-DIAG] Log first 5 strands — strand-level metrics
-    const diagThisStrand = _glowDiagCount < 5
-    if (diagThisStrand) {
+    // Strand-level tGlow from average peakAngle + average prominence
+    const avgPeakAngle = segs.reduce((s, seg) => s + seg.layer.peakAngle, 0) / segs.length
+    let promSum = 0
+    for (const seg of segs) {
+      const hasBase = Math.abs(seg.layer.baseAngle - (-Math.PI / 2)) > 0.01
+      promSum += hasBase
+        ? Math.max(0, seg.layer.effElev - seg.layer.baseEffElev)
+        : GLOW_PROMINENCE_SCALE
+    }
+    const avgProm = promSum / segs.length
+    const tProminence = Math.min(1, Math.max(0, avgProm / GLOW_PROMINENCE_SCALE))
+    const tAngle = Math.max(0, Math.min(1,
+      (avgPeakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
+    const tGlow = tAngle * tDistGlow * (0.5 + 0.5 * tProminence)
+
+    if (tGlow < 0.01) continue
+
+    const glowAlpha = tGlow * GLOW_MAX_ALPHA
+
+    // Asymmetric Y offset: sky (up) gets tight bright passes, terrain (down) gets diffused bleed.
+    // Scales with distance so offset is proportional at all depths.
+    const baseOffset = 2 + (1 - distT) * 2  // near: 4px, far: 2px
+
+    // Glow passes: drawn wide→narrow so narrower overlays wider.
+    // Y offset: negative = sky (up), positive = terrain (down).
+    const passes = [
+      { widthMul: 6,   alphaMul: 0.10, yOff: +baseOffset },        // terrain bleed (wide, dim, down)
+      { widthMul: 3,   alphaMul: 0.22, yOff: -baseOffset * 0.7 },  // sky halo (medium, brighter, up)
+      { widthMul: 1.5, alphaMul: 0.45, yOff: -baseOffset * 0.3 },  // sky core (tight, brightest, slight up)
+    ]
+
+    // [GLOW-DIAG] Log first 3 strands (far) + last 2 (near) — shows full distance range
+    const diagThis = _glowDiagCount < 3 || (si >= strands.length - 2 && _glowDiagCount < 5)
+    if (diagThis) {
       console.log(
-        `[GLOW-DIAG] Strand ${_glowDiagCount + 1}/${strands.length}:` +
+        `[GLOW-DIAG] Strand ${si + 1}/${strands.length}:` +
         ` segs=${segs.length}, avgDist=${(strand.avgDist / 1000).toFixed(1)}km,` +
-        ` distT=${distT.toFixed(3)}, tDistGlow=${tDistGlow.toFixed(3)}, blur=${baseShadowBlur.toFixed(1)}px`
+        ` distT=${distT.toFixed(3)}, baseWidth=${baseGlowWidth.toFixed(1)}px,` +
+        ` passes=[${passes.map(p => (baseGlowWidth * p.widthMul).toFixed(1) + 'px').join(', ')}],` +
+        ` offset=${baseOffset.toFixed(1)}px, tGlow=${tGlow.toFixed(3)},` +
+        ` glowAlpha=${glowAlpha.toFixed(3)}, color=rgb(${gr},${gg},${gb})`
       )
       _glowDiagCount++
     }
 
     // Build runs (same azimuth-gap logic as strokes)
-    const numAzimuths = silResolution * 360
-    const MAX_AZ_GAP_FOR_STROKE = 4
     const runs: Array<{ start: number; end: number }> = []
     let runStart = 0
     for (let i = 1; i < segs.length; i++) {
       const prevAi = segs[i - 1].ai
       const currAi = segs[i].ai
       const gap = currAi >= prevAi ? currAi - prevAi : (numAzimuths - prevAi + currAi)
-      if (gap > MAX_AZ_GAP_FOR_STROKE) {
+      if (gap > MAX_AZ_GAP) {
         if (i - runStart >= 3) runs.push({ start: runStart, end: i })
         runStart = i
       }
@@ -659,149 +702,66 @@ function renderSilhouetteGlow(
     if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
 
     for (const run of runs) {
-      // Project points with same angle continuity check as strokes
-      interface GlowPt {
-        x: number; y: number; rawElev: number; curvature: number
-        prominence: number; peakAngle: number
-      }
-      const projected: GlowPt[] = []
+      // Project points — angle continuity check keeps the path smooth
+      const projected: Array<{ x: number; y: number }> = []
       let prevPeakAngle = -999
 
       for (let i = run.start; i < run.end; i++) {
         const { ai, layer } = segs[i]
         if (layer.peakAngle < MIN_PEAK_ANGLE) {
-          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0, prominence: 0, peakAngle: 0 })
+          projected.push({ x: 0, y: -9999 })
           prevPeakAngle = -999
           continue
         }
         if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
-          projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0, prominence: 0, peakAngle: 0 })
+          projected.push({ x: 0, y: -9999 })
           prevPeakAngle = layer.peakAngle
           continue
         }
         const bearing = ai / silResolution
         const pos = project(bearing, layer.peakAngle, cam)
-        const clampedY = Math.max(0, Math.min(H, pos.y))
-        let curvature = 0
-        if (i > run.start && i < run.end - 1) {
-          curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1])
-        }
-
-        // Prominence: elevation of ridge above its valley floor.
-        // Using effElev - baseEffElev avoids the angle-based formula going negative
-        // for sub-horizon terrain (where peakAngle < baseAngle was a false negative).
-        // When baseAngle = -PI/2 (no prior valley floor — first visible layer), treat as
-        // fully prominent so the nearest ridge always glows at full intensity.
-        const hasValidBase = Math.abs(layer.baseAngle - (-Math.PI / 2)) > 0.01
-        const prominence = hasValidBase
-          ? Math.max(0, layer.effElev - layer.baseEffElev)
-          : GLOW_PROMINENCE_SCALE  // no prior valley = first visible layer = full prominence
-
         if (pos.y >= H) {
-          projected.push({ x: pos.x, y: -9999, rawElev: 0, curvature: 0, prominence: 0, peakAngle: 0 })
+          projected.push({ x: pos.x, y: -9999 })
         } else {
-          // [GLOW-DIAG] Log first 3 valid points of each diagnosed strand
-          if (diagThisStrand && projected.length < 3) {
-            const tP = Math.min(1, prominence / GLOW_PROMINENCE_SCALE)
-            const tA = Math.max(0, Math.min(1, (layer.peakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
-            const tG = tA * tDistGlow * (0.5 + 0.5 * tP)
-            console.log(
-              `  [GLOW-DIAG] Pt${projected.length}: angle=${layer.peakAngle.toFixed(3)}rad,` +
-              ` eff=${layer.effElev.toFixed(0)}m, base=${layer.baseEffElev.toFixed(0)}m,` +
-              ` prom=${prominence.toFixed(1)}m, hasBase=${hasValidBase},` +
-              ` tProm=${tP.toFixed(3)}, tAngle=${tA.toFixed(3)}, tGlow=${tG.toFixed(3)}`
-            )
-          }
-          projected.push({ x: pos.x, y: clampedY, rawElev: layer.rawElev, curvature, prominence, peakAngle: layer.peakAngle })
+          projected.push({ x: pos.x, y: Math.max(0, Math.min(H, pos.y)) })
         }
         prevPeakAngle = layer.peakAngle
       }
 
-      // Draw glow pass — same curve path as strokes but with shadow enabled
-      let pathStarted = false
-      const SEG_SIZE = 8
+      // Draw 3 glow passes over the same projected path
+      for (const pass of passes) {
+        const passWidth = baseGlowWidth * pass.widthMul
+        const passAlpha = glowAlpha * pass.alphaMul
 
-      for (let j = 0; j < projected.length; j++) {
-        const pt = projected[j]
-        if (pt.y < -9000) {
-          if (pathStarted) { ctx.stroke(); pathStarted = false }
-          continue
-        }
+        ctx.lineWidth = passWidth
+        ctx.strokeStyle = `rgba(${gr},${gg},${gb},${passAlpha.toFixed(3)})`
+        ctx.beginPath()
+        let started = false
 
-        // Compute per-point glow intensity.
-        // Prominence is a boost multiplier (0.5–1.0) — low-prominence terrain still gets
-        // 50% glow. Angle and distance are the primary gates.
-        const tProminence = Math.min(1, Math.max(0, pt.prominence / GLOW_PROMINENCE_SCALE))
-        const tAngle = Math.max(0, Math.min(1,
-          (pt.peakAngle - GLOW_ANGLE_ZERO) / (GLOW_ANGLE_FULL - GLOW_ANGLE_ZERO)))
-        const tGlow = tAngle * tDistGlow * (0.5 + 0.5 * tProminence)
-
-        // Skip shadow only when angle puts it fully below glow threshold (tAngle = 0)
-        if (tGlow < 0.01) {
-          if (pathStarted) { ctx.stroke(); pathStarted = false }
-          continue
-        }
-
-        // Glow color — elevation palette shifted bluer/brighter
-        const tElev = hasElevRange && pt.rawElev > 0
-          ? Math.max(0, Math.min(1, (pt.rawElev - globalElevMin) / elevRange)) : 0.5
-        const baseColor = elevToRidgeColor(tElev)
-        const rgbMatch = baseColor.match(/\d+/g)
-        const gr = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[0]) * 0.9 + 40)) : 140
-        const gg = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[1]) * 0.9 + 30)) : 190
-        const gb = rgbMatch ? Math.min(255, Math.round(parseInt(rgbMatch[2]) * 0.95 + 50)) : 220
-        const glowAlpha = tGlow * GLOW_MAX_ALPHA
-
-        // Blur: tight at high angle (peaks), diffused at low angle
-        // Modulated by the distance-based baseShadowBlur
-        const shadowBlur = baseShadowBlur * (0.3 + 0.7 * tAngle)
-
-        // Curvature-based width (same as strokes)
-        const tCurvature = Math.min(1, pt.curvature / CURVATURE_THRESHOLD)
-        const lineWidth = minWidth + (maxWidth - minWidth) * (0.2 + 0.8 * tCurvature)
-
-        if (!pathStarted) {
-          ctx.beginPath()
-          ctx.lineWidth = lineWidth
-          ctx.strokeStyle = `rgba(${gr},${gg},${gb},${(glowAlpha * 0.4).toFixed(3)})`
-          ctx.shadowColor = `rgba(${gr},${gg},${gb},${glowAlpha.toFixed(3)})`
-          ctx.shadowBlur = shadowBlur
-          ctx.shadowOffsetX = 0
-          ctx.shadowOffsetY = 0
-          ctx.globalAlpha = 1.0
-          ctx.moveTo(pt.x, pt.y)
-          pathStarted = true
-        } else if (j % SEG_SIZE === 0) {
-          ctx.stroke()
-          ctx.beginPath()
-          ctx.lineWidth = lineWidth
-          ctx.strokeStyle = `rgba(${gr},${gg},${gb},${(glowAlpha * 0.4).toFixed(3)})`
-          ctx.shadowColor = `rgba(${gr},${gg},${gb},${glowAlpha.toFixed(3)})`
-          ctx.shadowBlur = shadowBlur
-          ctx.moveTo(projected[j - 1].x, projected[j - 1].y)
-          if (j + 1 < projected.length && projected[j + 1].y > -9000) {
-            const next = projected[j + 1]
-            ctx.quadraticCurveTo(pt.x, pt.y, (pt.x + next.x) / 2, (pt.y + next.y) / 2)
-          } else {
-            ctx.lineTo(pt.x, pt.y)
+        for (let j = 0; j < projected.length; j++) {
+          const pt = projected[j]
+          if (pt.y < -9000) {
+            if (started) { ctx.stroke(); ctx.beginPath(); started = false }
+            continue
           }
-        } else if (j + 1 < projected.length && projected[j + 1].y > -9000) {
-          const next = projected[j + 1]
-          ctx.quadraticCurveTo(pt.x, pt.y, (pt.x + next.x) / 2, (pt.y + next.y) / 2)
-        } else {
-          ctx.lineTo(pt.x, pt.y)
+
+          const yShifted = pt.y + pass.yOff
+
+          if (!started) {
+            ctx.moveTo(pt.x, yShifted)
+            started = true
+          } else if (j + 1 < projected.length && projected[j + 1].y > -9000) {
+            const next = projected[j + 1]
+            ctx.quadraticCurveTo(pt.x, yShifted, (pt.x + next.x) / 2, (yShifted + next.y + pass.yOff) / 2)
+          } else {
+            ctx.lineTo(pt.x, yShifted)
+          }
         }
+        if (started) ctx.stroke()
       }
-      if (pathStarted) ctx.stroke()
     }
   }
 
-  // Reset shadow state
-  ctx.shadowColor = 'transparent'
-  ctx.shadowBlur = 0
-  ctx.shadowOffsetX = 0
-  ctx.shadowOffsetY = 0
-  ctx.globalAlpha = 1.0
   ctx.restore()
 }
 
