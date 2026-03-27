@@ -48,7 +48,7 @@ export type DataResolution = '10m' | '30m' | '90m'
  * Higher values stretch Y so mountains appear taller than they really are.
  * Only verticalExaggeration ever modifies the Y (elevation) axis — nothing else.
  */
-export type VerticalExaggeration = 1 | 1.5 | 2 | 4 | 10 | 20
+export type VerticalExaggeration = 1 | 1.5 | 2 | 4
 
 // ─── Location ─────────────────────────────────────────────────────────────────
 

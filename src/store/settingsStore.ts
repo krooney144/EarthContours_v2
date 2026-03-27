@@ -273,7 +273,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'earthcontours-settings',      // localStorage key
-      version: 7,                          // bump when persisted shape changes
+      version: 8,                          // bump when persisted shape changes
       /**
        * Migrations:
        * v1→v2: snap old verticalExaggeration values to new set (1|2|4|10|20).
@@ -283,17 +283,25 @@ export const useSettingsStore = create<SettingsStore>()(
        * v5→v6: fix showFill/showBandLines defaults — v4 wrongly set them to false,
        *        making terrain invisible for existing users.
        * v6→v7: replace solidTerrain (unused) with showSilhouetteLines.
+       * v7→v8: cap verticalExaggeration at 4× (removed 10× and 20×).
        */
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = persisted as Record<string, unknown>
         if (fromVersion < 2 && typeof state.verticalExaggeration === 'number') {
-          const VALID: VerticalExaggeration[] = [1, 1.5, 2, 4, 10, 20]
+          const VALID: VerticalExaggeration[] = [1, 1.5, 2, 4]
           const old = state.verticalExaggeration as number
           const snapped = VALID.reduce((best, v) =>
             Math.abs(v - old) < Math.abs(best - old) ? v : best
           )
           log.info('Migrating verticalExaggeration', { from: old, to: snapped })
           state.verticalExaggeration = snapped
+        }
+        if (fromVersion < 8 && typeof state.verticalExaggeration === 'number') {
+          // Clamp 10× and 20× down to 4× max
+          if (state.verticalExaggeration > 4) {
+            log.info('Migrating verticalExaggeration v7→v8: capping to 4×', { from: state.verticalExaggeration })
+            state.verticalExaggeration = 4
+          }
         }
         if (fromVersion < 7) {
           log.info('Migrating settings v6→v7: replace solidTerrain with showSilhouetteLines')

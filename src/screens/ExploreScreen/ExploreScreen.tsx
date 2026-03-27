@@ -283,7 +283,7 @@ const ExploreScreen: React.FC = () => {
 
       const distDelta = dist - lastPinchDistRef.current
       if (Math.abs(distDelta) > 0.5) {
-        applyOrbitZoom(distDelta > 0 ? -0.4 : 0.4)
+        applyOrbitZoom(distDelta > 0 ? -0.2 : 0.2)
         lastPinchDistRef.current = dist
       }
 
@@ -293,7 +293,9 @@ const ExploreScreen: React.FC = () => {
         lastPinchAngleRef.current = angle
       }
 
-      applyOrbitPan(e.clientX - prev.x, e.clientY - prev.y)
+      // Dampen 2-finger pan for touch — raw deltas move terrain too fast
+      const panDamping = e.pointerType === 'touch' ? 0.5 : 1
+      applyOrbitPan((e.clientX - prev.x) * panDamping, (e.clientY - prev.y) * panDamping)
     } else {
       const deltaX = e.clientX - prev.x
       const deltaY = e.clientY - prev.y
@@ -388,13 +390,11 @@ const ExploreScreen: React.FC = () => {
 
   // ── Exaggeration options for inline selector ────────────────────────────
 
-  const EXAG_OPTIONS: Array<{ value: 1 | 1.5 | 2 | 4 | 10 | 20; label: string }> = [
+  const EXAG_OPTIONS: Array<{ value: 1 | 1.5 | 2 | 4; label: string }> = [
     { value: 1,   label: '1x'   },
     { value: 1.5, label: '1.5x' },
     { value: 2,   label: '2x'   },
     { value: 4,   label: '4x'   },
-    { value: 10,  label: '10x'  },
-    { value: 20,  label: '20x'  },
   ]
 
   return (
