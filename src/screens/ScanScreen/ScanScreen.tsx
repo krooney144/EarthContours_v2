@@ -362,11 +362,11 @@ function matchSilhouetteStrands(
 ): SilhouetteStrand[] {
   const { heading_deg, hfov, W } = cam
 
-  // Minimum peakAngle — pitch-relative so silhouettes appear further down
-  // the screen when looking down (higher AGL / steeper pitch). Moves with
-  // camera pitch so the threshold is always relative to the viewing angle.
-  const pitchRad = cam.pitch_deg * (Math.PI / 180)
-  const MIN_PEAK_ANGLE = pitchRad - 0.15  // ~-8.6° below camera pitch
+  // Minimum peakAngle — fixed relative to horizon. AGL is already baked into
+  // peakAngle by buildSilhouetteLayers (atan2(effElev - viewerElev, dist)).
+  // Camera pitch only affects where on screen things are drawn, not whether
+  // silhouette lines exist. Same mountain at same AGL = same silhouettes.
+  const MIN_PEAK_ANGLE = -0.15  // ~-8.6° below horizon
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -591,9 +591,8 @@ function renderSilhouetteStrokes(
 
   const MIN_STRAND_SEGS = 4   // Show more terrain detail — fewer discarded strands
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
-  // Pitch-relative min angle — same formula as matching
-  const pitchRad = cam.pitch_deg * (Math.PI / 180)
-  const MIN_PEAK_ANGLE = pitchRad - 0.15
+  // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
+  const MIN_PEAK_ANGLE = -0.15
 
   for (const strand of strands) {
     const segs = strand.segments
