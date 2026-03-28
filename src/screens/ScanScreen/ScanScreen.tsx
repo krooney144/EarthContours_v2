@@ -2365,85 +2365,199 @@ function drawScanCanvas(
   if (debugSilhouette && silhouetteLayers && silRes > 0) {
     const numSilAz = silRes * 360
 
-    // ── Console diagnostics (throttled — once per 60 frames) ──
+    // ── Console diagnostics (throttled — once per 120 frames) ──
     if (!_silDbgCount) _silDbgCount = 0
     _silDbgCount++
-    if (_silDbgCount % 60 === 1) {
-      // Scan visible azimuths for coverage stats
-      const bearingStart = cam.heading_deg - cam.hfov * 0.5
-      const bearingEnd   = cam.heading_deg + cam.hfov * 0.5
-      let emptyAz = 0, totalAz = 0, totalLayers = 0
-      let maxLayers = 0, onlyOneLayers = 0
-      const gapRuns: number[] = []  // lengths of consecutive empty-azimuth runs
-      let currentGap = 0
+    if (_silDbgCount % 120 === 1) {
+
+      // ── NEW: Adjacent azimuth mismatch analysis ──
+      // For each pair of adjacent screen columns that map to DIFFERENT silhouette
+      // azimuths, compare the topmost layer's peakAngle. Large jumps = visual gaps.
+      const mismatches: Array<{
+        col: number; bearing: number;
+        ai1: number; ai2: number;
+        top1: number; top2: number;  // peakAngle of topmost layer (radians)
+        y1: number; y2: number;      // screen Y of topmost peak
+        layers1: number; layers2: number;
+        topDist1: number; topDist2: number;
+      }> = []
+
+      let prevAi = -1
+      let prevTopAngle = -Math.PI / 2
+      let prevTopY = H
+      let prevLayers = 0
+      let prevTopDist = 0
 
       for (let col = 0; col < W; col++) {
         const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
         const normBearing = ((bearingDeg % 360) + 360) % 360
         const ai = Math.round(normBearing * silRes) % numSilAz
         const azLayers = silhouetteLayers[ai]
-        totalAz++
-        const count = azLayers?.length ?? 0
-        totalLayers += count
-        if (count > maxLayers) maxLayers = count
-        if (count === 0) { emptyAz++; currentGap++ }
-        else {
-          if (currentGap > 0) gapRuns.push(currentGap)
-          currentGap = 0
-          if (count === 1) onlyOneLayers++
+        const nLayers = azLayers?.length ?? 0
+
+        // Get topmost layer (last in array — layers sorted near→far, each higher than prev)
+        let topAngle = -Math.PI / 2
+        let topDist = 0
+        if (azLayers && nLayers > 0) {
+          const topLayer = azLayers[nLayers - 1]
+          topAngle = topLayer.peakAngle
+          topDist = topLayer.dist
         }
-      }
-      if (currentGap > 0) gapRuns.push(currentGap)
+        const { y: topY } = project(bearingDeg, topAngle, cam)
 
-      // Sort gap runs descending to show worst offenders
-      gapRuns.sort((a, b) => b - a)
-      const top5Gaps = gapRuns.slice(0, 10)
-
-      console.log(
-        `[SIL-DEBUG] Visible range: ${bearingStart.toFixed(1)}°–${bearingEnd.toFixed(1)}° (${totalAz} cols)\n` +
-        `  Empty azimuths: ${emptyAz}/${totalAz} (${(100*emptyAz/totalAz).toFixed(1)}%)\n` +
-        `  Avg layers/az: ${(totalLayers/totalAz).toFixed(1)}, max: ${maxLayers}\n` +
-        `  Single-layer azimuths: ${onlyOneLayers}\n` +
-        `  Gap runs (top 10 by size, in cols): [${top5Gaps.join(', ')}]\n` +
-        `  Total gap runs: ${gapRuns.length}`
-      )
-
-      // Sample 5 empty azimuths and log their raw candidate data
-      let sampledEmpty = 0
-      for (let col = 0; col < W && sampledEmpty < 5; col += Math.floor(W / 20)) {
-        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-        const normBearing = ((bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silRes) % numSilAz
-        const azLayers = silhouetteLayers[ai]
-        if (azLayers && azLayers.length === 0) {
-          // Check raw candidate count from the skyline data
-          const sil = skylineData?.silhouette
-          const rawStart = sil?.candidateOffsets[ai] ?? 0
-          const rawEnd   = sil?.candidateOffsets[ai + 1] ?? 0
-          const rawCount = (rawEnd - rawStart) / 8
-          console.log(
-            `[SIL-DEBUG] Empty azimuth: ai=${ai} bearing=${normBearing.toFixed(2)}° ` +
-            `rawCandidates=${rawCount} (offsets ${rawStart}–${rawEnd})`
-          )
-          sampledEmpty++
+        if (ai !== prevAi && prevAi >= 0) {
+          const yDiff = Math.abs(topY - prevTopY)
+          // Log mismatches where screen Y jumps by >20px between adjacent sil azimuths
+          if (yDiff > 20) {
+            mismatches.push({
+              col, bearing: normBearing,
+              ai1: prevAi, ai2: ai,
+              top1: prevTopAngle, top2: topAngle,
+              y1: prevTopY, y2: topY,
+              layers1: prevLayers, layers2: nLayers,
+              topDist1: prevTopDist, topDist2: topDist,
+            })
+          }
         }
+
+        prevAi = ai
+        prevTopAngle = topAngle
+        prevTopY = topY
+        prevLayers = nLayers
+        prevTopDist = topDist
       }
 
-      // Sample a few populated azimuths to see what layers look like
-      let sampledFull = 0
-      for (let col = 0; col < W && sampledFull < 3; col += Math.floor(W / 10)) {
-        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
-        const normBearing = ((bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silRes) % numSilAz
-        const azLayers = silhouetteLayers[ai]
-        if (azLayers && azLayers.length >= 3) {
+      console.log(`[SIL-DEBUG] Adjacent azimuth mismatches (topmost peak Y jump >20px): ${mismatches.length}`)
+      // Show top 10 worst mismatches
+      mismatches.sort((a, b) => Math.abs(b.y1 - b.y2) - Math.abs(a.y1 - a.y2))
+      for (const m of mismatches.slice(0, 10)) {
+        console.log(
+          `  col=${m.col} bearing=${m.bearing.toFixed(2)}° ` +
+          `ai ${m.ai1}→${m.ai2}: ` +
+          `topPeak ${(m.top1*180/Math.PI).toFixed(3)}°→${(m.top2*180/Math.PI).toFixed(3)}° ` +
+          `screenY ${m.y1.toFixed(0)}→${m.y2.toFixed(0)} (Δ${Math.abs(m.y1-m.y2).toFixed(0)}px) ` +
+          `layers ${m.layers1}→${m.layers2} ` +
+          `topDist ${(m.topDist1/1000).toFixed(1)}→${(m.topDist2/1000).toFixed(1)}km`
+        )
+      }
+
+      // ── NEW: Compare silhouette topmost peak vs band ridgeline ──
+      // The band ridgeline is continuous (every azimuth). The silhouette top peak
+      // should match or exceed it. Where the band ridgeline is ABOVE the sil top
+      // peak, contour lines will leak through.
+      if (skylineData) {
+        let mismatchCount = 0
+        let totalChecked = 0
+        const worstBandMismatches: Array<{
+          col: number; bearing: number; bandIdx: number;
+          bandAngle: number; silTopAngle: number;
+          bandY: number; silTopY: number;
+          bandDist: number; silTopDist: number;
+        }> = []
+
+        for (let col = 0; col < W; col += 4) {
+          const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+          const normBearing = ((bearingDeg % 360) + 360) % 360
+          const ai = Math.round(normBearing * silRes) % numSilAz
+          const azLayers = silhouetteLayers[ai]
+          const nLayers = azLayers?.length ?? 0
+          let silTopAngle = -Math.PI / 2
+          let silTopDist = 0
+          if (azLayers && nLayers > 0) {
+            silTopAngle = azLayers[nLayers - 1].peakAngle
+            silTopDist = azLayers[nLayers - 1].dist
+          }
+
+          // Check each band's ridgeline angle
+          for (let bi = 0; bi < skylineData.bands.length; bi++) {
+            const bAngle = bandAngleAt(skylineData, bi, bearingDeg, projectedBands)
+            if (bAngle <= -Math.PI / 2 + 0.001) continue
+            totalChecked++
+
+            // Band ridgeline is ABOVE silhouette top peak — contours here will leak
+            if (bAngle > silTopAngle + 0.002) {  // 0.002 rad ≈ 0.11° tolerance
+              mismatchCount++
+              const bandDist = bandDistAt(skylineData, bi, bearingDeg)
+              const { y: bandY } = project(bearingDeg, bAngle, cam)
+              const { y: silTopY } = project(bearingDeg, silTopAngle, cam)
+              if (worstBandMismatches.length < 200) {
+                worstBandMismatches.push({
+                  col, bearing: normBearing, bandIdx: bi,
+                  bandAngle: bAngle, silTopAngle,
+                  bandY, silTopY,
+                  bandDist: bandDist, silTopDist,
+                })
+              }
+            }
+          }
+        }
+
+        console.log(
+          `[SIL-DEBUG] Band vs silhouette coverage:\n` +
+          `  Band ridgeline ABOVE sil top peak: ${mismatchCount}/${totalChecked} (${(100*mismatchCount/totalChecked).toFixed(1)}%)`
+        )
+        // Show worst 10
+        worstBandMismatches.sort((a, b) =>
+          (b.bandAngle - b.silTopAngle) - (a.bandAngle - a.silTopAngle)
+        )
+        for (const m of worstBandMismatches.slice(0, 10)) {
           console.log(
-            `[SIL-DEBUG] Populated azimuth: ai=${ai} bearing=${normBearing.toFixed(2)}° layers=${azLayers.length}\n` +
-            azLayers.map((l, i) =>
-              `  L${i}: dist=${(l.dist/1000).toFixed(1)}km peak=${(l.peakAngle*180/Math.PI).toFixed(2)}° base=${(l.baseAngle*180/Math.PI).toFixed(2)}° elev=${l.rawElev.toFixed(0)}m`
-            ).join('\n')
+            `  col=${m.col} bearing=${m.bearing.toFixed(2)}° band${m.bandIdx}: ` +
+            `bandAngle=${(m.bandAngle*180/Math.PI).toFixed(3)}° silTop=${(m.silTopAngle*180/Math.PI).toFixed(3)}° ` +
+            `Δ=${((m.bandAngle-m.silTopAngle)*180/Math.PI).toFixed(3)}° ` +
+            `bandY=${m.bandY.toFixed(0)} silTopY=${m.silTopY.toFixed(0)} ` +
+            `bandDist=${(m.bandDist/1000).toFixed(1)}km silTopDist=${(m.silTopDist/1000).toFixed(1)}km`
           )
-          sampledFull++
+        }
+
+        // ── NEW: Contour occlusion miss analysis ──
+        // For each visible contour strand point, check if it would be occluded
+        // by the silhouette layers AND by the band ridgeline. Log cases where
+        // the band says "below ridgeline" but silhouette says "not occluded".
+        if (contourStrands.length > 0) {
+          let contourTotal = 0, contourOccByBand = 0, contourOccBySil = 0, contourLeaks = 0
+          for (const strand of contourStrands) {
+            for (const pt of strand.points) {
+              const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
+              if (x < 0 || x > W || y < 0 || y > H) continue
+              contourTotal++
+
+              // Check band ridgeline occlusion (would fill cover this?)
+              const bi = strand.bandIdx
+              let bandOccludes = false
+              for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
+                const nearerAngle = bandAngleAt(skylineData, nearerBi, pt.bearingDeg, projectedBands)
+                if (nearerAngle > -Math.PI / 2 + 0.001) {
+                  const { y: nearerY } = project(pt.bearingDeg, nearerAngle, cam)
+                  if (y >= nearerY - 2) { bandOccludes = true; break }
+                }
+              }
+
+              // Check silhouette occlusion
+              const normB = ((pt.bearingDeg % 360) + 360) % 360
+              const sai = Math.round(normB * silRes) % numSilAz
+              const sLayers = silhouetteLayers[sai]
+              let silOccludes = false
+              if (sLayers) {
+                for (const layer of sLayers) {
+                  if (layer.dist >= pt.dist) break
+                  const silPeakY = project(pt.bearingDeg, layer.peakAngle, cam).y
+                  if (y >= silPeakY - 2) { silOccludes = true; break }
+                }
+              }
+
+              if (bandOccludes) contourOccByBand++
+              if (silOccludes) contourOccBySil++
+              if (bandOccludes && !silOccludes) contourLeaks++
+            }
+          }
+          console.log(
+            `[SIL-DEBUG] Contour occlusion analysis:\n` +
+            `  Total visible contour points: ${contourTotal}\n` +
+            `  Occluded by band ridgeline (fill): ${contourOccByBand} (${(100*contourOccByBand/contourTotal).toFixed(1)}%)\n` +
+            `  Occluded by silhouette layers: ${contourOccBySil} (${(100*contourOccBySil/contourTotal).toFixed(1)}%)\n` +
+            `  LEAKS (band says hidden, sil says visible): ${contourLeaks} (${(100*contourLeaks/contourTotal).toFixed(1)}%)`
+          )
         }
       }
     }
