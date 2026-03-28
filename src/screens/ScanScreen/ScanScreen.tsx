@@ -2370,7 +2370,7 @@ function drawScanCanvas(
   // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
   // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
   // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
-  const debugSilhouette = false
+  const debugSilhouette = true
   if (debugSilhouette && silhouetteLayers && silRes > 0) {
     const numSilAz = silRes * 360
 
