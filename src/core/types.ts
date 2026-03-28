@@ -243,6 +243,7 @@ export interface AppSettings {
 
   // Debug & Developer
   showDebugPanel: boolean
+  debugSilhouette: boolean
 
   // Data & Downloads
   downloadOnWifiOnly: boolean

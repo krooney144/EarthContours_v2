@@ -2277,6 +2277,7 @@ function drawScanCanvas(
   showContourLines: boolean = true,
   showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
+  debugSilhouette: boolean = false,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -2370,7 +2371,6 @@ function drawScanCanvas(
   // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
   // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
   // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
-  const debugSilhouette = true
   if (debugSilhouette && silhouetteLayers && silRes > 0) {
     const numSilAz = silRes * 360
 
@@ -2777,7 +2777,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng, mode, gpsLat, requestGPS, switchToGPS } = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode, debugSilhouette } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -3218,6 +3218,7 @@ const ScanScreen: React.FC = () => {
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
       showContourLines, showSilhouetteLines, darkMode,
+      debugSilhouette,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -3231,7 +3232,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
