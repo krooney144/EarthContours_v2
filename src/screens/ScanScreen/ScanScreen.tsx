@@ -2353,6 +2353,39 @@ function drawScanCanvas(
       silhouetteLayers, silRes, silElevMin, silElevMax)
   }
 
+  // ── DEBUG: Silhouette layer coverage overlay ────────────────────────────
+  // Draws the raw silhouette layer data per-azimuth to visualize coverage gaps.
+  // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
+  // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
+  // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
+  const debugSilhouette = false
+  if (debugSilhouette && silhouetteLayers && silRes > 0) {
+    const numSilAz = silRes * 360
+    ctx.save()
+    ctx.globalAlpha = 0.5
+    const layerColors = ['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#ff00ff', '#ffffff']
+
+    for (let col = 0; col < W; col += 1) {
+      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+      const normBearing = ((bearingDeg % 360) + 360) % 360
+      const ai = Math.round(normBearing * silRes) % numSilAz
+      const azLayers = silhouetteLayers[ai]
+      if (!azLayers || azLayers.length === 0) continue
+
+      for (let li = 0; li < azLayers.length; li++) {
+        const layer = azLayers[li]
+        const peakPt = project(bearingDeg, layer.peakAngle, cam)
+        const basePt = project(bearingDeg, layer.baseAngle, cam)
+        const topY = Math.max(0, Math.min(H, peakPt.y))
+        const botY = Math.max(0, Math.min(H, basePt.y))
+
+        ctx.fillStyle = layerColors[li % layerColors.length]
+        ctx.fillRect(col, topY, 1, Math.max(1, botY - topY))
+      }
+    }
+    ctx.restore()
+  }
+
   // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
   // Glow renders first (behind), then crisp strokes on top.
   if (showSilhouetteLines && silhouetteLayers && skylineData?.silhouette) {
