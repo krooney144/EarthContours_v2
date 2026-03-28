@@ -1652,31 +1652,40 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (multi-layer screen-Y) ──────────────
-      // Check ALL silhouette layers at this bearing that are CLOSER than
-      // the contour point. If ANY closer surface has a peakY above (<=)
-      // the contour's screen Y, the contour is behind that surface.
-      // Layers are sorted near→far, so we iterate until dist >= pt.dist.
+      // ── Silhouette occlusion check (smoothed multi-azimuth) ────────────
+      // Check silhouette layers across a window of adjacent azimuths (±N)
+      // rather than just the exact azimuth. If ANY layer in the window is
+      // CLOSER than the contour and has a higher peakAngle, the contour is
+      // behind that surface. This smooths the jagged occlusion boundary
+      // caused by near-field micro-peaks toggling on/off between adjacent
+      // azimuths, which shifts layer counts and creates choppy vertical
+      // edges in the occlusion pattern.
+      //
+      // Uses direct angle comparison instead of project() — peakAngle >
+      // elevAngleRad means the peak is above the contour on screen
+      // (monotonic relationship). Angular tolerance replaces pixel tolerance.
       if (hasSilOcclusion && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silResolution) % numSilAz
-        const azLayers = silhouetteLayers[ai]
+        const aiCenter = Math.round(normBearing * silResolution) % numSilAz
         let occluded = false
-        if (azLayers) {
+        const SIL_SMOOTH_RADIUS = 2  // ±2 azimuths = 5-azimuth window (0.625°)
+        const SIL_ANGLE_TOLERANCE = 0.001  // ~0.06° angular tolerance (replaces 2px pixel tolerance)
+
+        for (let offset = -SIL_SMOOTH_RADIUS; offset <= SIL_SMOOTH_RADIUS && !occluded; offset++) {
+          const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
+          const azLayers = silhouetteLayers[ai]
+          if (!azLayers) continue
           for (let li = 0; li < azLayers.length; li++) {
             const layer = azLayers[li]
             if (layer.isOcean) continue
-            // Only check surfaces CLOSER than this contour point
-            if (layer.dist >= pt.dist) break  // layers sorted near→far, done
-            // Project this closer surface's peak to screen Y
-            const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
-            if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
-              // Contour point is at or below a closer surface's ridgeline
+            if (layer.dist >= pt.dist) break  // layers sorted near→far
+            if (layer.peakAngle > pt.elevAngleRad - SIL_ANGLE_TOLERANCE) {
               occluded = true
               break
             }
           }
         }
+
         if (occluded) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue
@@ -2361,7 +2370,7 @@ function drawScanCanvas(
   // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
   // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
   // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
-  const debugSilhouette = true
+  const debugSilhouette = false
   if (debugSilhouette && silhouetteLayers && silRes > 0) {
     const numSilAz = silRes * 360
 
