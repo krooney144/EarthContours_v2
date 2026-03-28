@@ -81,6 +81,9 @@ const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full
 const TERRAIN_FILL_DARK  = 'rgb(4, 10, 18)'     // Deep navy — darker than sky gradient, contour lines visible
 const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
 
+// Debug frame counter for throttled silhouette diagnostics
+let _silDbgCount = 0
+
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
 /**
@@ -2358,9 +2361,94 @@ function drawScanCanvas(
   // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
   // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
   // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
-  const debugSilhouette = false
+  const debugSilhouette = true
   if (debugSilhouette && silhouetteLayers && silRes > 0) {
     const numSilAz = silRes * 360
+
+    // ── Console diagnostics (throttled — once per 60 frames) ──
+    if (!_silDbgCount) _silDbgCount = 0
+    _silDbgCount++
+    if (_silDbgCount % 60 === 1) {
+      // Scan visible azimuths for coverage stats
+      const bearingStart = cam.heading_deg - cam.hfov * 0.5
+      const bearingEnd   = cam.heading_deg + cam.hfov * 0.5
+      let emptyAz = 0, totalAz = 0, totalLayers = 0
+      let maxLayers = 0, onlyOneLayers = 0
+      const gapRuns: number[] = []  // lengths of consecutive empty-azimuth runs
+      let currentGap = 0
+
+      for (let col = 0; col < W; col++) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const normBearing = ((bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silRes) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        totalAz++
+        const count = azLayers?.length ?? 0
+        totalLayers += count
+        if (count > maxLayers) maxLayers = count
+        if (count === 0) { emptyAz++; currentGap++ }
+        else {
+          if (currentGap > 0) gapRuns.push(currentGap)
+          currentGap = 0
+          if (count === 1) onlyOneLayers++
+        }
+      }
+      if (currentGap > 0) gapRuns.push(currentGap)
+
+      // Sort gap runs descending to show worst offenders
+      gapRuns.sort((a, b) => b - a)
+      const top5Gaps = gapRuns.slice(0, 10)
+
+      console.log(
+        `[SIL-DEBUG] Visible range: ${bearingStart.toFixed(1)}°–${bearingEnd.toFixed(1)}° (${totalAz} cols)\n` +
+        `  Empty azimuths: ${emptyAz}/${totalAz} (${(100*emptyAz/totalAz).toFixed(1)}%)\n` +
+        `  Avg layers/az: ${(totalLayers/totalAz).toFixed(1)}, max: ${maxLayers}\n` +
+        `  Single-layer azimuths: ${onlyOneLayers}\n` +
+        `  Gap runs (top 10 by size, in cols): [${top5Gaps.join(', ')}]\n` +
+        `  Total gap runs: ${gapRuns.length}`
+      )
+
+      // Sample 5 empty azimuths and log their raw candidate data
+      let sampledEmpty = 0
+      for (let col = 0; col < W && sampledEmpty < 5; col += Math.floor(W / 20)) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const normBearing = ((bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silRes) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        if (azLayers && azLayers.length === 0) {
+          // Check raw candidate count from the skyline data
+          const sil = skylineData?.silhouette
+          const rawStart = sil?.candidateOffsets[ai] ?? 0
+          const rawEnd   = sil?.candidateOffsets[ai + 1] ?? 0
+          const rawCount = (rawEnd - rawStart) / 8
+          console.log(
+            `[SIL-DEBUG] Empty azimuth: ai=${ai} bearing=${normBearing.toFixed(2)}° ` +
+            `rawCandidates=${rawCount} (offsets ${rawStart}–${rawEnd})`
+          )
+          sampledEmpty++
+        }
+      }
+
+      // Sample a few populated azimuths to see what layers look like
+      let sampledFull = 0
+      for (let col = 0; col < W && sampledFull < 3; col += Math.floor(W / 10)) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const normBearing = ((bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silRes) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        if (azLayers && azLayers.length >= 3) {
+          console.log(
+            `[SIL-DEBUG] Populated azimuth: ai=${ai} bearing=${normBearing.toFixed(2)}° layers=${azLayers.length}\n` +
+            azLayers.map((l, i) =>
+              `  L${i}: dist=${(l.dist/1000).toFixed(1)}km peak=${(l.peakAngle*180/Math.PI).toFixed(2)}° base=${(l.baseAngle*180/Math.PI).toFixed(2)}° elev=${l.rawElev.toFixed(0)}m`
+            ).join('\n')
+          )
+          sampledFull++
+        }
+      }
+    }
+
+    // ── Visual overlay ──
     ctx.save()
     ctx.globalAlpha = 0.5
     const layerColors = ['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#ff00ff', '#ffffff']
