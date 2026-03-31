@@ -441,10 +441,15 @@ function addVisibilityBoundaryLayers(
   numAzimuths: number,
   viewerElev: number,
 ): void {
+  let inserted = 0
+  let skippedDuplicate = 0
+  let boundariesDetected = 0
+
   for (let ai = 0; ai < numAzimuths; ai++) {
     let runningMax = -Math.PI / 2
     const base = ai * profileN
     let wasAbove = false
+    let validSamples = 0
 
     for (let i = 0; i < profileN; i++) {
       const effElev = profileData[base + i]
@@ -452,12 +457,14 @@ function addVisibilityBoundaryLayers(
         wasAbove = false
         continue
       }
+      validSamples++
 
       const angle = Math.atan2(effElev - viewerElev, profileDists[i])
       const isAbove = angle > runningMax + 0.002  // small threshold to avoid noise
 
       // Visibility boundary: terrain just crossed above the running max
       if (isAbove && !wasAbove && profileDists[i] > 500) {
+        boundariesDetected++
         // Insert this as a synthetic layer at the correct sorted position
         const azLayers = layers[ai]
         const dist = profileDists[i]
@@ -489,13 +496,24 @@ function addVisibilityBoundaryLayers(
             leftPeakAngle: angle,   // approximate — profile doesn't have lateral
             rightPeakAngle: angle,
           })
+          inserted++
+        } else {
+          skippedDuplicate++
         }
       }
 
       if (angle > runningMax) runningMax = angle
       wasAbove = isAbove
     }
+
+    // Log first few azimuths with detail for debugging
+    if (ai < 3) {
+      console.log(`[VIS-BOUNDARY] az ${ai}: validSamples=${validSamples}/${profileN}, runningMax=${runningMax.toFixed(4)} rad`)
+    }
   }
+
+  console.log(`[VISIBILITY-BOUNDARY] profileN=${profileN}, numAzimuths=${numAzimuths}, viewerElev=${viewerElev.toFixed(1)}m`)
+  console.log(`[VISIBILITY-BOUNDARY] boundariesDetected=${boundariesDetected}, inserted=${inserted}, skippedDuplicate=${skippedDuplicate}`)
 }
 
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─

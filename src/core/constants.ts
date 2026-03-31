@@ -46,7 +46,7 @@ export const MIN_HEIGHT_M = 3.048
 export const DEFAULT_FOV = 70
 
 /** Starting heading (degrees) — due North */
-export const DEFAULT_HEADING = 0
+export const DEFAULT_HEADING = 280  // TEMP: Broomfield looking west
 
 /** Starting pitch (degrees) — looking at horizon */
 export const DEFAULT_PITCH = 0
@@ -81,8 +81,8 @@ export const ORBIT_RADIUS_FALLBACK_M = 80_000
 
 // ─── Map Defaults ─────────────────────────────────────────────────────────────
 
-/** Default map center — Colorado Rockies */
-export const DEFAULT_MAP_CENTER = { lat: 39.7, lng: -105.5 }
+/** Default map center — Broomfield CO looking west */
+export const DEFAULT_MAP_CENTER = { lat: 39.9333, lng: -105.0780 }  // TEMP: Broomfield
 
 /** Default map zoom level */
 export const DEFAULT_MAP_ZOOM = 9
