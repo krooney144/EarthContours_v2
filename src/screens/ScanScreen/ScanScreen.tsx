@@ -83,6 +83,7 @@ const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
 
 // Debug frame counter for throttled silhouette diagnostics
 let _silDbgCount = 0
+let _peakDiagCount = 0
 
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
@@ -2776,6 +2777,76 @@ function drawScanCanvas(
   const topPeaks = visiblePeaks
     .sort((a, b) => b.elevation_m - a.elevation_m)
     .slice(0, 15)
+
+  // ── Peak terrain profile diagnostic (throttled, every 180 frames) ──────
+  // For each visible peak, log the terrain profile along the bearing to the peak,
+  // showing the running-max occlusion angle at each distance checkpoint vs the
+  // peak's actual angle. Also shows silhouette layers at that bearing.
+  _peakDiagCount++
+  if (skylineData && occlusionProfile && _peakDiagCount % 180 === 1) {
+    const sil = skylineData.silhouette
+    for (const peak of topPeaks.slice(0, 3)) {
+      const cosLat = Math.cos(activeLat * DEG_TO_RAD)
+      const dx = (peak.lng - activeLng) * 111_320 * cosLat
+      const dy = (peak.lat - activeLat) * 111_132
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
+      const curvDrop = (dist * dist) / (2 * 6_371_000) * (1 - 0.13)
+      const peakAngle = Math.atan2(peak.elevation_m - curvDrop - eyeElev, dist)
+      const peakAngleDeg = (peakAngle * 180 / Math.PI).toFixed(3)
+
+      // Terrain profile at this bearing
+      const normB = ((bearing % 360) + 360) % 360
+      const ai = Math.round(normB * occlusionProfile.resolution) % occlusionProfile.numAzimuths
+      const profileAngles: string[] = []
+      let maxAngleAtPeakDist = -999
+      for (let i = 0; i < occlusionProfile.n; i++) {
+        const angle = occlusionProfile.angles[ai * occlusionProfile.n + i]
+        const d = occlusionProfile.dists[i]
+        if (d <= dist * 1.1) {
+          maxAngleAtPeakDist = angle
+        }
+        // Log checkpoints near the peak's distance and at key distances
+        if (d > 5000 && d < dist * 1.2 && (i % 3 === 0 || Math.abs(d - dist) < dist * 0.15)) {
+          profileAngles.push(`${(d/1000).toFixed(1)}km:${(angle*180/Math.PI).toFixed(3)}°`)
+        }
+      }
+
+      // Silhouette layers at this bearing
+      const silLayers: string[] = []
+      if (sil && silhouetteLayers) {
+        const silAi = Math.round(normB * sil.resolution) % sil.numAzimuths
+        const layers = silhouetteLayers[silAi]
+        if (layers) {
+          for (const l of layers) {
+            if (l.dist > 3000 && l.dist < dist * 1.3) {
+              silLayers.push(`${(l.dist/1000).toFixed(1)}km:${(l.peakAngle*180/Math.PI).toFixed(3)}°`)
+            }
+          }
+        }
+      }
+
+      // Band ridgeline angles at this bearing
+      const bandAngles: string[] = []
+      for (let bi = 0; bi < skylineData.bands.length; bi++) {
+        const bAngle = bandAngleAt(skylineData, bi, bearing, projectedBands)
+        if (bAngle > -Math.PI / 2 + 0.01) {
+          const bDist = bandDistAt(skylineData, bi, bearing)
+          bandAngles.push(`b${bi}:${(bAngle*180/Math.PI).toFixed(3)}°@${(bDist/1000).toFixed(1)}km`)
+        }
+      }
+
+      const occAngleDeg = (maxAngleAtPeakDist * 180 / Math.PI).toFixed(3)
+      const wouldOcclude = maxAngleAtPeakDist > peakAngle - 0.001
+      console.log(
+        `[PEAK-DIAG] ${peak.name} bearing:${bearing.toFixed(1)}° dist:${(dist/1000).toFixed(1)}km\n` +
+        `  peakAngle: ${peakAngleDeg}° | occlusionMax: ${occAngleDeg}° → ${wouldOcclude ? 'OCCLUDED' : 'VISIBLE'}\n` +
+        `  profile: ${profileAngles.join(' ')}\n` +
+        `  silLayers: ${silLayers.join(' ')}\n` +
+        `  bands: ${bandAngles.join(' ')}`
+      )
+    }
+  }
 
   for (const peak of topPeaks) {
     const projected = projectFirstPerson(
