@@ -1907,13 +1907,19 @@ function renderBandContours(
         }
 
         // Tier 3: Band ridgeline check — if the contour is below the band's
-        // own ridgeline at this azimuth, it's inside the filled terrain body.
-        // The band fill already covers from ridgeline to canvas bottom, so
-        // drawing a contour inside it is redundant and creates artifacts.
+        // own ridgeline AND at a similar distance, it's on the same mountain's
+        // front face. The band fill covers from ridgeline to canvas bottom,
+        // so this contour is inside the filled body and creates artifacts.
+        // Distance gate: only apply when contour is within 30% of ridgeline
+        // distance — contours on nearer terrain (foothills) are separate
+        // features and should remain visible.
         if (!occluded && skyline) {
           const ridgeAngle = bandAngleAt(skyline, bi, pt.bearingDeg, projected)
           if (ridgeAngle > -Math.PI / 2 + 0.01 && pt.elevAngleRad < ridgeAngle - 0.002) {
-            occluded = true
+            const ridgeDist = bandDistAt(skyline, bi, pt.bearingDeg)
+            if (ridgeDist > 0 && pt.dist >= ridgeDist * 0.7) {
+              occluded = true
+            }
           }
         }
 
