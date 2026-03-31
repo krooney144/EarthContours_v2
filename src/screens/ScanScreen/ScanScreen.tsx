@@ -380,6 +380,7 @@ function buildOcclusionProfile(
     ? (Math.log(profileDists[profileN - 1]) - logMin) / (profileN - 1)
     : 1
 
+  // Step 1: Build per-azimuth running-max angle
   for (let ai = 0; ai < numAzimuths; ai++) {
     let maxAngle = -Math.PI / 2
     const base = ai * profileN
@@ -390,6 +391,30 @@ function buildOcclusionProfile(
         if (angle > maxAngle) maxAngle = angle
       }
       angles[base + i] = maxAngle
+    }
+  }
+
+  // Step 2: Smooth across ±2 neighboring azimuths (max-window).
+  // Extends hillside occlusion laterally — a hill at azimuth A extends
+  // its influence to A±1, A±2 using the highest terrain in the window.
+  // Done per-checkpoint, in-place with a temp copy.
+  const SMOOTH_R = 2
+  const temp = new Float32Array(numAzimuths)
+  for (let i = 0; i < profileN; i++) {
+    // Extract column i across all azimuths
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      temp[ai] = angles[ai * profileN + i]
+    }
+    // Max-window smoothing
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      let maxVal = temp[ai]
+      for (let offset = 1; offset <= SMOOTH_R; offset++) {
+        const left = (ai - offset + numAzimuths) % numAzimuths
+        const right = (ai + offset) % numAzimuths
+        if (temp[left] > maxVal) maxVal = temp[left]
+        if (temp[right] > maxVal) maxVal = temp[right]
+      }
+      angles[ai * profileN + i] = maxVal
     }
   }
 
@@ -429,7 +454,7 @@ function matchSilhouetteStrands(
   // peakAngle by buildSilhouetteLayers (atan2(effElev - viewerElev, dist)).
   // Camera pitch only affects where on screen things are drawn, not whether
   // silhouette lines exist. Same mountain at same AGL = same silhouettes.
-  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -670,7 +695,7 @@ function renderSilhouetteGlow(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
   const maxDist = 400_000
-  const MIN_PEAK_ANGLE = -0.35
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
   const MAX_ANGLE_JUMP = 0.005
   const MIN_STRAND_SEGS = 8
   const numAzimuths = silResolution * 360
@@ -860,7 +885,7 @@ function renderSilhouetteStrokes(
   const MIN_STRAND_SEGS = 8   // Eliminate short dash artifacts — 8 segs = 1° bearing
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
   // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
-  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
 
   for (const strand of strands) {
     const segs = strand.segments

@@ -1214,6 +1214,35 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       }
       prevGain = Math.max(0, gain)
 
+      // ── Shoulder detection: flat → dropping ────────────────────────────
+      // The visible edge of a hillside — where terrain goes from flat/gentle
+      // to dropping away. This transition never fires the local-max detector
+      // because wasRising is false on flat terrain. The shoulder IS the
+      // hillside edge as seen from the viewer — the point where contour
+      // lines on the far side should become hidden.
+      const SHOULDER_FLAT_THRESH = 5    // previous gain must be small (near-flat)
+      const SHOULDER_DROP_THRESH = -10  // current gain must be significantly negative
+      if (Math.abs(prevGain) < SHOULDER_FLAT_THRESH && gain < SHOULDER_DROP_THRESH && dist > 100) {
+        const binIdx = distToBin(prevDist)
+        if (binIdx >= 0) {
+          const isOcean = prevRawElev < 2.0
+          const prevCurvDropS = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEES, rightEES] = sampleLateral(ai, prevDist, prevCurvDropS)
+          inflectionHeaps[binIdx].insert({
+            effElev:     prevEffElev,
+            rawElev:     prevRawElev,
+            dist:        prevDist,
+            lat:         prevLat,
+            lng:         prevLng,
+            baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
+            flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEES,
+            rightEffElev: rightEES,
+          })
+        }
+      }
+
       // Track rising/falling
       if (effElev > prevEffElev) {
         wasRising = true
