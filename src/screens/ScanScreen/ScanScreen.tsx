@@ -569,6 +569,13 @@ function matchSilhouetteStrands(
   const completed: SilhouetteStrand[] = []
   const MAX_AZ_GAP = Math.ceil(resolution * 4)  // Max 4° gap before expiring
 
+  // DEBUG: Track synthetic layer rejection reasons
+  let synth_total = 0
+  let synth_filteredAngle = 0
+  let synth_noMatch_startedNew = 0
+  let synth_matched = 0
+  let synth_expiredShort = 0  // strands with synthetic that expired with < 3 segments
+
   // Sweep through visible azimuths
   const totalVisible = aiEnd >= aiStart
     ? aiEnd - aiStart + 1
@@ -582,8 +589,14 @@ function matchSilhouetteStrands(
     const matched = new Set<number>()  // indices into active that got matched
 
     for (const layer of azLayers) {
+      const isSynthetic = layer.lat === 0 && layer.lng === 0
+      if (isSynthetic) synth_total++
+
       // Skip layers below minimum angle — not meaningful silhouettes
-      if (layer.peakAngle < MIN_PEAK_ANGLE) continue
+      if (layer.peakAngle < MIN_PEAK_ANGLE) {
+        if (isSynthetic) synth_filteredAngle++
+        continue
+      }
 
       // Find closest active strand by distance — primary match key.
       // A real ridgeline varies ±10-15% in distance across its bearing span
@@ -618,6 +631,7 @@ function matchSilhouetteStrands(
         active[bestIdx].lastDist = layer.dist
         active[bestIdx].distSum += layer.dist
         matched.add(bestIdx)
+        if (isSynthetic) synth_matched++
       } else {
         // Start new strand
         active.push({
@@ -626,6 +640,7 @@ function matchSilhouetteStrands(
           lastDist: layer.dist,
           distSum:  layer.dist,
         })
+        if (isSynthetic) synth_noMatch_startedNew++
       }
     }
 
@@ -640,6 +655,10 @@ function matchSilhouetteStrands(
               segments: s.segments,
               avgDist:  s.distSum / s.segments.length,
             })
+          } else {
+            // Track synthetic layers in expired short strands
+            const hasSynth = s.segments.some(seg => seg.layer.lat === 0 && seg.layer.lng === 0)
+            if (hasSynth) synth_expiredShort++
           }
           active.splice(si, 1)
         }
@@ -654,6 +673,9 @@ function matchSilhouetteStrands(
         segments: s.segments,
         avgDist:  s.distSum / s.segments.length,
       })
+    } else {
+      const hasSynth = s.segments.some(seg => seg.layer.lat === 0 && seg.layer.lng === 0)
+      if (hasSynth) synth_expiredShort++
     }
   }
 
@@ -666,7 +688,8 @@ function matchSilhouetteStrands(
     const hasSynthetic = strand.segments.some(seg => seg.layer.lat === 0 && seg.layer.lng === 0)
     if (hasSynthetic) syntheticStrandCount++
   }
-  console.log(`[STRAND-MATCH] Total strands: ${completed.length}, strands with synthetic layers: ${syntheticStrandCount}`)
+  console.log(`[STRAND-MATCH] Total strands: ${completed.length}, strands with synthetic: ${syntheticStrandCount}`)
+  console.log(`[SYNTH-REJECT] total=${synth_total}, filteredByAngle=${synth_filteredAngle} (MIN_PEAK_ANGLE=${MIN_PEAK_ANGLE}), matched=${synth_matched}, startedNewStrand=${synth_noMatch_startedNew}, expiredShort(<3segs)=${synth_expiredShort}`)
 
   return completed
 }
