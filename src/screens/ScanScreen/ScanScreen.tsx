@@ -1904,6 +1904,35 @@ function renderBandContours(
           }
         }
 
+        // DEBUG: Log non-occluded contour points in the artifact zone
+        // Looking for WHY contours pass occlusion where they shouldn't
+        if (!occluded && pt.bearingDeg >= 275 && pt.bearingDeg <= 285 && pt.dist > 15000 && pt.dist < 40000) {
+          if (!((window as any).__contourDebugCount)) (window as any).__contourDebugCount = 0;
+          if ((window as any).__contourDebugCount < 50) {
+            (window as any).__contourDebugCount++;
+            let profileInfo = 'no-profile'
+            if (hasProfile && occlusionProfile) {
+              const bufferedDist2 = pt.dist * (1 - DIST_BUFFER_FRAC)
+              if (bufferedDist2 >= occlusionProfile.dists[0]) {
+                const logDist2 = Math.log(bufferedDist2)
+                const pIdx2 = Math.min(occlusionProfile.n - 1,
+                  Math.max(0, Math.floor((logDist2 - occlusionProfile.logMin) / occlusionProfile.logStep)))
+                const ai2 = Math.round(normBearing * occlusionProfile.resolution) % occlusionProfile.numAzimuths
+                const profileAngle2 = occlusionProfile.angles[ai2 * occlusionProfile.n + pIdx2]
+                profileInfo = `profileAngle=${profileAngle2.toFixed(5)} vs contourAngle=${pt.elevAngleRad.toFixed(5)} (diff=${(pt.elevAngleRad - profileAngle2).toFixed(5)}) buffDist=${bufferedDist2.toFixed(0)}m pIdx=${pIdx2}`
+              }
+            }
+            let silInfo = 'no-sil'
+            if (hasSilOcclusion && silhouetteLayers) {
+              const aiC = Math.round(normBearing * silResolution) % numSilAz
+              const azL = silhouetteLayers[aiC]
+              const nearerLayers = azL ? azL.filter(l => !l.isOcean && l.dist < pt.dist) : []
+              silInfo = `${nearerLayers.length} nearer layers, maxPeakAngle=${nearerLayers.length > 0 ? Math.max(...nearerLayers.map(l => l.peakAngle)).toFixed(5) : 'none'}`
+            }
+            console.log(`[CONTOUR-LEAK] band=${strand.bandIdx} bearing=${pt.bearingDeg.toFixed(1)}° dist=${(pt.dist/1000).toFixed(1)}km elev=${strand.level.toFixed(0)}m angle=${pt.elevAngleRad.toFixed(5)}rad | PROFILE: ${profileInfo} | SIL: ${silInfo}`)
+          }
+        }
+
         if (occluded) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue
