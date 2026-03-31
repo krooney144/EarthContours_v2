@@ -337,42 +337,6 @@ function buildSilhouetteLayers(
   return result
 }
 
-// ─── Terrain Envelope (continuous occlusion surface from silhouette data) ────
-// REVERT NOTE: remove this entire function + its usages to undo envelope occlusion.
-//
-// Converts the worker's per-azimuth envelope data (max effElev per distance
-// range) into a running-max angle envelope at the current viewerElev.
-// Result: for each azimuth × checkpoint, the highest terrain angle from 0
-// to that checkpoint's distance.  Used by renderBandContours for occlusion.
-
-function buildTerrainEnvelope(
-  envelopeData: Float32Array,
-  numAzimuths: number,
-  envelopeN: number,
-  envelopeDists: Float32Array,
-  viewerElev: number,
-): Float32Array {
-  const result = new Float32Array(numAzimuths * envelopeN)
-
-  for (let ai = 0; ai < numAzimuths; ai++) {
-    let maxAngle = -Math.PI / 2
-    for (let i = 0; i < envelopeN; i++) {
-      const base = (ai * envelopeN + i) * 2
-      const effElev = envelopeData[base]
-      const dist = envelopeData[base + 1]
-
-      if (effElev > -1e30 && dist > 0) {
-        const angle = Math.atan2(effElev - viewerElev, dist)
-        if (angle > maxAngle) maxAngle = angle
-      }
-
-      result[ai * envelopeN + i] = maxAngle
-    }
-  }
-
-  return result
-}
-
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
 
 /** A matched silhouette strand: a continuous silhouette edge across azimuths.
@@ -995,11 +959,24 @@ interface PrebuiltContourStrand {
  * strand-tracks by level + direction + distance proximity. Contour levels
  * are snapped to the band's interval grid to eliminate floating point drift.
  */
+/** Per-band contour strand diagnostics */
+interface ContourStrandDiag {
+  bandIdx: number
+  strandCount: number
+  avgLength: number
+  maxLength: number
+  minLength: number
+  under5: number        // strands with < 5 azimuth points
+  crossingsPerAz: number // avg crossings per azimuth in this band
+  emptyAzimuths: number  // azimuths with zero crossings
+}
+
 function buildContourStrands(
   skyline: SkylineData,
   viewerElev: number,
-): PrebuiltContourStrand[] {
+): { strands: PrebuiltContourStrand[]; diag: ContourStrandDiag[] } {
   const completed: PrebuiltContourStrand[] = []
+  const diagPerBand: ContourStrandDiag[] = []
 
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
@@ -1012,9 +989,13 @@ function buildContourStrands(
     // DEBUG: Log crossing data availability per band
     console.log(`[CONTOUR-DEBUG] Band ${bi} (${bandAz}az, res=${bandRes}): crossingData=${data?.length ?? 0} floats, crossings≈${data ? Math.floor(data.length / 5) : 0}, offsets=${offsets?.length ?? 0}`)
 
-    if (!data || data.length === 0) continue
+    if (!data || data.length === 0) {
+      diagPerBand.push({ bandIdx: bi, strandCount: 0, avgLength: 0, maxLength: 0, minLength: 0, under5: 0, crossingsPerAz: 0, emptyAzimuths: bandAz })
+      continue
+    }
 
     const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
+    let totalCrossings = 0, emptyAzimuths = 0
 
     // Active strands keyed by snapped-level + direction
     const activeStrands = new Map<string, Array<{
@@ -1028,6 +1009,10 @@ function buildContourStrands(
       const start = offsets[ai]
       const end = offsets[ai + 1]
       const bearingDeg = ai / bandRes
+
+      const numCrossings = (end - start) / 5
+      totalCrossings += numCrossings
+      if (numCrossings === 0) emptyAzimuths++
 
       if (start < end) {
         // Collect crossings, sort near-first for occlusion sweep
@@ -1130,13 +1115,28 @@ function buildContourStrands(
       }
     }
 
-    // DEBUG: Count strands for this band
-    const bandStrandCount = completed.filter(s => s.bandIdx === bi).length
-    const bandPointCount = completed.filter(s => s.bandIdx === bi).reduce((sum, s) => sum + s.points.length, 0)
-    console.log(`[CONTOUR-DEBUG] Band ${bi}: ${bandStrandCount} strands, ${bandPointCount} total points`)
+    // ── Per-band diagnostics ──────────────────────────────────────────
+    const bandStrands = completed.filter(s => s.bandIdx === bi)
+    const lengths = bandStrands.map(s => s.points.length)
+    const strandCount = lengths.length
+    const avgLength = strandCount > 0 ? lengths.reduce((a, b) => a + b, 0) / strandCount : 0
+    const maxLength = strandCount > 0 ? Math.max(...lengths) : 0
+    const minLength = strandCount > 0 ? Math.min(...lengths) : 0
+    const under5 = lengths.filter(l => l < 5).length
+
+    diagPerBand.push({
+      bandIdx: bi,
+      strandCount,
+      avgLength,
+      maxLength,
+      minLength,
+      under5,
+      crossingsPerAz: bandAz > 0 ? totalCrossings / bandAz : 0,
+      emptyAzimuths,
+    })
   }
 
-  return completed
+  return { strands: completed, diag: diagPerBand }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1621,33 +1621,14 @@ function renderBandContours(
   silhouetteLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
-  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // ── Occlusion setup ──────────────────────────────────────────────────────
-  // Two-tier occlusion (REVERT NOTE: restore old single-tier silhouette check to undo):
-  //
-  // Tier 1 — TERRAIN ENVELOPE (primary, handles distance gaps):
-  //   Precomputed running-max angle at 32 log-spaced distance checkpoints.
-  //   For each contour point, look up the envelope at ±2 neighbor azimuths.
-  //   If the envelope at the contour's distance is above the contour → occlude.
-  //   This fills the 20km distance gaps in silhouette candidate data.
-  //
-  // Tier 2 — SILHOUETTE LAYERS (secondary, handles fine-grained peaks):
-  //   Checks individual silhouette peaks at ±2 neighbor azimuths, distance-aware.
-  //   Catches peaks between envelope checkpoints.
+  // ── Silhouette occlusion setup ──────────────────────────────────────────
   const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
   const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
-
-  // Terrain envelope constants (must match worker's ENVELOPE_* values)
-  const hasEnvelope = !!terrainEnvelope
-  const ENV_N = 32
-  const ENV_LOG_MIN = Math.log(100)
-  const ENV_LOG_MAX = Math.log(400_000)
-  const ENV_LOG_STEP = (ENV_LOG_MAX - ENV_LOG_MIN) / (ENV_N - 1)
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1700,44 +1681,25 @@ function renderBandContours(
         continue
       }
 
-      // ── Two-tier occlusion check ──────────────────────────────────────
-      // REVERT NOTE: replace this block with the old single-tier silhouette check to undo.
-      {
+      // ── Silhouette occlusion check (smoothed multi-azimuth) ────────────
+      if (hasSilOcclusion && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const aiCenter = Math.round(normBearing * silResolution) % numSilAz
         let occluded = false
         const SMOOTH_R = 2
-        const ANGLE_TOL = 0.001  // ~0.06° angular tolerance
+        const ANGLE_TOL = 0.001
 
-        // Tier 1: Terrain envelope (continuous, fills distance gaps)
-        // Check envelope at contour's azimuth ONLY (no smoothing — envelope
-        // has data at every azimuth).  Use envIdx-1 so we check terrain
-        // CLOSER than the contour, not terrain AT the contour's distance
-        // (a contour is ON its terrain surface, not behind it).
-        if (hasEnvelope && terrainEnvelope && pt.dist >= 100) {
-          const logDist = Math.log(pt.dist)
-          const envIdx = Math.max(0,
-            Math.floor((logDist - ENV_LOG_MIN) / ENV_LOG_STEP) - 1)
-          const envAngle = terrainEnvelope[aiCenter * ENV_N + envIdx]
-          if (envAngle > pt.elevAngleRad - ANGLE_TOL) {
-            occluded = true
-          }
-        }
-
-        // Tier 2: Silhouette layers (fine-grained peaks between checkpoints)
-        if (!occluded && hasSilOcclusion && silhouetteLayers) {
-          for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
-            const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
-            const azLayers = silhouetteLayers[ai]
-            if (!azLayers) continue
-            for (let li = 0; li < azLayers.length; li++) {
-              const layer = azLayers[li]
-              if (layer.isOcean) continue
-              if (layer.dist >= pt.dist) break
-              if (layer.peakAngle > pt.elevAngleRad - ANGLE_TOL) {
-                occluded = true
-                break
-              }
+        for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
+          const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
+          const azLayers = silhouetteLayers[ai]
+          if (!azLayers) continue
+          for (let li = 0; li < azLayers.length; li++) {
+            const layer = azLayers[li]
+            if (layer.isOcean) continue
+            if (layer.dist >= pt.dist) break
+            if (layer.peakAngle > pt.elevAngleRad - ANGLE_TOL) {
+              occluded = true
+              break
             }
           }
         }
@@ -1806,7 +1768,6 @@ function renderTerrain(
   silResolution: number = 0,
   silElevMin: number = 0,
   silElevMax: number = 0,
-  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1891,7 +1852,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode, terrainEnvelope)
+          silhouetteLayers, silResolution, darkMode)
       }
     }
 
@@ -2335,7 +2296,6 @@ function drawScanCanvas(
   showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
   debugSilhouette: boolean = false,
-  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -2421,7 +2381,7 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax, terrainEnvelope)
+      silhouetteLayers, silRes, silElevMin, silElevMax)
   }
 
   // ── DEBUG: Silhouette layer coverage overlay ────────────────────────────
@@ -2893,11 +2853,13 @@ const ScanScreen: React.FC = () => {
 
   // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
   // Uses the worker's z15-corrected ground elevation so contour angles match ridgelines.
-  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
-    if (!skylineData) return []
+  const contourStrandResult = useMemo(() => {
+    if (!skylineData) return { strands: [] as PrebuiltContourStrand[], diag: [] as ContourStrandDiag[] }
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
   }, [skylineData, height_m])
+  const contourStrands = contourStrandResult.strands
+  const contourDiag = contourStrandResult.diag
 
   // ── Re-project refined arc angles when AGL changes ─────────────────────────
   // Uses separate refinedArcs state (from second-pass 'refine-peaks' response).
@@ -2931,19 +2893,6 @@ const ScanScreen: React.FC = () => {
       })
     }
     return layers
-  }, [skylineData, height_m])
-
-  // ── TERRAIN ENVELOPE: build running-max angle envelope for contour occlusion ─
-  // REVERT NOTE: remove this useMemo + terrainEnvelope references to undo.
-  // ~92K atan2 calls ≈ 0.5ms.  Recomputes when AGL changes.
-  const terrainEnvelope = useMemo<Float32Array | null>(() => {
-    const sil = skylineData?.silhouette
-    if (!sil?.envelopeData || !sil.envelopeN || !sil.envelopeDists) return null
-    const viewerElev = (skylineData?.computedAt.groundElev ?? 0) + height_m
-    return buildTerrainEnvelope(
-      sil.envelopeData, sil.numAzimuths, sil.envelopeN,
-      sil.envelopeDists, viewerElev,
-    )
   }, [skylineData, height_m])
 
   // ── Re-project near-field occlusion profile (AGL < 60m only) ──────────────
@@ -3290,7 +3239,6 @@ const ScanScreen: React.FC = () => {
       showBandLines, showFill, showPeakLabels,
       showContourLines, showSilhouetteLines, darkMode,
       debugSilhouette,
-      terrainEnvelope,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -3304,7 +3252,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette, terrainEnvelope,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
@@ -3746,6 +3694,20 @@ const ScanScreen: React.FC = () => {
                       </>
                     )
                   })()}
+
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>CONTOUR STRANDS</div>
+                  {contourDiag.length === 0
+                    ? <div style={{ color: '#666' }}>no contour data</div>
+                    : contourDiag.map(d => (
+                      <div key={d.bandIdx} style={{ color: d.under5 > d.strandCount * 0.5 ? '#f84' : '#ccc', fontSize: 8 }}>
+                        b{d.bandIdx}: {d.strandCount}str avg:{d.avgLength.toFixed(1)}az
+                        {' '}min:{d.minLength} max:{d.maxLength}
+                        {' '}<span style={{ color: d.under5 > 20 ? '#f44' : '#888' }}>&lt;5az:{d.under5}</span>
+                        {' '}cx/az:{d.crossingsPerAz.toFixed(1)}
+                        {d.emptyAzimuths > 0 && <span style={{ color: '#f44' }}> empty:{d.emptyAzimuths}</span>}
+                      </div>
+                    ))
+                  }
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>NEAR-FIELD OCCLUSION</div>
                   {(() => {

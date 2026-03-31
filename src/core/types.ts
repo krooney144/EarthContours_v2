@@ -494,18 +494,6 @@ export interface SilhouetteData {
   resolution: number
   /** Number of azimuth samples = 360 × resolution. */
   numAzimuths: number
-
-  // ── Terrain Envelope (for continuous contour occlusion) ──────────────
-  // Recorded during the silhouette ray march.  For each azimuth × checkpoint,
-  // stores the max terrain effElev within that distance range and the distance
-  // where it occurred.  Main thread converts to running-max angle using current
-  // viewerElev.  REVERT NOTE: remove this block + envelope fields to undo.
-  /** Max effElev per distance range, packed [effElev, dist] × checkpoints × azimuths */
-  envelopeData?: Float32Array
-  /** Number of distance checkpoints in the envelope */
-  envelopeN?: number
-  /** Checkpoint distances in metres (log-spaced, length = envelopeN) */
-  envelopeDists?: Float32Array
 }
 
 /** A single visible silhouette layer at one azimuth, computed at render time.

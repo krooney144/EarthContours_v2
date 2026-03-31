@@ -135,10 +135,6 @@ interface SilhouetteDataW {
   candidateOffsets: Uint32Array
   resolution:       number
   numAzimuths:      number
-  // Terrain envelope (REVERT NOTE: remove these 3 lines to undo)
-  envelopeData?:    Float32Array
-  envelopeN?:       number
-  envelopeDists?:   Float32Array
 }
 
 /** Near-field profile data produced by the worker (mirrors types.ts NearFieldProfile). */
@@ -1067,26 +1063,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // Per-azimuth silhouette candidate heaps
   const silCandidatesTemp: SilCandidate[][] = new Array(SILHOUETTE_NUM_AZIMUTHS)
 
-  // ── TERRAIN ENVELOPE (REVERT NOTE: remove this block to undo) ───────
-  // Record max terrain effElev in distance ranges for continuous occlusion.
-  // 32 log-spaced checkpoints from 100m to 400km.  For each azimuth × range,
-  // store the max effElev seen and the distance where it occurred.
-  const ENVELOPE_N = 32
-  const ENVELOPE_LOG_MIN = Math.log(100)
-  const ENVELOPE_LOG_MAX = Math.log(400_000)
-  const ENVELOPE_LOG_STEP = (ENVELOPE_LOG_MAX - ENVELOPE_LOG_MIN) / (ENVELOPE_N - 1)
-  const envelopeDists = new Float32Array(ENVELOPE_N)
-  for (let i = 0; i < ENVELOPE_N; i++) {
-    envelopeDists[i] = Math.exp(ENVELOPE_LOG_MIN + i * ENVELOPE_LOG_STEP)
-  }
-  // Packed [maxEffElev, distOfMax] per checkpoint per azimuth
-  const envelopeData = new Float32Array(SILHOUETTE_NUM_AZIMUTHS * ENVELOPE_N * 2)
-  // Initialize maxEffElev to -Infinity (no data)
-  for (let k = 0; k < envelopeData.length; k += 2) {
-    envelopeData[k] = -Infinity
-  }
-  // ── END TERRAIN ENVELOPE INIT ──────────────────────────────────────
-
   for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
     const azDeg = ai / SILHOUETTE_RESOLUTION
     const azRad = azDeg * DEG_TO_RAD
@@ -1113,20 +1089,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const rawElev = sampleBest(sLat, sLng, zoom)
       const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev  = rawElev - curvDrop
-
-      // ── TERRAIN ENVELOPE: record max effElev per distance range ──────
-      // (REVERT NOTE: remove this block to undo envelope recording)
-      if (dist >= 100) {
-        const logDist = Math.log(dist)
-        let envIdx = Math.round((logDist - ENVELOPE_LOG_MIN) / ENVELOPE_LOG_STEP)
-        if (envIdx < 0) envIdx = 0
-        if (envIdx >= ENVELOPE_N) envIdx = ENVELOPE_N - 1
-        const envBase = (ai * ENVELOPE_N + envIdx) * 2
-        if (effElev > envelopeData[envBase]) {
-          envelopeData[envBase] = effElev
-          envelopeData[envBase + 1] = dist
-        }
-      }
 
       // Detect local maxima: effElev was rising, now falling
       if (wasRising && effElev < prevEffElev) {
@@ -1342,10 +1304,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     candidateOffsets: silOffsets,
     resolution:       SILHOUETTE_RESOLUTION,
     numAzimuths:      SILHOUETTE_NUM_AZIMUTHS,
-    // TERRAIN ENVELOPE (REVERT NOTE: remove these 3 lines to undo)
-    envelopeData,
-    envelopeN:        ENVELOPE_N,
-    envelopeDists,
   }
 
   const nearProfile: NearFieldProfileW = {
@@ -1382,8 +1340,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     shading.buffer as ArrayBuffer,
     silData.buffer as ArrayBuffer,
     silOffsets.buffer as ArrayBuffer,
-    envelopeData.buffer as ArrayBuffer,    // REVERT NOTE: remove these 2 lines
-    envelopeDists.buffer as ArrayBuffer,
     npData.buffer as ArrayBuffer,
     npCounts.buffer as ArrayBuffer,
   ]
