@@ -97,7 +97,7 @@ const DEPTH_BANDS: BandConfig[] = [
   { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
   { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az)
   { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000,  resolution: 8 },  // 30–81 km   (0.125°, 2880 az)
+  { label: 'mid',        minDist: 30_000,  maxDist: 81_000  },                  // 30–81 km   (0.25°, 1440 az)
   { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)
   { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
 ]
@@ -1072,6 +1072,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     // Per-bin heaps
     const binHeaps: CandidateHeap[] = SILHOUETTE_BINS.map(b => new CandidateHeap(b[2]))
 
+    // Separate inflection candidate storage (not in heaps — avoids eviction by taller peaks)
+    // Max 2 inflection candidates per bin = 14 additional max per azimuth
+    const inflectionHeaps: CandidateHeap[] = SILHOUETTE_BINS.map(b => new CandidateHeap(2))
+
     // State for local maxima detection (near → far)
     let prevEffElev = -Infinity
     let wasRising = false
@@ -1079,6 +1083,12 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     let prevRawElev = 0, prevDist = 0, prevLat = viewerLat, prevLng = viewerLng
     // Valley floor tracking (lowest point between viewer/previous peak and current position)
     let valleyEffElev = Infinity, valleyDist = 0
+
+    // State for inflection detection (slope deceleration)
+    let prevGain = 0
+    let inflectionArmed = false  // true when slope is steep enough to detect deceleration
+    const MIN_GAIN_FOR_INFLECTION = 10  // metres — previous gain must exceed this
+    const INFLECTION_RATIO = 0.20  // current gain < 20% of previous → inflection
 
     for (let si = 0; si < silDistsDeduped.length; si++) {
       const dist = silDistsDeduped[si]
@@ -1111,6 +1121,37 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         valleyEffElev = effElev
         valleyDist    = dist
       }
+
+      // ── Inflection detection: steep slope → nearly flat ──────────────
+      // Supplements local-max detection. When a steep climb suddenly levels
+      // off, the "shoulder" point acts as an occlusion candidate — terrain
+      // behind the shoulder at lower angles is hidden from the viewer.
+      // Only fires once per deceleration event (inflectionArmed resets when
+      // slope steepens again).
+      const gain = effElev - prevEffElev
+      if (inflectionArmed && gain >= 0 && gain < prevGain * INFLECTION_RATIO && dist > 100) {
+        // Slope decelerated significantly — record the previous step as shoulder
+        const binIdx = distToBin(prevDist)
+        if (binIdx >= 0) {
+          const isOcean = prevRawElev < 2.0
+          inflectionHeaps[binIdx].insert({
+            effElev:     prevEffElev,
+            rawElev:     prevRawElev,
+            dist:        prevDist,
+            lat:         prevLat,
+            lng:         prevLng,
+            baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
+            flags:       isOcean ? 1 : 0,
+          })
+        }
+        inflectionArmed = false  // Don't trigger again until slope steepens
+      }
+      // Arm inflection detection when gain is large enough
+      if (gain > MIN_GAIN_FOR_INFLECTION) {
+        inflectionArmed = true
+      }
+      prevGain = Math.max(0, gain)
 
       // Track rising/falling
       if (effElev > prevEffElev) {
@@ -1149,8 +1190,14 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
 
     // Flatten all bins into a single sorted-by-distance candidate list
+    // Includes both local-max peaks AND inflection (shoulder) candidates
     const allCandidates: SilCandidate[] = []
     for (const heap of binHeaps) {
+      for (const c of heap.sortedByDist()) {
+        allCandidates.push(c)
+      }
+    }
+    for (const heap of inflectionHeaps) {
       for (const c of heap.sortedByDist()) {
         allCandidates.push(c)
       }
