@@ -3599,6 +3599,20 @@ const ScanScreen: React.FC = () => {
                   <div>interp:ON  az:{pxPerAzStd}px/std {pxPerAzHi}px/hi</div>
                   <div>horizon:{horizonDist.toFixed(0)}km (geometric)</div>
 
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>CONTOUR STRANDS</div>
+                  {contourDiag.length === 0
+                    ? <div style={{ color: '#666' }}>no contour data</div>
+                    : contourDiag.map(d => (
+                      <div key={`cs-${d.bandIdx}`} style={{ color: d.under5 > d.strandCount * 0.5 ? '#f84' : '#ccc', fontSize: 8 }}>
+                        b{d.bandIdx}: {d.strandCount}str avg:{d.avgLength.toFixed(1)}az
+                        {' '}min:{d.minLength} max:{d.maxLength}
+                        {' '}<span style={{ color: d.under5 > 20 ? '#f44' : '#888' }}>&lt;5az:{d.under5}</span>
+                        {' '}cx/az:{d.crossingsPerAz.toFixed(1)}
+                        {d.emptyAzimuths > 0 && <span style={{ color: '#f44' }}> empty:{d.emptyAzimuths}</span>}
+                      </div>
+                    ))
+                  }
+
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>RE-PROJECTION</div>
                   <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
                     max Δangle: {angleDiffDeg}° {angleDiffOk ? '✓' : '⚠ MISMATCH'}
@@ -3694,20 +3708,6 @@ const ScanScreen: React.FC = () => {
                       </>
                     )
                   })()}
-
-                  <div style={{ color: '#68B0BF', marginTop: 3 }}>CONTOUR STRANDS</div>
-                  {contourDiag.length === 0
-                    ? <div style={{ color: '#666' }}>no contour data</div>
-                    : contourDiag.map(d => (
-                      <div key={d.bandIdx} style={{ color: d.under5 > d.strandCount * 0.5 ? '#f84' : '#ccc', fontSize: 8 }}>
-                        b{d.bandIdx}: {d.strandCount}str avg:{d.avgLength.toFixed(1)}az
-                        {' '}min:{d.minLength} max:{d.maxLength}
-                        {' '}<span style={{ color: d.under5 > 20 ? '#f44' : '#888' }}>&lt;5az:{d.under5}</span>
-                        {' '}cx/az:{d.crossingsPerAz.toFixed(1)}
-                        {d.emptyAzimuths > 0 && <span style={{ color: '#f44' }}> empty:{d.emptyAzimuths}</span>}
-                      </div>
-                    ))
-                  }
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>NEAR-FIELD OCCLUSION</div>
                   {(() => {
