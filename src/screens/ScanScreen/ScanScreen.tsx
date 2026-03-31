@@ -337,6 +337,42 @@ function buildSilhouetteLayers(
   return result
 }
 
+// ─── Terrain Envelope (continuous occlusion surface from silhouette data) ────
+// REVERT NOTE: remove this entire function + its usages to undo envelope occlusion.
+//
+// Converts the worker's per-azimuth envelope data (max effElev per distance
+// range) into a running-max angle envelope at the current viewerElev.
+// Result: for each azimuth × checkpoint, the highest terrain angle from 0
+// to that checkpoint's distance.  Used by renderBandContours for occlusion.
+
+function buildTerrainEnvelope(
+  envelopeData: Float32Array,
+  numAzimuths: number,
+  envelopeN: number,
+  envelopeDists: Float32Array,
+  viewerElev: number,
+): Float32Array {
+  const result = new Float32Array(numAzimuths * envelopeN)
+
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    let maxAngle = -Math.PI / 2
+    for (let i = 0; i < envelopeN; i++) {
+      const base = (ai * envelopeN + i) * 2
+      const effElev = envelopeData[base]
+      const dist = envelopeData[base + 1]
+
+      if (effElev > -1e30 && dist > 0) {
+        const angle = Math.atan2(effElev - viewerElev, dist)
+        if (angle > maxAngle) maxAngle = angle
+      }
+
+      result[ai * envelopeN + i] = maxAngle
+    }
+  }
+
+  return result
+}
+
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
 
 /** A matched silhouette strand: a continuous silhouette edge across azimuths.
@@ -1585,21 +1621,33 @@ function renderBandContours(
   silhouetteLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
+  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // ── Silhouette occlusion setup ──────────────────────────────────────────
-  // For each contour point we check ALL silhouette layers at that azimuth
-  // that are CLOSER than the contour. If any closer surface's peakY is
-  // above (lower Y) the contour's screen Y, the contour is occluded.
-  // This handles intermediate surfaces correctly — a contour at 20km behind
-  // a silhouette at 10km is culled even though the nearest surface at 3km
-  // is below it on screen.
+  // ── Occlusion setup ──────────────────────────────────────────────────────
+  // Two-tier occlusion (REVERT NOTE: restore old single-tier silhouette check to undo):
+  //
+  // Tier 1 — TERRAIN ENVELOPE (primary, handles distance gaps):
+  //   Precomputed running-max angle at 32 log-spaced distance checkpoints.
+  //   For each contour point, look up the envelope at ±2 neighbor azimuths.
+  //   If the envelope at the contour's distance is above the contour → occlude.
+  //   This fills the 20km distance gaps in silhouette candidate data.
+  //
+  // Tier 2 — SILHOUETTE LAYERS (secondary, handles fine-grained peaks):
+  //   Checks individual silhouette peaks at ±2 neighbor azimuths, distance-aware.
+  //   Catches peaks between envelope checkpoints.
   const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
   const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
-  const OCCLUSION_TOLERANCE_PX = 2  // Cull contours within 2px of ridgeline edge
+
+  // Terrain envelope constants (must match worker's ENVELOPE_* values)
+  const hasEnvelope = !!terrainEnvelope
+  const ENV_N = 32
+  const ENV_LOG_MIN = Math.log(100)
+  const ENV_LOG_MAX = Math.log(400_000)
+  const ENV_LOG_STEP = (ENV_LOG_MAX - ENV_LOG_MIN) / (ENV_N - 1)
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1652,36 +1700,43 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (smoothed multi-azimuth) ────────────
-      // Check silhouette layers across a window of adjacent azimuths (±N)
-      // rather than just the exact azimuth. If ANY layer in the window is
-      // CLOSER than the contour and has a higher peakAngle, the contour is
-      // behind that surface. This smooths the jagged occlusion boundary
-      // caused by near-field micro-peaks toggling on/off between adjacent
-      // azimuths, which shifts layer counts and creates choppy vertical
-      // edges in the occlusion pattern.
-      //
-      // Uses direct angle comparison instead of project() — peakAngle >
-      // elevAngleRad means the peak is above the contour on screen
-      // (monotonic relationship). Angular tolerance replaces pixel tolerance.
-      if (hasSilOcclusion && silhouetteLayers) {
+      // ── Two-tier occlusion check ──────────────────────────────────────
+      // REVERT NOTE: replace this block with the old single-tier silhouette check to undo.
+      {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const aiCenter = Math.round(normBearing * silResolution) % numSilAz
         let occluded = false
-        const SIL_SMOOTH_RADIUS = 2  // ±2 azimuths = 5-azimuth window (0.625°)
-        const SIL_ANGLE_TOLERANCE = 0.001  // ~0.06° angular tolerance (replaces 2px pixel tolerance)
+        const SMOOTH_R = 2
+        const ANGLE_TOL = 0.001  // ~0.06° angular tolerance
 
-        for (let offset = -SIL_SMOOTH_RADIUS; offset <= SIL_SMOOTH_RADIUS && !occluded; offset++) {
-          const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
-          const azLayers = silhouetteLayers[ai]
-          if (!azLayers) continue
-          for (let li = 0; li < azLayers.length; li++) {
-            const layer = azLayers[li]
-            if (layer.isOcean) continue
-            if (layer.dist >= pt.dist) break  // layers sorted near→far
-            if (layer.peakAngle > pt.elevAngleRad - SIL_ANGLE_TOLERANCE) {
+        // Tier 1: Terrain envelope (continuous, fills distance gaps)
+        if (hasEnvelope && terrainEnvelope && pt.dist >= 100) {
+          const logDist = Math.log(pt.dist)
+          const envIdx = Math.min(ENV_N - 1,
+            Math.max(0, Math.floor((logDist - ENV_LOG_MIN) / ENV_LOG_STEP)))
+          for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
+            const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
+            const envAngle = terrainEnvelope[ai * ENV_N + envIdx]
+            if (envAngle > pt.elevAngleRad - ANGLE_TOL) {
               occluded = true
-              break
+            }
+          }
+        }
+
+        // Tier 2: Silhouette layers (fine-grained peaks between checkpoints)
+        if (!occluded && hasSilOcclusion && silhouetteLayers) {
+          for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
+            const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
+            const azLayers = silhouetteLayers[ai]
+            if (!azLayers) continue
+            for (let li = 0; li < azLayers.length; li++) {
+              const layer = azLayers[li]
+              if (layer.isOcean) continue
+              if (layer.dist >= pt.dist) break
+              if (layer.peakAngle > pt.elevAngleRad - ANGLE_TOL) {
+                occluded = true
+                break
+              }
             }
           }
         }
@@ -1750,6 +1805,7 @@ function renderTerrain(
   silResolution: number = 0,
   silElevMin: number = 0,
   silElevMax: number = 0,
+  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1834,7 +1890,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode)
+          silhouetteLayers, silResolution, darkMode, terrainEnvelope)
       }
     }
 
@@ -2278,6 +2334,7 @@ function drawScanCanvas(
   showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
   debugSilhouette: boolean = false,
+  terrainEnvelope: Float32Array | null = null,  // REVERT NOTE: remove this param
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -2363,7 +2420,7 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax)
+      silhouetteLayers, silRes, silElevMin, silElevMax, terrainEnvelope)
   }
 
   // ── DEBUG: Silhouette layer coverage overlay ────────────────────────────
@@ -2875,6 +2932,19 @@ const ScanScreen: React.FC = () => {
     return layers
   }, [skylineData, height_m])
 
+  // ── TERRAIN ENVELOPE: build running-max angle envelope for contour occlusion ─
+  // REVERT NOTE: remove this useMemo + terrainEnvelope references to undo.
+  // ~92K atan2 calls ≈ 0.5ms.  Recomputes when AGL changes.
+  const terrainEnvelope = useMemo<Float32Array | null>(() => {
+    const sil = skylineData?.silhouette
+    if (!sil?.envelopeData || !sil.envelopeN || !sil.envelopeDists) return null
+    const viewerElev = (skylineData?.computedAt.groundElev ?? 0) + height_m
+    return buildTerrainEnvelope(
+      sil.envelopeData, sil.numAzimuths, sil.envelopeN,
+      sil.envelopeDists, viewerElev,
+    )
+  }, [skylineData, height_m])
+
   // ── Re-project near-field occlusion profile (AGL < 60m only) ──────────────
   // 144K atan2 calls ≈ 1.5ms.  Skipped when AGL ≥ 60m (existing band fill sufficient).
   const projectedNearProfile = useMemo<ProjectedNearProfile | null>(() => {
@@ -3219,6 +3289,7 @@ const ScanScreen: React.FC = () => {
       showBandLines, showFill, showPeakLabels,
       showContourLines, showSilhouetteLines, darkMode,
       debugSilhouette,
+      terrainEnvelope,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -3232,7 +3303,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette, terrainEnvelope,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
