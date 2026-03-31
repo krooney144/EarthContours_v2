@@ -660,6 +660,14 @@ function matchSilhouetteStrands(
   // Sort far→near for painter's order (far drawn first, near on top)
   completed.sort((a, b) => b.avgDist - a.avgDist)
 
+  // DEBUG: Count strands containing synthetic layers (lat===0 && lng===0)
+  let syntheticStrandCount = 0
+  for (const strand of completed) {
+    const hasSynthetic = strand.segments.some(seg => seg.layer.lat === 0 && seg.layer.lng === 0)
+    if (hasSynthetic) syntheticStrandCount++
+  }
+  console.log(`[STRAND-MATCH] Total strands: ${completed.length}, strands with synthetic layers: ${syntheticStrandCount}`)
+
   return completed
 }
 
