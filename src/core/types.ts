@@ -517,6 +517,10 @@ export interface SilhouetteLayer {
   baseEffElev: number
   /** Is this candidate over ocean? */
   isOcean: boolean
+  /** Elevation angle of terrain at azimuth-1, same distance (lateral slope left) */
+  leftPeakAngle?: number
+  /** Elevation angle of terrain at azimuth+1, same distance (lateral slope right) */
+  rightPeakAngle?: number
 }
 
 /** Per-azimuth array of visible silhouette layers.

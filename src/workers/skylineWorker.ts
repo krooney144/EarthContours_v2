@@ -180,7 +180,7 @@ const SILHOUETTE_BINS: readonly [number, number, number][] = [
   [100_000, 250_000,  2],
   [250_000, 400_000,  2],
 ]
-const SILHOUETTE_FLOATS = 8  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags
+const SILHOUETTE_FLOATS = 10  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags, leftEffElev, rightEffElev
 const SILHOUETTE_RESOLUTION = 8  // 0.125° per step = 2880 azimuths (matches hi-res bands)
 const SILHOUETTE_NUM_AZIMUTHS = 360 * SILHOUETTE_RESOLUTION  // 2880
 
@@ -197,7 +197,7 @@ function distToBin(distM: number): number {
 
 // ─── Silhouette Candidate Heap ───────────────────────────────────────────────
 
-/** A silhouette candidate: a local elevation maximum along an azimuth ray. */
+/** A silhouette candidate: a local elevation maximum or inflection along an azimuth ray. */
 interface SilCandidate {
   effElev:     number  // rawElev - curvDrop (AGL-independent)
   rawElev:     number  // original DEM elevation
@@ -207,6 +207,8 @@ interface SilCandidate {
   baseEffElev: number  // valley floor before this peak
   baseDist:    number  // distance to valley floor
   flags:       number  // bit 0 = isOcean
+  leftEffElev: number  // terrain effElev at (azimuth-1, same dist) — lateral slope
+  rightEffElev: number // terrain effElev at (azimuth+1, same dist) — lateral slope
 }
 
 /** Per-bin min-heap keyed on effElev, capped at maxSize. */
@@ -1063,6 +1065,23 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // Per-azimuth silhouette candidate heaps
   const silCandidatesTemp: SilCandidate[][] = new Array(SILHOUETTE_NUM_AZIMUTHS)
 
+  // Helper: sample lateral terrain effElev at ±1 azimuth from a candidate
+  function sampleLateral(ai: number, dist: number, curvDrop: number): [number, number] {
+    const azStep = 1.0 / SILHOUETTE_RESOLUTION  // degrees per azimuth step
+    const leftAzDeg = (ai - 1 + SILHOUETTE_NUM_AZIMUTHS) % SILHOUETTE_NUM_AZIMUTHS / SILHOUETTE_RESOLUTION
+    const rightAzDeg = (ai + 1) % SILHOUETTE_NUM_AZIMUTHS / SILHOUETTE_RESOLUTION
+    const leftRad = leftAzDeg * DEG_TO_RAD
+    const rightRad = rightAzDeg * DEG_TO_RAD
+    const zoom = distToZoom(dist)
+    const leftLat = viewerLat + (Math.cos(leftRad) * dist) / 111_132
+    const leftLng = viewerLng + (Math.sin(leftRad) * dist) / (111_320 * cosViewerLat)
+    const rightLat = viewerLat + (Math.cos(rightRad) * dist) / 111_132
+    const rightLng = viewerLng + (Math.sin(rightRad) * dist) / (111_320 * cosViewerLat)
+    const leftEffElev = sampleBest(leftLat, leftLng, zoom) - curvDrop
+    const rightEffElev = sampleBest(rightLat, rightLng, zoom) - curvDrop
+    return [leftEffElev, rightEffElev]
+  }
+
   for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
     const azDeg = ai / SILHOUETTE_RESOLUTION
     const azRad = azDeg * DEG_TO_RAD
@@ -1106,6 +1125,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const binIdx = distToBin(prevDist)
         if (binIdx >= 0) {
           const isOcean = prevRawElev < 2.0  // sampleBest clamps ocean to 0; coast interpolation can yield 0-2m
+          const prevCurvDrop = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEE, rightEE] = sampleLateral(ai, prevDist, prevCurvDrop)
           binHeaps[binIdx].insert({
             effElev:     prevEffElev,
             rawElev:     prevRawElev,
@@ -1115,6 +1136,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
             baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
             flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEE,
+            rightEffElev: rightEE,
           })
         }
         // Reset valley tracking after recording a peak
@@ -1134,6 +1157,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         const binIdx = distToBin(prevDist)
         if (binIdx >= 0) {
           const isOcean = prevRawElev < 2.0
+          const prevCurvDrop2 = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEE2, rightEE2] = sampleLateral(ai, prevDist, prevCurvDrop2)
           inflectionHeaps[binIdx].insert({
             effElev:     prevEffElev,
             rawElev:     prevRawElev,
@@ -1143,6 +1168,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
             baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
             flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEE2,
+            rightEffElev: rightEE2,
           })
         }
         inflectionArmed = false  // Don't trigger again until slope steepens
@@ -1179,12 +1206,15 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const binIdx = distToBin(prevDist)
       if (binIdx >= 0) {
         const isOcean = prevRawElev < 2.0
+        const prevCurvDrop3 = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const [leftEE3, rightEE3] = sampleLateral(ai, prevDist, prevCurvDrop3)
         binHeaps[binIdx].insert({
           effElev: prevEffElev, rawElev: prevRawElev, dist: prevDist,
           lat: prevLat, lng: prevLng,
           baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
           baseDist: valleyEffElev === Infinity ? prevDist : valleyDist,
           flags: isOcean ? 1 : 0,
+          leftEffElev: leftEE3, rightEffElev: rightEE3,
         })
       }
     }
@@ -1265,6 +1295,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       silData[silIdx++] = c.baseEffElev
       silData[silIdx++] = c.baseDist
       silData[silIdx++] = c.flags
+      silData[silIdx++] = c.leftEffElev
+      silData[silIdx++] = c.rightEffElev
       silTotalCandidates++
     }
   }

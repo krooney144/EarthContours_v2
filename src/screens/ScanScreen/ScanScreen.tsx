@@ -274,7 +274,7 @@ function buildSilhouetteLayers(
   if (!sil || !sil.candidateData || sil.candidateData.length === 0) return null
 
   const { candidateData, candidateOffsets, numAzimuths } = sil
-  const FPC = 8  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
+  const FPC = 10  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
   const result: SilhouetteLayer[][] = new Array(numAzimuths)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
@@ -299,6 +299,8 @@ function buildSilhouetteLayers(
       const baseEffElev = candidateData[off + 5]
       const baseDist    = candidateData[off + 6]
       const flags       = candidateData[off + 7]
+      const leftEffElev = candidateData[off + 8]
+      const rightEffElev = candidateData[off + 9]
 
       const peakAngle = Math.atan2(effElev - viewerElev, dist)
       const isOcean   = (flags & 1) !== 0
@@ -315,6 +317,10 @@ function buildSilhouetteLayers(
           : -Math.PI / 2
         const baseAngle = Math.max(rawBaseAngle, maxAngle)
 
+        // Lateral peak angles — terrain elevation at ±1 azimuth, same distance
+        const leftPeakAngle = Math.atan2(leftEffElev - viewerElev, dist)
+        const rightPeakAngle = Math.atan2(rightEffElev - viewerElev, dist)
+
         layers.push({
           peakAngle,
           baseAngle,
@@ -325,6 +331,8 @@ function buildSilhouetteLayers(
           effElev,
           baseEffElev,
           isOcean,
+          leftPeakAngle,
+          rightPeakAngle,
         })
 
         maxAngle = peakAngle
@@ -1681,15 +1689,21 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (smoothed multi-azimuth) ────────────
+      // ── Silhouette occlusion check (lateral-aware) ─────────────────────
+      // Checks the exact azimuth PLUS ±1 neighbors using lateral terrain data.
+      // At the exact azimuth: use peakAngle directly.
+      // At azimuth-1: use that layer's rightPeakAngle (terrain height AT our azimuth).
+      // At azimuth+1: use that layer's leftPeakAngle (terrain height AT our azimuth).
+      // This makes hillside occlusion taper smoothly instead of cutting off as a
+      // vertical wall at the peak's azimuth boundary.
       if (hasSilOcclusion && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const aiCenter = Math.round(normBearing * silResolution) % numSilAz
         let occluded = false
-        const SMOOTH_R = 2
         const ANGLE_TOL = 0.001
 
-        for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
+        // Check exact azimuth + ±1 with lateral data
+        for (let offset = -1; offset <= 1 && !occluded; offset++) {
           const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
           const azLayers = silhouetteLayers[ai]
           if (!azLayers) continue
@@ -1697,7 +1711,17 @@ function renderBandContours(
             const layer = azLayers[li]
             if (layer.isOcean) continue
             if (layer.dist >= pt.dist) break
-            if (layer.peakAngle > pt.elevAngleRad - ANGLE_TOL) {
+
+            // Use lateral angle when checking a neighbor — this is the terrain
+            // height at OUR azimuth position from the neighbor's candidate
+            let checkAngle = layer.peakAngle
+            if (offset === -1 && layer.rightPeakAngle !== undefined) {
+              checkAngle = layer.rightPeakAngle  // left neighbor's terrain at our position
+            } else if (offset === 1 && layer.leftPeakAngle !== undefined) {
+              checkAngle = layer.leftPeakAngle   // right neighbor's terrain at our position
+            }
+
+            if (checkAngle > pt.elevAngleRad - ANGLE_TOL) {
               occluded = true
               break
             }
