@@ -1710,16 +1710,17 @@ function renderBandContours(
         const ANGLE_TOL = 0.001  // ~0.06° angular tolerance
 
         // Tier 1: Terrain envelope (continuous, fills distance gaps)
+        // Check envelope at contour's azimuth ONLY (no smoothing — envelope
+        // has data at every azimuth).  Use envIdx-1 so we check terrain
+        // CLOSER than the contour, not terrain AT the contour's distance
+        // (a contour is ON its terrain surface, not behind it).
         if (hasEnvelope && terrainEnvelope && pt.dist >= 100) {
           const logDist = Math.log(pt.dist)
-          const envIdx = Math.min(ENV_N - 1,
-            Math.max(0, Math.floor((logDist - ENV_LOG_MIN) / ENV_LOG_STEP)))
-          for (let offset = -SMOOTH_R; offset <= SMOOTH_R && !occluded; offset++) {
-            const ai = ((aiCenter + offset) % numSilAz + numSilAz) % numSilAz
-            const envAngle = terrainEnvelope[ai * ENV_N + envIdx]
-            if (envAngle > pt.elevAngleRad - ANGLE_TOL) {
-              occluded = true
-            }
+          const envIdx = Math.max(0,
+            Math.floor((logDist - ENV_LOG_MIN) / ENV_LOG_STEP) - 1)
+          const envAngle = terrainEnvelope[aiCenter * ENV_N + envIdx]
+          if (envAngle > pt.elevAngleRad - ANGLE_TOL) {
+            occluded = true
           }
         }
 
