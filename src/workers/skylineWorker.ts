@@ -135,6 +135,10 @@ interface SilhouetteDataW {
   candidateOffsets: Uint32Array
   resolution:       number
   numAzimuths:      number
+  // Continuous terrain profile for contour occlusion
+  profileData?:     Float32Array
+  profileDists?:    Float32Array
+  profileN?:        number
 }
 
 /** Near-field profile data produced by the worker (mirrors types.ts NearFieldProfile). */
@@ -1065,6 +1069,22 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // Per-azimuth silhouette candidate heaps
   const silCandidatesTemp: SilCandidate[][] = new Array(SILHOUETTE_NUM_AZIMUTHS)
 
+  // ── Continuous Terrain Profile (for contour occlusion) ──────────────────
+  // 80 log-spaced distance checkpoints from 100m to 400km.
+  // At each checkpoint, store the raw effElev sampled during the ray march.
+  // Main thread builds a running-max angle envelope with distance buffer.
+  const PROFILE_N = 80
+  const PROFILE_LOG_MIN = Math.log(100)
+  const PROFILE_LOG_MAX = Math.log(400_000)
+  const PROFILE_LOG_STEP = (PROFILE_LOG_MAX - PROFILE_LOG_MIN) / (PROFILE_N - 1)
+  const profileDists = new Float32Array(PROFILE_N)
+  for (let i = 0; i < PROFILE_N; i++) {
+    profileDists[i] = Math.exp(PROFILE_LOG_MIN + i * PROFILE_LOG_STEP)
+  }
+  // Per-azimuth effElev at each checkpoint — initialized to -Infinity (no data)
+  const profileData = new Float32Array(SILHOUETTE_NUM_AZIMUTHS * PROFILE_N)
+  profileData.fill(-Infinity)
+
   // Helper: sample lateral terrain effElev at ±1 azimuth from a candidate
   function sampleLateral(ai: number, dist: number, curvDrop: number): [number, number] {
     const azStep = 1.0 / SILHOUETTE_RESOLUTION  // degrees per azimuth step
@@ -1118,6 +1138,20 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const rawElev = sampleBest(sLat, sLng, zoom)
       const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev  = rawElev - curvDrop
+
+      // ── Record terrain profile at nearest checkpoint ──────────────────
+      if (dist >= 100) {
+        const logDist = Math.log(dist)
+        let pIdx = Math.round((logDist - PROFILE_LOG_MIN) / PROFILE_LOG_STEP)
+        if (pIdx >= 0 && pIdx < PROFILE_N) {
+          const pBase = ai * PROFILE_N + pIdx
+          // Keep the highest effElev at this checkpoint (in case multiple
+          // ray march steps map to the same checkpoint)
+          if (effElev > profileData[pBase]) {
+            profileData[pBase] = effElev
+          }
+        }
+      }
 
       // Detect local maxima: effElev was rising, now falling
       if (wasRising && effElev < prevEffElev) {
@@ -1383,6 +1417,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     candidateOffsets: silOffsets,
     resolution:       SILHOUETTE_RESOLUTION,
     numAzimuths:      SILHOUETTE_NUM_AZIMUTHS,
+    // Continuous terrain profile for contour occlusion
+    profileData,
+    profileDists,
+    profileN:         PROFILE_N,
   }
 
   const nearProfile: NearFieldProfileW = {
@@ -1419,6 +1457,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     shading.buffer as ArrayBuffer,
     silData.buffer as ArrayBuffer,
     silOffsets.buffer as ArrayBuffer,
+    profileData.buffer as ArrayBuffer,
+    profileDists.buffer as ArrayBuffer,
     npData.buffer as ArrayBuffer,
     npCounts.buffer as ArrayBuffer,
   ]
