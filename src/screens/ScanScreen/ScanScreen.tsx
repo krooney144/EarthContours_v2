@@ -1801,6 +1801,8 @@ function renderBandContours(
   silResolution: number,
   darkMode: boolean = true,
   occlusionProfile: OcclusionProfile | null = null,
+  skyline: SkylineData | null = null,
+  projected: ProjectedBands | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
@@ -1904,32 +1906,14 @@ function renderBandContours(
           }
         }
 
-        // DEBUG: Log non-occluded contour points in the artifact zone
-        // Looking for WHY contours pass occlusion where they shouldn't
-        if (!occluded && pt.bearingDeg >= 275 && pt.bearingDeg <= 285 && pt.dist > 15000 && pt.dist < 40000) {
-          if (!((window as any).__contourDebugCount)) (window as any).__contourDebugCount = 0;
-          if ((window as any).__contourDebugCount < 50) {
-            (window as any).__contourDebugCount++;
-            let profileInfo = 'no-profile'
-            if (hasProfile && occlusionProfile) {
-              const bufferedDist2 = pt.dist * (1 - DIST_BUFFER_FRAC)
-              if (bufferedDist2 >= occlusionProfile.dists[0]) {
-                const logDist2 = Math.log(bufferedDist2)
-                const pIdx2 = Math.min(occlusionProfile.n - 1,
-                  Math.max(0, Math.floor((logDist2 - occlusionProfile.logMin) / occlusionProfile.logStep)))
-                const ai2 = Math.round(normBearing * occlusionProfile.resolution) % occlusionProfile.numAzimuths
-                const profileAngle2 = occlusionProfile.angles[ai2 * occlusionProfile.n + pIdx2]
-                profileInfo = `profileAngle=${profileAngle2.toFixed(5)} vs contourAngle=${pt.elevAngleRad.toFixed(5)} (diff=${(pt.elevAngleRad - profileAngle2).toFixed(5)}) buffDist=${bufferedDist2.toFixed(0)}m pIdx=${pIdx2}`
-              }
-            }
-            let silInfo = 'no-sil'
-            if (hasSilOcclusion && silhouetteLayers) {
-              const aiC = Math.round(normBearing * silResolution) % numSilAz
-              const azL = silhouetteLayers[aiC]
-              const nearerLayers = azL ? azL.filter(l => !l.isOcean && l.dist < pt.dist) : []
-              silInfo = `${nearerLayers.length} nearer layers, maxPeakAngle=${nearerLayers.length > 0 ? Math.max(...nearerLayers.map(l => l.peakAngle)).toFixed(5) : 'none'}`
-            }
-            console.log(`[CONTOUR-LEAK] band=${strand.bandIdx} bearing=${pt.bearingDeg.toFixed(1)}° dist=${(pt.dist/1000).toFixed(1)}km elev=${strand.level.toFixed(0)}m angle=${pt.elevAngleRad.toFixed(5)}rad | PROFILE: ${profileInfo} | SIL: ${silInfo}`)
+        // Tier 3: Band ridgeline check — if the contour is below the band's
+        // own ridgeline at this azimuth, it's inside the filled terrain body.
+        // The band fill already covers from ridgeline to canvas bottom, so
+        // drawing a contour inside it is redundant and creates artifacts.
+        if (!occluded && skyline) {
+          const ridgeAngle = bandAngleAt(skyline, bi, pt.bearingDeg, projected)
+          if (ridgeAngle > -Math.PI / 2 + 0.01 && pt.elevAngleRad < ridgeAngle - 0.002) {
+            occluded = true
           }
         }
 
@@ -2082,7 +2066,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode, occlusionProfile)
+          silhouetteLayers, silResolution, darkMode, occlusionProfile, skyline, projected)
       }
     }
 
