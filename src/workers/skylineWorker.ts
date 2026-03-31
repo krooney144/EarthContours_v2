@@ -172,9 +172,9 @@ export interface SkylineData {
 
 /** [minDist_m, maxDist_m, maxCandidates] — must stay in sync with types.ts */
 const SILHOUETTE_BINS: readonly [number, number, number][] = [
-  [0,        1_000,   5],
-  [1_000,    5_000,   5],
-  [5_000,   15_000,   5],
+  [0,        1_000,   7],
+  [1_000,    5_000,   7],
+  [5_000,   15_000,   7],
   [15_000,  40_000,   4],
   [40_000, 100_000,   3],
   [100_000, 250_000,  2],
