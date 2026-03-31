@@ -1809,8 +1809,6 @@ function renderBandContours(
   silResolution: number,
   darkMode: boolean = true,
   occlusionProfile: OcclusionProfile | null = null,
-  skyline: SkylineData | null = null,
-  projected: ProjectedBands | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
@@ -1914,22 +1912,10 @@ function renderBandContours(
           }
         }
 
-        // Tier 3: Band ridgeline check — if the contour is below the band's
-        // own ridgeline AND at a similar distance, it's on the same mountain's
-        // front face. The band fill covers from ridgeline to canvas bottom,
-        // so this contour is inside the filled body and creates artifacts.
-        // Distance gate: only apply when contour is within 30% of ridgeline
-        // distance — contours on nearer terrain (foothills) are separate
-        // features and should remain visible.
-        if (!occluded && skyline) {
-          const ridgeAngle = bandAngleAt(skyline, bi, pt.bearingDeg, projected)
-          if (ridgeAngle > -Math.PI / 2 + 0.01 && pt.elevAngleRad < ridgeAngle - 0.002) {
-            const ridgeDist = bandDistAt(skyline, bi, pt.bearingDeg)
-            if (ridgeDist > 0 && pt.dist >= ridgeDist * 0.7) {
-              occluded = true
-            }
-          }
-        }
+        // Tier 3 REVERTED — band ridgeline check was too aggressive (hid all
+        // contours) or distance-gated version made artifacts worse. The rectangular
+        // block artifacts need a different approach — likely in contour strand
+        // rendering (fade endpoints) rather than occlusion logic.
 
         if (occluded) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
@@ -2080,7 +2066,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode, occlusionProfile, skyline, projected)
+          silhouetteLayers, silResolution, darkMode, occlusionProfile)
       }
     }
 
