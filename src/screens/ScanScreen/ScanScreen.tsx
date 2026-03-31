@@ -422,6 +422,82 @@ function buildOcclusionProfile(
   return { angles, dists: profileDists, n: profileN, logMin, logStep, numAzimuths, resolution }
 }
 
+/**
+ * Generate synthetic silhouette layers from the terrain profile at "visibility
+ * boundary" points — where terrain first rises above the running horizon.
+ *
+ * These capture ridge FLANKS that the local-max detector misses: at the flank
+ * azimuth of a hill, the terrain rises above the horizon (it's the nearest
+ * visible feature) but never peaks — it's on a continuous slope. The visibility
+ * boundary IS the flank edge.
+ *
+ * Merges into the existing silhouetteLayers array alongside candidate-based layers.
+ */
+function addVisibilityBoundaryLayers(
+  layers: SilhouetteLayer[][],
+  profileData: Float32Array,
+  profileDists: Float32Array,
+  profileN: number,
+  numAzimuths: number,
+  viewerElev: number,
+): void {
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    let runningMax = -Math.PI / 2
+    const base = ai * profileN
+    let wasAbove = false
+
+    for (let i = 0; i < profileN; i++) {
+      const effElev = profileData[base + i]
+      if (effElev <= -1e30) {
+        wasAbove = false
+        continue
+      }
+
+      const angle = Math.atan2(effElev - viewerElev, profileDists[i])
+      const isAbove = angle > runningMax + 0.002  // small threshold to avoid noise
+
+      // Visibility boundary: terrain just crossed above the running max
+      if (isAbove && !wasAbove && profileDists[i] > 500) {
+        // Insert this as a synthetic layer at the correct sorted position
+        const azLayers = layers[ai]
+        const dist = profileDists[i]
+
+        // Check if a candidate-based layer already exists near this distance
+        let duplicate = false
+        for (const l of azLayers) {
+          if (Math.abs(l.dist - dist) < dist * 0.1) { duplicate = true; break }
+        }
+
+        if (!duplicate) {
+          // Find insertion point (layers sorted near→far)
+          let insertIdx = azLayers.length
+          for (let li = 0; li < azLayers.length; li++) {
+            if (azLayers[li].dist > dist) { insertIdx = li; break }
+          }
+
+          const baseAngle = insertIdx > 0 ? azLayers[insertIdx - 1].peakAngle : runningMax
+
+          azLayers.splice(insertIdx, 0, {
+            peakAngle: angle,
+            baseAngle: Math.max(baseAngle, runningMax),
+            rawElev: effElev + (dist * dist) / (2 * 6_371_000) * (1 - 0.13), // approximate raw
+            dist,
+            lat: 0, lng: 0,  // GPS not available from profile
+            effElev,
+            baseEffElev: effElev,
+            isOcean: false,
+            leftPeakAngle: angle,   // approximate — profile doesn't have lateral
+            rightPeakAngle: angle,
+          })
+        }
+      }
+
+      if (angle > runningMax) runningMax = angle
+      wasAbove = isAbove
+    }
+  }
+}
+
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
 
 /** A matched silhouette strand: a continuous silhouette edge across azimuths.
@@ -3055,6 +3131,14 @@ const ScanScreen: React.FC = () => {
     const viewerElev = skylineData.computedAt.groundElev + height_m
     const t0 = performance.now()
     const layers = buildSilhouetteLayers(skylineData, viewerElev)
+    // Add visibility boundary layers from terrain profile (captures ridge flanks)
+    const sil = skylineData.silhouette
+    if (layers && sil.profileData && sil.profileDists && sil.profileN) {
+      addVisibilityBoundaryLayers(
+        layers, sil.profileData, sil.profileDists, sil.profileN,
+        sil.numAzimuths, viewerElev,
+      )
+    }
     const dt = performance.now() - t0
     if (layers) {
       let totalLayers = 0, maxLayers = 0
