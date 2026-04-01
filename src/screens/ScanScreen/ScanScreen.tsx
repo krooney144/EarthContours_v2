@@ -254,12 +254,13 @@ function reprojectNearProfile(
 
 // ─── Terrain Profile → Occlusion Angle Envelope ────────────────────────────────
 
-/** Per-azimuth occlusion envelope: running-max elevation angle at each distance checkpoint.
+/** Per-azimuth occlusion envelope: windowed-max elevation angle at each distance checkpoint.
  *  Used as Tier 1 contour occlusion — catches terrain behind continuously rising foothills
  *  where no silhouette candidates exist (no local maxima). */
 interface OcclusionProfile {
-  /** Running-max angle per azimuth per checkpoint (numAzimuths × profileN).
-   *  Index: ai * profileN + pi. Already smoothed ±2 azimuths. */
+  /** Windowed-max angle per azimuth per checkpoint (numAzimuths × profileN).
+   *  Index: ai * profileN + pi. Each value is the max terrain angle over the
+   *  preceding WINDOW_SIZE checkpoints (not from the viewer). Smoothed ±2 azimuths. */
   angles:      Float32Array
   /** Checkpoint distances (profileN entries). */
   dists:       Float32Array
@@ -273,53 +274,76 @@ interface OcclusionProfile {
 
 /**
  * Convert the worker's terrain profile (max effElev at distance checkpoints)
- * into a running-max elevation-angle envelope per azimuth.
+ * into a WINDOWED-max elevation-angle envelope per azimuth.
  *
- * For each azimuth, sweeps near→far converting effElev to angle, keeping a
- * running max so the envelope is monotonically non-decreasing (nearer terrain
- * always occludes farther).  Then applies ±2 azimuth max-window smoothing
- * so the envelope doesn't have sharp azimuthal edges.
+ * Instead of a full running-max from the viewer (which accumulates unrelated
+ * near terrain and eats mid-range contours), each checkpoint stores the max
+ * terrain angle over only the preceding WINDOW_SIZE checkpoints. With 80
+ * log-spaced points (each ~11% farther), a window of 10 spans a ~2.8× distance
+ * ratio — enough to catch foothills directly blocking the mountain behind,
+ * but NOT a hill at 3km polluting checks at 20km.
  *
- * The Tier 1 check skips back 3 checkpoints (not a fixed %) before comparing,
- * which naturally scales with log-spacing (~30% nearer) to avoid a slope
- * occluding its own front-face contours.
+ * Uses a deque-based sliding window max for O(n) per azimuth.
+ * Then applies ±2 azimuth max-window smoothing for continuity.
  *
- * Cost: 2880 × 80 × 5 (smoothing window) ≈ 1.15M ops.  ~2ms.
+ * Cost: 2880 × 80 × 5 (smoothing) ≈ 1.15M ops.  ~2ms.
  */
 function buildOcclusionProfile(
   profile: TerrainProfile,
   viewerElev: number,
 ): OcclusionProfile {
   const { profileData, profileDists, profileN, resolution, numAzimuths } = profile
+  const WINDOW_SIZE = 10  // Look back 10 checkpoints (~2.8× distance ratio)
 
-  // Step 1: Build running-max angle envelope per azimuth
-  const raw = new Float32Array(numAzimuths * profileN)
-  raw.fill(-Math.PI / 2)
+  // Step 1: Compute raw angle at each checkpoint
+  const rawAngles = new Float32Array(numAzimuths * profileN)
+  rawAngles.fill(-Math.PI / 2)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
     const base = ai * profileN
-    let maxAngle = -Math.PI / 2
     for (let pi = 0; pi < profileN; pi++) {
       const effElev = profileData[base + pi]
       if (effElev > -Infinity) {
-        const dist = profileDists[pi]
-        const angle = Math.atan2(effElev - viewerElev, dist)
-        if (angle > maxAngle) maxAngle = angle
+        rawAngles[base + pi] = Math.atan2(effElev - viewerElev, profileDists[pi])
       }
-      raw[base + pi] = maxAngle
     }
   }
 
-  // Step 2: ±2 azimuth max-window smoothing (prevents sharp azimuthal edges)
+  // Step 2: Sliding window max (deque-based, O(n) per azimuth)
+  // For each checkpoint pi, windowMax[pi] = max(rawAngles[pi-WINDOW_SIZE+1 .. pi])
+  const windowed = new Float32Array(numAzimuths * profileN)
+  windowed.fill(-Math.PI / 2)
+
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    const base = ai * profileN
+    // Deque stores indices into [0..profileN-1], front = max
+    const deque: number[] = []
+
+    for (let pi = 0; pi < profileN; pi++) {
+      const angle = rawAngles[base + pi]
+      // Remove elements outside the window
+      while (deque.length > 0 && deque[0] < pi - WINDOW_SIZE + 1) {
+        deque.shift()
+      }
+      // Remove elements smaller than current (they can never be the max)
+      while (deque.length > 0 && rawAngles[base + deque[deque.length - 1]] <= angle) {
+        deque.pop()
+      }
+      deque.push(pi)
+      windowed[base + pi] = rawAngles[base + deque[0]]
+    }
+  }
+
+  // Step 3: ±2 azimuth max-window smoothing (prevents sharp azimuthal edges)
   const smoothed = new Float32Array(numAzimuths * profileN)
   const SMOOTH_HALF = 2
   for (let pi = 0; pi < profileN; pi++) {
     for (let ai = 0; ai < numAzimuths; ai++) {
-      let mx = raw[ai * profileN + pi]
+      let mx = windowed[ai * profileN + pi]
       for (let da = -SMOOTH_HALF; da <= SMOOTH_HALF; da++) {
         if (da === 0) continue
         const nai = (ai + da + numAzimuths) % numAzimuths
-        const v = raw[nai * profileN + pi]
+        const v = windowed[nai * profileN + pi]
         if (v > mx) mx = v
       }
       smoothed[ai * profileN + pi] = mx
