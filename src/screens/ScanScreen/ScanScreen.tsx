@@ -57,7 +57,7 @@ import {
   headingToCompass, clamp, metersToFeet,
 } from '../../core/utils'
 import { fetchPeaksNear }                from '../../data/peakLoader'
-import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData, NearFieldProfile } from '../../core/types'
+import type { Peak, SkylineData, SkylineBand, SkylineRequest, RefinedArc, PeakRefineItem, SilhouetteLayer, SilhouetteData, NearFieldProfile, TerrainProfile } from '../../core/types'
 import { DEPTH_BANDS, SILHOUETTE_FLOATS_PER_CANDIDATE, NEAR_PROFILE_SAMPLES, NEAR_PROFILE_AGL_LIMIT } from '../../core/types'
 import { NavigateHint } from '../../components/NavigateHint/NavigateHint'
 import { TutorialOverlay } from '../../components/TutorialOverlay/TutorialOverlay'
@@ -251,6 +251,87 @@ function reprojectNearProfile(
 }
 
 // ─── Silhouette Layer Builder (AGL-dependent, runs on every height change) ───
+
+// ─── Terrain Profile → Occlusion Angle Envelope ────────────────────────────────
+
+/** Per-azimuth occlusion envelope: running-max elevation angle at each distance checkpoint.
+ *  Used as Tier 1 contour occlusion — catches terrain behind continuously rising foothills
+ *  where no silhouette candidates exist (no local maxima). */
+interface OcclusionProfile {
+  /** Running-max angle per azimuth per checkpoint (numAzimuths × profileN).
+   *  Index: ai * profileN + pi. Already smoothed ±2 azimuths. */
+  angles:      Float32Array
+  /** Checkpoint distances (profileN entries). */
+  dists:       Float32Array
+  /** Number of checkpoints. */
+  profileN:    number
+  /** Azimuth resolution. */
+  resolution:  number
+  /** Total azimuths. */
+  numAzimuths: number
+}
+
+/**
+ * Convert the worker's terrain profile (max effElev at distance checkpoints)
+ * into a running-max elevation-angle envelope per azimuth.
+ *
+ * For each azimuth, sweeps near→far converting effElev to angle, keeping a
+ * running max so the envelope is monotonically non-decreasing (nearer terrain
+ * always occludes farther).  Then applies ±2 azimuth max-window smoothing
+ * so the envelope doesn't have sharp azimuthal edges.
+ *
+ * Cost: 2880 × 80 × 5 (smoothing window) ≈ 1.15M ops.  ~2ms.
+ */
+function buildOcclusionProfile(
+  profile: TerrainProfile,
+  viewerElev: number,
+): OcclusionProfile {
+  const { profileData, profileDists, profileN, resolution, numAzimuths } = profile
+  const EARTH_R = 6_371_000
+  const REFRACTION_K = 0.13
+
+  // Step 1: Build raw running-max angle envelope per azimuth
+  const raw = new Float32Array(numAzimuths * profileN)
+  raw.fill(-Math.PI / 2)
+
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    const base = ai * profileN
+    let maxAngle = -Math.PI / 2
+    for (let pi = 0; pi < profileN; pi++) {
+      const effElev = profileData[base + pi]
+      if (effElev > -Infinity) {
+        const dist = profileDists[pi]
+        const angle = Math.atan2(effElev - viewerElev, dist)
+        if (angle > maxAngle) maxAngle = angle
+      }
+      raw[base + pi] = maxAngle
+    }
+  }
+
+  // Step 2: ±2 azimuth max-window smoothing (prevents sharp azimuthal edges)
+  const smoothed = new Float32Array(numAzimuths * profileN)
+  const SMOOTH_HALF = 2
+  for (let pi = 0; pi < profileN; pi++) {
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      let mx = raw[ai * profileN + pi]
+      for (let da = -SMOOTH_HALF; da <= SMOOTH_HALF; da++) {
+        if (da === 0) continue
+        const nai = (ai + da + numAzimuths) % numAzimuths
+        const v = raw[nai * profileN + pi]
+        if (v > mx) mx = v
+      }
+      smoothed[ai * profileN + pi] = mx
+    }
+  }
+
+  return {
+    angles:      smoothed,
+    dists:       profileDists,
+    profileN,
+    resolution,
+    numAzimuths,
+  }
+}
 
 /**
  * Build visible silhouette layers from the worker's AGL-independent candidate data.
@@ -479,6 +560,163 @@ function matchSilhouetteStrands(
   completed.sort((a, b) => b.avgDist - a.avgDist)
 
   return completed
+}
+
+// ─── Strand Flank Extension ─────────────────────────────────────────────────
+
+/**
+ * Extend silhouette strands laterally into mountain flanks using the terrain profile.
+ *
+ * Problem: Strands end at mountain flanks where terrain rises continuously
+ * (no local maximum → no silhouette candidate). Contour lines behind the flank
+ * pass all occlusion checks and bleed through.
+ *
+ * Solution: For each strand endpoint, sample the terrain profile at the strand's
+ * distance at adjacent azimuths. If the terrain at that distance is still above
+ * the running-max angle from nearer terrain, create a synthetic segment extending
+ * the strand. Continue until terrain drops below nearer terrain or below horizon.
+ *
+ * Uses the occlusion profile's distance checkpoints (already computed) to look up
+ * terrain elevation at the strand's distance. No new tile fetches.
+ */
+function extendStrandsIntoFlanks(
+  strands: SilhouetteStrand[],
+  profile: OcclusionProfile,
+  silhouetteLayers: SilhouetteLayer[][],
+  viewerElev: number,
+  numAzimuths: number,
+  resolution: number,
+): void {
+  const EARTH_R = 6_371_000
+  const REFRACTION_K = 0.13
+  const MAX_EXTEND = Math.ceil(resolution * 15)  // Max 15° extension per side
+  const { dists, profileN, angles: profileAngles } = profile
+  const profData = profile.angles  // running-max angle per az per checkpoint
+
+  for (const strand of strands) {
+    if (strand.segments.length < 3) continue
+
+    // Extend both ends: [0] = start, [1] = end
+    for (const side of [0, 1] as const) {
+      const endSeg = side === 0 ? strand.segments[0] : strand.segments[strand.segments.length - 1]
+      const prevSeg = side === 0 ? strand.segments[1] : strand.segments[strand.segments.length - 2]
+      const strandDist = endSeg.layer.dist
+      const strandEffElev = endSeg.layer.effElev
+
+      // Find the two profile checkpoints bracketing strandDist for interpolation
+      let cpLo = 0
+      for (let pi = 1; pi < profileN; pi++) {
+        if (dists[pi] > strandDist) break
+        cpLo = pi
+      }
+      const cpHi = Math.min(cpLo + 1, profileN - 1)
+
+      // Direction to extend: opposite of the strand's interior direction
+      const azStep = side === 0 ? -1 : 1
+
+      let curAi = endSeg.ai
+      let extended = 0
+
+      for (let step = 0; step < MAX_EXTEND; step++) {
+        const nextAi = (curAi + azStep + numAzimuths) % numAzimuths
+
+        // Look up the nearer-terrain running-max angle at this azimuth
+        // (from the profile, one checkpoint NEARER than the strand's distance)
+        // If nearer terrain at this azimuth rises above the strand's angle,
+        // the flank is fully occluded from this side → stop extending.
+        const nearerCpIdx = cpLo > 0 ? cpLo - 1 : 0
+        const nearerMaxAngle = profData[nextAi * profileN + nearerCpIdx]
+
+        // Compute the terrain angle at the strand's distance at this azimuth.
+        // Use the profile data: interpolate effElev between cpLo and cpHi checkpoints.
+        // Since profile stores running-max effElev (not raw), and we want the actual
+        // terrain surface, we use the raw profile from the terrainProfile data.
+        // However, the occlusionProfile.angles already stores the running-max ANGLE —
+        // we need to check if the terrain at this distance is above horizon.
+        // The profile angle at cpLo represents max terrain angle up to that distance.
+        // The difference between angle at cpHi and cpLo tells us if terrain between
+        // those distances contributes.
+        const angleAtDist = profData[nextAi * profileN + cpLo]
+        const angleAtDistFar = profData[nextAi * profileN + cpHi]
+
+        // The terrain at the strand's distance contributes to visibility only if
+        // the angle increases between cpLo and cpHi (terrain between those distances
+        // is higher than everything nearer). If it doesn't increase, the checkpoint
+        // is dominated by nearer terrain and we can't determine if there's actual
+        // terrain at the strand's distance.
+        // For safety, use the angle at cpHi which covers through the strand's distance.
+        const terrainAngle = angleAtDistFar
+
+        // Check: is the terrain at this distance still visually above the running-max
+        // from all nearer terrain? If yes, it's visible → extend strand.
+        // We compare: is there terrain at the strand's distance that peeks above nearer terrain?
+        const nearerAngle = cpLo > 0 ? profData[nextAi * profileN + cpLo - 1] : -Math.PI / 2
+
+        // If the angle at cpHi is barely above (or equal to) the nearer angle,
+        // there's no visible terrain at this distance → stop extending.
+        const ANGLE_EPSILON = 0.001  // ~0.06°
+        if (terrainAngle - nearerAngle < ANGLE_EPSILON) break
+
+        // Also stop if the strand's angle is below horizon
+        if (terrainAngle < -0.35) break
+
+        // Check that no existing silhouette layer at this azimuth already covers this distance
+        const existingLayers = silhouetteLayers[nextAi]
+        let alreadyCovered = false
+        if (existingLayers) {
+          for (const layer of existingLayers) {
+            if (Math.abs(layer.dist - strandDist) < strandDist * 0.15) {
+              alreadyCovered = true
+              break
+            }
+          }
+        }
+        if (alreadyCovered) break
+
+        // Create synthetic segment extending the strand
+        const curvDrop = (strandDist * strandDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        // Estimate effElev from the angle: effElev = tan(angle) * dist + viewerElev
+        const syntheticEffElev = Math.tan(terrainAngle) * strandDist + viewerElev
+        const peakAngle = Math.atan2(syntheticEffElev - viewerElev, strandDist)
+
+        const syntheticLayer: SilhouetteLayer = {
+          peakAngle,
+          baseAngle: nearerAngle,
+          rawElev:   syntheticEffElev + curvDrop,
+          dist:      strandDist,
+          lat:       endSeg.layer.lat,  // approximate — same distance, nearby azimuth
+          lng:       endSeg.layer.lng,
+          effElev:   syntheticEffElev,
+          baseEffElev: endSeg.layer.baseEffElev,
+          isOcean:   false,
+        }
+
+        const newSegment = { ai: nextAi, layer: syntheticLayer }
+        if (side === 0) {
+          strand.segments.unshift(newSegment)
+        } else {
+          strand.segments.push(newSegment)
+        }
+
+        // Also inject into silhouetteLayers so contour occlusion benefits
+        if (!silhouetteLayers[nextAi]) {
+          silhouetteLayers[nextAi] = []
+        }
+        // Insert maintaining near→far sort
+        let insertIdx = silhouetteLayers[nextAi].length
+        for (let li = 0; li < silhouetteLayers[nextAi].length; li++) {
+          if (silhouetteLayers[nextAi][li].dist > strandDist) {
+            insertIdx = li
+            break
+          }
+        }
+        silhouetteLayers[nextAi].splice(insertIdx, 0, syntheticLayer)
+
+        curAi = nextAi
+        extended++
+      }
+    }
+  }
 }
 
 // ─── Silhouette Renderer ─────────────────────────────────────────────────────
@@ -1582,6 +1820,7 @@ function renderBandContours(
   silhouetteLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
+  profile: OcclusionProfile | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
@@ -1649,7 +1888,36 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (multi-layer screen-Y) ──────────────
+      // ── Tier 1: Terrain profile occlusion (continuous, cheap) ────────
+      // Check the running-max angle envelope at a distance CLOSER than this
+      // contour (7% buffer prevents a slope from hiding its own front-face).
+      // This catches terrain behind continuously rising foothills where no
+      // silhouette candidates exist (no local maxima → 20km gap).
+      if (profile) {
+        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
+        const pai = Math.round(normBearing * profile.resolution) % profile.numAzimuths
+        // Look up profile at 93% of contour distance (7% buffer)
+        const lookupDist = pt.dist * 0.93
+        // Binary search for the nearest checkpoint ≤ lookupDist
+        const dists = profile.dists
+        const pN = profile.profileN
+        let lo = 0, hi = pN - 1
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1
+          if (dists[mid] <= lookupDist) lo = mid; else hi = mid - 1
+        }
+        // lo is now the largest checkpoint ≤ lookupDist (or 0 if lookupDist < dists[0])
+        if (dists[lo] <= lookupDist) {
+          const profileAngle = profile.angles[pai * pN + lo]
+          if (profileAngle > pt.elevAngleRad) {
+            // Terrain at this bearing rises above the contour angle → occluded
+            if (pathStarted) { ctx.stroke(); pathStarted = false }
+            continue
+          }
+        }
+      }
+
+      // ── Tier 2: Silhouette occlusion check (multi-layer screen-Y) ─────
       // Check ALL silhouette layers at this bearing that are CLOSER than
       // the contour point. If ANY closer surface has a peakY above (<=)
       // the contour's screen Y, the contour is behind that surface.
@@ -1738,6 +2006,7 @@ function renderTerrain(
   silResolution: number = 0,
   silElevMin: number = 0,
   silElevMax: number = 0,
+  occlusionProfile: OcclusionProfile | null = null,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1822,7 +2091,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode)
+          silhouetteLayers, silResolution, darkMode, occlusionProfile)
       }
     }
 
@@ -2265,6 +2534,7 @@ function drawScanCanvas(
   showContourLines: boolean = true,
   showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
+  occlusionProfile: OcclusionProfile | null = null,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -2350,7 +2620,7 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax)
+      silhouetteLayers, silRes, silElevMin, silElevMax, occlusionProfile)
   }
 
   // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
@@ -2362,6 +2632,14 @@ function drawScanCanvas(
       skylineData.silhouette.resolution,
       cam,
     )
+    // Extend strands into mountain flanks using terrain profile
+    if (occlusionProfile) {
+      const viewerElev = skylineData.computedAt.groundElev + eyeHeight_m
+      extendStrandsIntoFlanks(
+        strands, occlusionProfile, silhouetteLayers, viewerElev,
+        skylineData.silhouette.numAzimuths, skylineData.silhouette.resolution,
+      )
+    }
     renderSilhouetteGlow(ctx, strands, cam, silElevMin, silElevMax, silRes, darkMode)
     renderSilhouetteStrokes(ctx, silhouetteLayers, strands, cam, silElevMin, silElevMax,
       silRes, darkMode)
@@ -2641,6 +2919,19 @@ const ScanScreen: React.FC = () => {
     const result = reprojectNearProfile(skylineData.nearProfile, viewerElev)
     const dt = performance.now() - t0
     log.info('Near-field profile reprojected', { ms: dt.toFixed(1), agl: height_m.toFixed(0) })
+    return result
+  }, [skylineData, height_m])
+
+  // ── Build terrain occlusion profile (100m–400km, Tier 1 contour occlusion) ─
+  // Converts raw effElev checkpoints → running-max angle envelope with ±2 az smoothing.
+  // ~2ms.  Re-runs when skyline or AGL changes.
+  const occlusionProfile = useMemo<OcclusionProfile | null>(() => {
+    if (!skylineData || !skylineData.terrainProfile) return null
+    const viewerElev = skylineData.computedAt.groundElev + height_m
+    const t0 = performance.now()
+    const result = buildOcclusionProfile(skylineData.terrainProfile, viewerElev)
+    const dt = performance.now() - t0
+    log.info('Occlusion profile built', { ms: dt.toFixed(1), checkpoints: result.profileN })
     return result
   }, [skylineData, height_m])
 
@@ -2974,6 +3265,7 @@ const ScanScreen: React.FC = () => {
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
       showContourLines, showSilhouetteLines, darkMode,
+      occlusionProfile,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -2986,7 +3278,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
-    projectedNearProfile,
+    projectedNearProfile, occlusionProfile,
     showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
   ])
 

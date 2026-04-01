@@ -566,6 +566,23 @@ export interface NearFieldProfile {
   floatsPerSample: 2
 }
 
+/** Continuous terrain profile: max effElev at log-spaced distance checkpoints per azimuth.
+ *  Used for Tier 1 contour occlusion — fills the 20km gap where silhouette candidates are sparse
+ *  (foothills rising continuously with no local maxima). */
+export interface TerrainProfile {
+  /** Max effElev per checkpoint per azimuth (numAzimuths × profileN floats).
+   *  Index: ai * profileN + pi. Value = -Infinity if no terrain sampled. */
+  profileData:  Float32Array
+  /** Checkpoint distances in metres (profileN entries, log-spaced 100m→400km). */
+  profileDists: Float32Array
+  /** Number of distance checkpoints (80). */
+  profileN:     number
+  /** Azimuth resolution (steps per degree). Matches silhouette resolution (8). */
+  resolution:   number
+  /** Total azimuths = 360 × resolution (2880). */
+  numAzimuths:  number
+}
+
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
@@ -609,6 +626,9 @@ export interface SkylineData {
    *  the ridgeline, not the full terrain surface shape.
    *  Null if near-field profile was not computed (e.g. very old worker). */
   nearProfile: NearFieldProfile | null
+  /** Continuous terrain profile (100m–400km) for contour occlusion.
+   *  Max effElev at 80 log-spaced checkpoints per azimuth.  Null if not computed. */
+  terrainProfile: TerrainProfile | null
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */
