@@ -254,12 +254,13 @@ function reprojectNearProfile(
 
 // ─── Terrain Profile → Occlusion Angle Envelope ────────────────────────────────
 
-/** Per-azimuth occlusion envelope: running-max elevation angle at each distance checkpoint.
+/** Per-azimuth terrain angle at each distance checkpoint.
  *  Used as Tier 1 contour occlusion — catches terrain behind continuously rising foothills
  *  where no silhouette candidates exist (no local maxima). */
 interface OcclusionProfile {
-  /** Running-max angle per azimuth per checkpoint (numAzimuths × profileN).
-   *  Index: ai * profileN + pi. Already smoothed ±2 azimuths. */
+  /** Raw terrain angle per azimuth per checkpoint (numAzimuths × profileN).
+   *  Index: ai * profileN + pi. Smoothed ±2 azimuths. NOT running-max — each
+   *  checkpoint stores the actual terrain angle at that distance only. */
   angles:      Float32Array
   /** Checkpoint distances (profileN entries). */
   dists:       Float32Array
@@ -273,12 +274,14 @@ interface OcclusionProfile {
 
 /**
  * Convert the worker's terrain profile (max effElev at distance checkpoints)
- * into a running-max elevation-angle envelope per azimuth.
+ * into per-checkpoint terrain angles per azimuth.
  *
- * For each azimuth, sweeps near→far converting effElev to angle, keeping a
- * running max so the envelope is monotonically non-decreasing (nearer terrain
- * always occludes farther).  Then applies ±2 azimuth max-window smoothing
- * so the envelope doesn't have sharp azimuthal edges.
+ * Unlike the previous running-max envelope, this stores the RAW terrain angle
+ * at each checkpoint independently. The Tier 1 occlusion check then compares
+ * only the 1-2 checkpoints immediately nearer than the contour — not the global
+ * max from all nearer terrain (which was too aggressive and ate visible contours).
+ *
+ * Applies ±2 azimuth max-window smoothing so angles don't have sharp edges.
  *
  * Cost: 2880 × 80 × 5 (smoothing window) ≈ 1.15M ops.  ~2ms.
  */
@@ -287,24 +290,19 @@ function buildOcclusionProfile(
   viewerElev: number,
 ): OcclusionProfile {
   const { profileData, profileDists, profileN, resolution, numAzimuths } = profile
-  const EARTH_R = 6_371_000
-  const REFRACTION_K = 0.13
 
-  // Step 1: Build raw running-max angle envelope per azimuth
+  // Step 1: Build raw per-checkpoint angle (NOT running-max)
   const raw = new Float32Array(numAzimuths * profileN)
   raw.fill(-Math.PI / 2)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
     const base = ai * profileN
-    let maxAngle = -Math.PI / 2
     for (let pi = 0; pi < profileN; pi++) {
       const effElev = profileData[base + pi]
       if (effElev > -Infinity) {
         const dist = profileDists[pi]
-        const angle = Math.atan2(effElev - viewerElev, dist)
-        if (angle > maxAngle) maxAngle = angle
+        raw[base + pi] = Math.atan2(effElev - viewerElev, dist)
       }
-      raw[base + pi] = maxAngle
     }
   }
 
@@ -1888,32 +1886,45 @@ function renderBandContours(
         continue
       }
 
-      // ── Tier 1: Terrain profile occlusion (continuous, cheap) ────────
-      // Check the running-max angle envelope at a distance CLOSER than this
-      // contour (7% buffer prevents a slope from hiding its own front-face).
-      // This catches terrain behind continuously rising foothills where no
-      // silhouette candidates exist (no local maxima → 20km gap).
+      // ── Tier 1: Terrain profile occlusion (local, cheap) ────────────
+      // Check only the 1-3 checkpoints immediately NEARER than this contour.
+      // If terrain at those specific distances has a higher angle, this contour
+      // is directly behind that terrain → occlude it.
+      //
+      // Unlike the old running-max approach, this does NOT accumulate from the
+      // viewer all the way out. A tall hill at 3km won't eat contours at 20km —
+      // painter's order handles that. Only terrain immediately in front matters.
       if (profile) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const pai = Math.round(normBearing * profile.resolution) % profile.numAzimuths
-        // Look up profile at 93% of contour distance (7% buffer)
-        const lookupDist = pt.dist * 0.93
-        // Binary search for the nearest checkpoint ≤ lookupDist
         const dists = profile.dists
         const pN = profile.profileN
+        // Binary search for the checkpoint at or just before the contour distance
         let lo = 0, hi = pN - 1
         while (lo < hi) {
           const mid = (lo + hi + 1) >> 1
-          if (dists[mid] <= lookupDist) lo = mid; else hi = mid - 1
+          if (dists[mid] <= pt.dist) lo = mid; else hi = mid - 1
         }
-        // lo is now the largest checkpoint ≤ lookupDist (or 0 if lookupDist < dists[0])
-        if (dists[lo] <= lookupDist) {
-          const profileAngle = profile.angles[pai * pN + lo]
-          if (profileAngle > pt.elevAngleRad) {
-            // Terrain at this bearing rises above the contour angle → occluded
-            if (pathStarted) { ctx.stroke(); pathStarted = false }
-            continue
+        // Check the 3 checkpoints immediately nearer (lo, lo-1, lo-2)
+        // These represent terrain at roughly the same depth as the contour
+        // and just in front of it. If any has a higher angle → occluded.
+        let profileOccluded = false
+        const CHECK_WINDOW = 3
+        const base = pai * pN
+        for (let k = 0; k < CHECK_WINDOW && lo - k >= 0; k++) {
+          const cpIdx = lo - k
+          // Skip checkpoints that are very far from the contour (>30% nearer)
+          // to avoid false occlusion from separate terrain features
+          if (dists[cpIdx] < pt.dist * 0.70) break
+          const cpAngle = profile.angles[base + cpIdx]
+          if (cpAngle > pt.elevAngleRad) {
+            profileOccluded = true
+            break
           }
+        }
+        if (profileOccluded) {
+          if (pathStarted) { ctx.stroke(); pathStarted = false }
+          continue
         }
       }
 
