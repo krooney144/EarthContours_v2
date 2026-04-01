@@ -691,13 +691,19 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   }
   logDists.reverse()  // far → near so nearer terrain wins
 
-  // Short-range log steps for the high-res near pass (extends to 31km for mid-near band)
-  const HIRES_MAX_DIST = 31_000
+  // Log steps for the high-res pass — covers all hi-res bands' distance ranges
+  // Compute max distance needed from hi-res band configs
+  let hiresMaxDist = 31_000
+  for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+    if (DEPTH_BANDS[bi].resolution && DEPTH_BANDS[bi].resolution! > resolution) {
+      hiresMaxDist = Math.max(hiresMaxDist, DEPTH_BANDS[bi].maxDist)
+    }
+  }
   const hiresLogDists: number[] = []
   let d2 = 200  // Start closer for near detail
-  while (d2 <= HIRES_MAX_DIST) {
+  while (d2 <= hiresMaxDist) {
     hiresLogDists.push(d2)
-    d2 *= 1.01  // Finer distance steps for near bands
+    d2 *= (d2 < 31_000) ? 1.01 : 1.015  // Fine steps near, coarser far
   }
   hiresLogDists.reverse()
 
@@ -860,7 +866,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
   }
 
-  // ── Phase 4: High-res pass (2880 azimuths, 0–31km) for near bands ────────
+  // ── Phase 4: High-res pass (2880 azimuths) for bands with resolution override ──
 
   if (hiresBandIndices.length > 0) {
     for (let ai = 0; ai < hiresNumAzimuths; ai++) {
