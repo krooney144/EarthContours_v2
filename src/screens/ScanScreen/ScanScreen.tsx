@@ -1891,31 +1891,28 @@ function renderBandContours(
       }
 
       // ── Tier 1: Terrain profile occlusion (running-max envelope) ─────
-      // Check the running-max angle envelope at a distance NEARER than this
-      // contour. Uses checkpoint-index offset (skip 3 checkpoints back) rather
-      // than a fixed distance percentage — this naturally scales with the
-      // log-spaced checkpoints (~30% nearer at all distances) and avoids a
-      // slope from occluding its own front-face contours.
+      // Check the running-max angle envelope at a distance CLOSER than this
+      // contour (7% buffer prevents a slope from hiding its own front-face).
+      // This catches terrain behind continuously rising foothills where no
+      // silhouette candidates exist (no local maxima → 20km gap).
       if (profile) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const pai = Math.round(normBearing * profile.resolution) % profile.numAzimuths
+        // Look up profile at 93% of contour distance (7% buffer)
+        const lookupDist = pt.dist * 0.93
+        // Binary search for the nearest checkpoint ≤ lookupDist
         const dists = profile.dists
         const pN = profile.profileN
-        // Binary search for the checkpoint at or just before the contour distance
         let lo = 0, hi = pN - 1
         while (lo < hi) {
           const mid = (lo + hi + 1) >> 1
-          if (dists[mid] <= pt.dist) lo = mid; else hi = mid - 1
+          if (dists[mid] <= lookupDist) lo = mid; else hi = mid - 1
         }
-        // Skip 3 checkpoints back to avoid front-face self-occlusion.
-        // With 80 log-spaced points (100m→400km), each step ≈ 11% farther,
-        // so 3 steps back ≈ 30% nearer distance. This is wide enough that
-        // a mountain's own rising slope won't eat its own contours, but
-        // close enough that foothills at 70% of the distance still occlude.
-        const lookupIdx = lo - 3
-        if (lookupIdx >= 0) {
-          const profileAngle = profile.angles[pai * pN + lookupIdx]
+        // lo is now the largest checkpoint ≤ lookupDist (or 0 if lookupDist < dists[0])
+        if (dists[lo] <= lookupDist) {
+          const profileAngle = profile.angles[pai * pN + lo]
           if (profileAngle > pt.elevAngleRad) {
+            // Terrain at this bearing rises above the contour angle → occluded
             if (pathStarted) { ctx.stroke(); pathStarted = false }
             continue
           }
