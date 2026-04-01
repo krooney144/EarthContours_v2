@@ -262,6 +262,9 @@ interface OcclusionProfile {
    *  Index: ai * profileN + pi. Each value is the max terrain angle over the
    *  preceding WINDOW_SIZE checkpoints (not from the viewer). Smoothed ±2 azimuths. */
   angles:      Float32Array
+  /** Raw terrain angle at each checkpoint (no windowing, no smoothing).
+   *  Used to check if a contour is ON visible terrain vs in a hidden valley. */
+  rawAngles:   Float32Array
   /** Checkpoint distances (profileN entries). */
   dists:       Float32Array
   /** Number of checkpoints. */
@@ -352,6 +355,7 @@ function buildOcclusionProfile(
 
   return {
     angles:      smoothed,
+    rawAngles,
     dists:       profileDists,
     profileN,
     resolution,
@@ -1914,31 +1918,49 @@ function renderBandContours(
         continue
       }
 
-      // ── Tier 1: Terrain profile occlusion (running-max envelope) ─────
-      // Check the running-max angle envelope at a distance CLOSER than this
-      // contour (7% buffer prevents a slope from hiding its own front-face).
-      // This catches terrain behind continuously rising foothills where no
-      // silhouette candidates exist (no local maxima → 20km gap).
+      // ── Tier 1: Terrain profile occlusion (windowed-max + valley check) ──
+      // Only occlude when:
+      //   1. The windowed-max at 93% of contour distance is ABOVE contour angle
+      //      (nearer terrain is higher)
+      //   2. The raw terrain at the contour's OWN distance is significantly BELOW
+      //      the windowed-max (terrain drops into a valley behind the hill)
+      //
+      // Without condition 2, a mountain's own rising slope occludes its own
+      // front-face contours — the slope at 93% distance is always above the
+      // lower contour. The valley check ensures we only cull contours that
+      // are genuinely hidden in a dip behind nearer terrain.
       if (profile) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const pai = Math.round(normBearing * profile.resolution) % profile.numAzimuths
-        // Look up profile at 93% of contour distance (7% buffer)
         const lookupDist = pt.dist * 0.93
-        // Binary search for the nearest checkpoint ≤ lookupDist
         const dists = profile.dists
         const pN = profile.profileN
+        // Binary search for checkpoint at buffer distance
         let lo = 0, hi = pN - 1
         while (lo < hi) {
           const mid = (lo + hi + 1) >> 1
           if (dists[mid] <= lookupDist) lo = mid; else hi = mid - 1
         }
-        // lo is now the largest checkpoint ≤ lookupDist (or 0 if lookupDist < dists[0])
         if (dists[lo] <= lookupDist) {
           const profileAngle = profile.angles[pai * pN + lo]
           if (profileAngle > pt.elevAngleRad) {
-            // Terrain at this bearing rises above the contour angle → occluded
-            if (pathStarted) { ctx.stroke(); pathStarted = false }
-            continue
+            // Nearer terrain is above — but is the contour ON the slope or in a valley?
+            // Find checkpoint at the contour's own distance
+            let cLo = lo, cHi = pN - 1
+            while (cLo < cHi) {
+              const mid = (cLo + cHi + 1) >> 1
+              if (dists[mid] <= pt.dist) cLo = mid; else cHi = mid - 1
+            }
+            const terrainAtContour = profile.rawAngles[pai * pN + cLo]
+            // Valley threshold: terrain at contour must be meaningfully below
+            // the nearer max. 0.005 rad ≈ 0.3° — if terrain only dips slightly,
+            // it's the same slope, not a valley.
+            const VALLEY_THRESHOLD = 0.005
+            if (profileAngle - terrainAtContour > VALLEY_THRESHOLD) {
+              // Terrain drops into a valley behind nearer hill → occlude
+              if (pathStarted) { ctx.stroke(); pathStarted = false }
+              continue
+            }
           }
         }
       }
