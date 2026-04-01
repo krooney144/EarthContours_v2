@@ -831,6 +831,81 @@ function renderNearFieldOcclusion(
   }
 }
 
+// ─── Full-Range Profile Occlusion Fill ────────────────────────────────────────
+
+/**
+ * Render opaque terrain fill from the full-range terrain profile (100m–400km).
+ *
+ * For each screen column, finds the max terrain angle from the profile's
+ * windowed-max envelope at that bearing and draws fill from that angle down
+ * to the screen bottom. This covers flank gaps where band ridgelines and
+ * silhouette candidates don't exist (continuously rising terrain with no
+ * local maximum), preventing far contour lines from bleeding through.
+ *
+ * Unlike the removed Tier 1 contour-killing approach, this uses painter's
+ * order: the fill is drawn BEFORE band rendering, so band fills + contours
+ * render ON TOP of it. Contours on visible terrain are never suppressed.
+ *
+ * Same pattern as renderNearFieldOcclusion() but for the full distance range.
+ */
+function renderProfileOcclusion(
+  ctx: CanvasRenderingContext2D,
+  profile: OcclusionProfile,
+  cam: CameraParams,
+  darkMode: boolean = true,
+): void {
+  const { W, H } = cam
+  const { angles, dists, profileN, resolution, numAzimuths } = profile
+
+  const fillColor = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
+
+  ctx.beginPath()
+  ctx.moveTo(0, H)
+
+  let hasVisiblePixels = false
+
+  for (let col = 0; col < W; col++) {
+    const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+    const normBearing = ((bearingDeg % 360) + 360) % 360
+    const fracIdx = normBearing * resolution
+    const ai0 = Math.floor(fracIdx) % numAzimuths
+    const ai1 = (ai0 + 1) % numAzimuths
+    const t = fracIdx - Math.floor(fracIdx)
+
+    // Use the raw (non-windowed) angle at each checkpoint to find the
+    // running-max terrain angle from the viewer outward. This is the terrain's
+    // visual envelope — the highest angle seen at any distance up to each point.
+    // The last checkpoint's running-max gives the overall terrain silhouette.
+    const base0 = ai0 * profileN
+    const base1 = ai1 * profileN
+    let maxAngle0 = -Math.PI / 2
+    let maxAngle1 = -Math.PI / 2
+    for (let pi = 0; pi < profileN; pi++) {
+      if (profile.rawAngles[base0 + pi] > maxAngle0) maxAngle0 = profile.rawAngles[base0 + pi]
+      if (profile.rawAngles[base1 + pi] > maxAngle1) maxAngle1 = profile.rawAngles[base1 + pi]
+    }
+
+    const maxAngle = maxAngle0 * (1 - t) + maxAngle1 * t
+
+    if (maxAngle <= -Math.PI / 2 + 0.001) {
+      ctx.lineTo(col, H)
+      continue
+    }
+
+    hasVisiblePixels = true
+    const { y } = project(bearingDeg, maxAngle, cam)
+    ctx.lineTo(col, Math.min(H, Math.max(0, Math.round(y))))
+  }
+
+  ctx.lineTo(W, H)
+  ctx.closePath()
+
+  if (hasVisiblePixels) {
+    ctx.fillStyle = fillColor
+    ctx.fill()
+  }
+}
+
 // ─── Silhouette Glow Constants (easy to tune) ─────────────────────────────────
 // Blur values interpolate logarithmically from near to far.
 const GLOW_BLUR_NEAR    = 20    // px — tight intense glow on very close terrain (<2km)
@@ -1918,62 +1993,11 @@ function renderBandContours(
         continue
       }
 
-      // ── Tier 1: Terrain profile occlusion (windowed-max + valley check) ──
-      // Only occlude when:
-      //   1. The windowed-max at 93% of contour distance is ABOVE contour angle
-      //      (nearer terrain is higher)
-      //   2. The raw terrain at the contour's OWN distance is significantly BELOW
-      //      the windowed-max (terrain drops into a valley behind the hill)
-      //
-      // Without condition 2, a mountain's own rising slope occludes its own
-      // front-face contours — the slope at 93% distance is always above the
-      // lower contour. The valley check ensures we only cull contours that
-      // are genuinely hidden in a dip behind nearer terrain.
-      if (profile) {
-        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
-        const pai = Math.round(normBearing * profile.resolution) % profile.numAzimuths
-        const lookupDist = pt.dist * 0.93
-        const dists = profile.dists
-        const pN = profile.profileN
-        // Binary search for checkpoint at buffer distance
-        let lo = 0, hi = pN - 1
-        while (lo < hi) {
-          const mid = (lo + hi + 1) >> 1
-          if (dists[mid] <= lookupDist) lo = mid; else hi = mid - 1
-        }
-        if (dists[lo] <= lookupDist) {
-          const profileAngle = profile.angles[pai * pN + lo]
-          if (profileAngle > pt.elevAngleRad) {
-            // Nearer terrain is above — but is the contour ON the slope or in a valley?
-            // Find checkpoint at the contour's own distance
-            let cLo = lo, cHi = pN - 1
-            while (cLo < cHi) {
-              const mid = (cLo + cHi + 1) >> 1
-              if (dists[mid] <= pt.dist) cLo = mid; else cHi = mid - 1
-            }
-            const terrainAtContour = profile.rawAngles[pai * pN + cLo]
-            // Valley threshold: terrain at contour must be meaningfully below
-            // the nearer max. 0.005 rad ≈ 0.3° — if terrain only dips slightly,
-            // it's the same slope, not a valley.
-            const VALLEY_THRESHOLD = 0.005
-            if (profileAngle - terrainAtContour > VALLEY_THRESHOLD) {
-              // Terrain drops into a valley behind nearer hill → occlude
-              if (pathStarted) { ctx.stroke(); pathStarted = false }
-              continue
-            }
-          }
-        }
-      }
-
-      // ── Tier 2: Silhouette occlusion check (multi-layer screen-Y) ─────
+      // ── Silhouette occlusion check (multi-layer screen-Y) ──────────────
       // Check ALL silhouette layers at this bearing that are CLOSER than
-      // the contour point. A nearer layer occludes this contour only if:
-      //   1. The layer's peak is above the contour (peakY <= contourY)
-      //   2. The layer's base is ALSO above the contour (baseY <= contourY)
-      // Condition 2 is critical: if the contour is below the nearer layer's
-      // baseAngle, it's in the visible gap BETWEEN layers — not behind fill.
-      // Without this, contours on a mountain's front face get killed by a
-      // closer ridge whose fill doesn't actually extend down that far.
+      // the contour point. If ANY closer surface's peakY is above (<=)
+      // the contour's screen Y, the contour is behind that surface.
+      // Layers are sorted near→far, so we iterate until dist >= pt.dist.
       if (hasSilOcclusion && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const ai = Math.round(normBearing * silResolution) % numSilAz
@@ -1985,18 +2009,12 @@ function renderBandContours(
             if (layer.isOcean) continue
             // Only check surfaces CLOSER than this contour point
             if (layer.dist >= pt.dist) break  // layers sorted near→far, done
-            // Project this closer surface's peak AND base to screen Y
+            // Project this closer surface's peak to screen Y
             const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
             if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
-              // Contour is below the nearer peak — but is it also below the base?
-              // If below the base, it's in the visible gap between layers.
-              const silBase = project(pt.bearingDeg, layer.baseAngle, cam)
-              if (y <= silBase.y + OCCLUSION_TOLERANCE_PX) {
-                // Contour is between peak and base → behind this layer's fill
-                occluded = true
-                break
-              }
-              // Contour is below the base → in visible gap, keep checking
+              // Contour point is at or below a closer surface's ridgeline
+              occluded = true
+              break
             }
           }
         }
@@ -2673,6 +2691,14 @@ function drawScanCanvas(
         if (layer.rawElev > silElevMax) silElevMax = layer.rawElev
       }
     }
+  }
+
+  // ── 2a. Profile-based terrain fill (covers flank gaps) ──────────────────
+  // Draws opaque fill from the terrain profile's envelope. This covers
+  // flank azimuths where band ridgelines drop off (no silhouette candidate).
+  // Drawn BEFORE bands so band fills + contours render ON TOP via painter's order.
+  if (occlusionProfile && showFill) {
+    renderProfileOcclusion(ctx, occlusionProfile, cam, darkMode)
   }
 
   if (skylineData) {
