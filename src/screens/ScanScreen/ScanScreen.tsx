@@ -1945,9 +1945,13 @@ function renderBandContours(
 
       // ── Tier 2: Silhouette occlusion check (multi-layer screen-Y) ─────
       // Check ALL silhouette layers at this bearing that are CLOSER than
-      // the contour point. If ANY closer surface has a peakY above (<=)
-      // the contour's screen Y, the contour is behind that surface.
-      // Layers are sorted near→far, so we iterate until dist >= pt.dist.
+      // the contour point. A nearer layer occludes this contour only if:
+      //   1. The layer's peak is above the contour (peakY <= contourY)
+      //   2. The layer's base is ALSO above the contour (baseY <= contourY)
+      // Condition 2 is critical: if the contour is below the nearer layer's
+      // baseAngle, it's in the visible gap BETWEEN layers — not behind fill.
+      // Without this, contours on a mountain's front face get killed by a
+      // closer ridge whose fill doesn't actually extend down that far.
       if (hasSilOcclusion && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const ai = Math.round(normBearing * silResolution) % numSilAz
@@ -1959,12 +1963,18 @@ function renderBandContours(
             if (layer.isOcean) continue
             // Only check surfaces CLOSER than this contour point
             if (layer.dist >= pt.dist) break  // layers sorted near→far, done
-            // Project this closer surface's peak to screen Y
+            // Project this closer surface's peak AND base to screen Y
             const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
             if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
-              // Contour point is at or below a closer surface's ridgeline
-              occluded = true
-              break
+              // Contour is below the nearer peak — but is it also below the base?
+              // If below the base, it's in the visible gap between layers.
+              const silBase = project(pt.bearingDeg, layer.baseAngle, cam)
+              if (y <= silBase.y + OCCLUSION_TOLERANCE_PX) {
+                // Contour is between peak and base → behind this layer's fill
+                occluded = true
+                break
+              }
+              // Contour is below the base → in visible gap, keep checking
             }
           }
         }
