@@ -109,6 +109,8 @@ interface SkylineBand {
   ridgeLngs:   Float32Array
   crossingData:    Float32Array
   crossingOffsets: Uint32Array
+  coastDistances:  Float32Array   // Packed [distance_m, type] per coast transition
+  coastOffsets:    Uint32Array    // Per-azimuth offset into coastDistances
   resolution:  number      // Steps per degree for this band
   numAzimuths: number      // 360 × resolution
 }
@@ -369,6 +371,72 @@ function sampleBest(lat: number, lng: number, zoom: number): number {
   const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
   if (grid) return Math.max(0, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
   return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
+}
+
+// ─── Ocean Detection: Exclusion Zones & Raw Sampling ─────────────────────────
+
+/** Minimum radial width (metres) of a land segment to be considered real terrain.
+ *  Anything narrower between two ocean stretches is classified as an SRTM spike. */
+const SPIKE_WIDTH_M = 250
+
+/** Known below-sea-level inland depressions where DEM reads ≤0 but it's NOT ocean.
+ *  Ocean detection is skipped entirely within these radii. */
+const EXCLUSION_ZONES: readonly { lat: number; lng: number; radiusKm: number }[] = [
+  { lat: 36.23,  lng: -116.83, radiusKm: 45  },  // Death Valley, CA
+  { lat: 33.30,  lng: -115.85, radiusKm: 30  },  // Salton Sea, CA
+  { lat: 31.50,  lng:   35.50, radiusKm: 40  },  // Dead Sea
+  { lat: 29.50,  lng:   26.80, radiusKm: 65  },  // Qattara Depression, Egypt
+  { lat: 14.20,  lng:   40.30, radiusKm: 30  },  // Danakil Depression, Ethiopia
+  { lat: 42.90,  lng:   89.20, radiusKm: 30  },  // Turpan Depression, China
+  { lat: 46.00,  lng:   48.00, radiusKm: 110 },  // Caspian Depression, RU/KZ
+  { lat: -28.40, lng:  137.40, radiusKm: 80  },  // Lake Eyre, Australia
+  { lat: -49.58, lng:  -68.35, radiusKm: 10  },  // Laguna del Carbón, Argentina
+  { lat: 38.45,  lng:   56.30, radiusKm: 15  },  // Vpadina Akchanaya, Turkmenistan
+  { lat: -12.00, lng:   44.26, radiusKm: 5   },  // Lake Assal, Djibouti
+  { lat: -155.0, lng:   30.90, radiusKm: 5   },  // Sabkhat Ghuzayyil, Libya
+]
+
+/** Check if a viewer position is inside any exclusion zone.
+ *  Returns true → skip all ocean detection for this skyline computation. */
+function isViewerInExclusionZone(viewerLat: number, viewerLng: number, maxRange: number): boolean {
+  for (const zone of EXCLUSION_ZONES) {
+    // Quick lat/lng degree check before expensive trig (~1° ≈ 111km)
+    const dLat = Math.abs(viewerLat - zone.lat)
+    const dLng = Math.abs(viewerLng - zone.lng)
+    const maxDeg = (zone.radiusKm + maxRange / 1000) / 111
+    if (dLat > maxDeg || dLng > maxDeg) continue
+
+    const dLatM = dLat * 111_132
+    const dLngM = dLng * 111_320 * Math.cos(viewerLat * DEG_TO_RAD)
+    const distKm = Math.sqrt(dLatM * dLatM + dLngM * dLngM) / 1000
+    if (distKm < zone.radiusKm + maxRange / 1000) return true
+  }
+  return false
+}
+
+/** Check if a specific sample point is inside any exclusion zone. */
+function isPointInExclusionZone(lat: number, lng: number): boolean {
+  for (const zone of EXCLUSION_ZONES) {
+    const dLat = Math.abs(lat - zone.lat)
+    const dLng = Math.abs(lng - zone.lng)
+    const maxDeg = zone.radiusKm / 111
+    if (dLat > maxDeg || dLng > maxDeg) continue
+
+    const dLatM = dLat * 111_132
+    const dLngM = dLng * 111_320 * Math.cos(lat * DEG_TO_RAD)
+    const distKm = Math.sqrt(dLatM * dLatM + dLngM * dLngM) / 1000
+    if (distKm < zone.radiusKm) return true
+  }
+  return false
+}
+
+/** Raw elevation sample WITHOUT ocean clamping.
+ *  Returns the actual DEM value (can be negative for ocean). */
+function sampleRaw(lat: number, lng: number, zoom: number): number {
+  const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
+  const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
+  if (grid) return sampleTileGrid(grid, lat, lng, zoom, tx, ty)
+  return -1  // No tile — treat as ocean
 }
 
 /** Hill shade at a terrain point (NW-45° light). */
@@ -726,11 +794,24 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     }
   }
 
+  // Ocean state machine constants (used in standard, hi-res, and ultra-near passes)
+  const ST_LAND = 0, ST_OCEAN = 1, ST_TENTATIVE = 2
+
   // ── Phase 3: Compute 360° skyline — standard resolution pass ──────────────
 
   const angles    = new Float32Array(numAzimuths)
   const distances = new Float32Array(numAzimuths)
   const shading   = new Float32Array(numAzimuths)
+
+  // ── Ocean detection gate ────────────────────────────────────────────────────
+  // Skip ocean detection entirely if the viewer is inside a known below-sea-level
+  // inland depression (Death Valley, Dead Sea, etc.).
+  const enableOceanDetection = !isViewerInExclusionZone(viewerLat, viewerLng, maxRange)
+  if (enableOceanDetection) {
+    console.log('[OCEAN] Ocean detection ENABLED for this skyline computation')
+  } else {
+    console.log('[OCEAN] Ocean detection DISABLED (viewer near exclusion zone)')
+  }
 
   // Allocate per-band arrays with per-band resolution
   const bands: SkylineBand[] = DEPTH_BANDS.map((cfg) => {
@@ -743,6 +824,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       ridgeLngs:       new Float32Array(bandAz),
       crossingData:    new Float32Array(0),  // Will be packed after march
       crossingOffsets: new Uint32Array(bandAz + 1),
+      coastDistances:  new Float32Array(0),  // Will be packed after march
+      coastOffsets:    new Uint32Array(bandAz + 1),
       resolution:      bandRes,
       numAzimuths:     bandAz,
     }
@@ -751,6 +834,14 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // Temp storage for crossings: per-band, per-azimuth
   // bandCrossingsTemp[bi][ai] = [elev, dist, lat, lng, elev, dist, lat, lng, ...]
   const bandCrossingsTemp: number[][][] = DEPTH_BANDS.map((cfg) => {
+    const bandAz = Math.round(360 * (cfg.resolution || resolution))
+    return Array.from({ length: bandAz }, () => [])
+  })
+
+  // Temp storage for coast transitions: per-band, per-azimuth
+  // bandCoastTemp[bi][ai] = [distance_m, type, distance_m, type, ...]
+  // type: +1.0 = land-to-ocean, -1.0 = ocean-to-land
+  const bandCoastTemp: number[][][] = DEPTH_BANDS.map((cfg) => {
     const bandAz = Math.round(360 * (cfg.resolution || resolution))
     return Array.from({ length: bandAz }, () => [])
   })
@@ -787,12 +878,32 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
     const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
 
+    // ── Per-band ocean/spike state machine (single-pass) ─────────────────────
+    // States: 0=CONFIRMED_LAND, 1=OCEAN, 2=TENTATIVE_LAND
+    // TENTATIVE_LAND = land segment after ocean, not yet wide enough to confirm
+    // (ST_LAND/ST_OCEAN/ST_TENTATIVE constants defined at function scope above)
+    const bandOceanState: number[] = new Array(DEPTH_BANDS.length).fill(ST_LAND)
+    const bandLandStartDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+    // Buffered ridgeline candidate during TENTATIVE_LAND state
+    const bandTentAngle: number[] = new Array(DEPTH_BANDS.length).fill(-Math.PI / 2)
+    const bandTentDist:  number[] = new Array(DEPTH_BANDS.length).fill(0)
+    const bandTentLat:   number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
+    const bandTentLng:   number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+    const bandTentElev:  number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
+    // Track whether this azimuth has seen ocean at all in each band's range
+    const bandSeenOcean: boolean[] = new Array(DEPTH_BANDS.length).fill(false)
+    // Track previous ocean state dist for coast transitions
+    const bandLastOceanDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
       const zoom    = distToZoom(dist)
-      const rawElev = sampleBest(sLat, sLng, zoom)
+      // Single sample call: raw for ocean classification, clamped for geometry
+      const rawElevUnclamped = enableOceanDetection ? sampleRaw(sLat, sLng, zoom) : sampleBest(sLat, sLng, zoom)
+      const rawElev = Math.max(0, rawElevUnclamped)
+      const isOceanSample = enableOceanDetection && rawElevUnclamped <= 0
 
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
@@ -800,7 +911,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
       if (elevAngle > Math.PI / 3) continue
 
-      // Overall maximum
+      // Overall maximum (spike-unaware — spikes in the overall array are minor
+      // since the overall angles are only used for peak visibility, not fill)
       if (elevAngle > maxAngle) {
         maxAngle  = elevAngle
         ridgeDist = dist
@@ -808,13 +920,91 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         ridgeLng  = sLng
       }
 
-      // Per-band: ridgeline tracking + crossing detection (standard-res bands only)
+      // Per-band: ridgeline tracking + crossing detection + ocean state (standard-res bands only)
       for (const bi of standardBandIndices) {
         const band = DEPTH_BANDS[bi]
         if (dist < band.minDist || dist > band.maxDist) continue
 
-        // Ridgeline: track maximum elevation angle
-        if (elevAngle > bandMaxAngles[bi]) {
+        // ── Ocean/spike state machine ──────────────────────────────────────
+        // March is far→near, so distance DECREASES. "land start" is the farther
+        // edge, "land end" is the nearer edge. Width = landStartDist - dist.
+        if (enableOceanDetection) {
+          const state = bandOceanState[bi]
+
+          if (isOceanSample) {
+            if (state === ST_TENTATIVE) {
+              // Land segment ended (went back to ocean) — check width
+              const landWidth = bandLandStartDist[bi] - dist
+              if (landWidth < SPIKE_WIDTH_M) {
+                // SPIKE — discard buffered ridgeline candidate, don't record transition
+                // (The land→ocean and ocean→land transitions from this spike are erased)
+              } else {
+                // Real land segment — flush buffered ridgeline
+                if (bandTentAngle[bi] > bandMaxAngles[bi]) {
+                  bandMaxAngles[bi] = bandTentAngle[bi]
+                  bandRidgeDist[bi] = bandTentDist[bi]
+                  bandRidgeLat[bi]  = bandTentLat[bi]
+                  bandRidgeLng[bi]  = bandTentLng[bi]
+                  bandRidgeElev[bi] = bandTentElev[bi]
+                }
+                // Record coast transitions: ocean→land at landStartDist, land→ocean at dist
+                bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)  // ocean→land (far edge)
+                bandCoastTemp[bi][ai].push(dist, 1.0)                     // land→ocean (near edge)
+              }
+            } else if (state === ST_LAND) {
+              // First ocean sample after confirmed land — record coast transition
+              bandCoastTemp[bi][ai].push(dist, 1.0)  // land→ocean
+            }
+            bandOceanState[bi] = ST_OCEAN
+            bandSeenOcean[bi] = true
+            bandLastOceanDist[bi] = dist
+          } else {
+            // Elevated sample
+            if (state === ST_OCEAN) {
+              // Entering land from ocean — start tentative tracking
+              bandOceanState[bi] = ST_TENTATIVE
+              bandLandStartDist[bi] = dist
+              bandTentAngle[bi] = elevAngle
+              bandTentDist[bi]  = dist
+              bandTentLat[bi]   = sLat
+              bandTentLng[bi]   = sLng
+              bandTentElev[bi]  = rawElev
+            } else if (state === ST_TENTATIVE) {
+              // Still in tentative land — update buffer if better ridgeline
+              if (elevAngle > bandTentAngle[bi]) {
+                bandTentAngle[bi] = elevAngle
+                bandTentDist[bi]  = dist
+                bandTentLat[bi]   = sLat
+                bandTentLng[bi]   = sLng
+                bandTentElev[bi]  = rawElev
+              }
+              // Check if land segment is now wide enough to confirm
+              const landWidth = bandLandStartDist[bi] - dist
+              if (landWidth >= SPIKE_WIDTH_M) {
+                // Confirmed real land — flush buffer and switch to CONFIRMED_LAND
+                if (bandTentAngle[bi] > bandMaxAngles[bi]) {
+                  bandMaxAngles[bi] = bandTentAngle[bi]
+                  bandRidgeDist[bi] = bandTentDist[bi]
+                  bandRidgeLat[bi]  = bandTentLat[bi]
+                  bandRidgeLng[bi]  = bandTentLng[bi]
+                  bandRidgeElev[bi] = bandTentElev[bi]
+                }
+                // Record ocean→land transition at the far edge
+                bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)
+                bandOceanState[bi] = ST_LAND
+              }
+            }
+            // ST_LAND (confirmed): normal ridgeline tracking below
+          }
+        }
+
+        // Ridgeline tracking — skip if in TENTATIVE state (deferred) or ocean
+        const skipRidgeline = enableOceanDetection && (
+          bandOceanState[bi] === ST_OCEAN ||
+          bandOceanState[bi] === ST_TENTATIVE ||
+          isOceanSample
+        )
+        if (!skipRidgeline && elevAngle > bandMaxAngles[bi]) {
           bandMaxAngles[bi] = elevAngle
           bandRidgeDist[bi] = dist
           bandRidgeLat[bi]  = sLat
@@ -836,6 +1026,29 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         bandPrevDist[bi] = dist
         bandPrevLat[bi]  = sLat
         bandPrevLng[bi]  = sLng
+      }
+    }
+
+    // ── Flush any pending TENTATIVE land segments at end of azimuth ──────────
+    // The march ended (reached nearest distance) while still in TENTATIVE state.
+    // This means land extends from the tentative start all the way to the viewer.
+    if (enableOceanDetection) {
+      for (const bi of standardBandIndices) {
+        if (bandOceanState[bi] === ST_TENTATIVE) {
+          // Land segment reaches the viewer — it's real (connected to viewer position)
+          if (bandTentAngle[bi] > bandMaxAngles[bi]) {
+            bandMaxAngles[bi] = bandTentAngle[bi]
+            bandRidgeDist[bi] = bandTentDist[bi]
+            bandRidgeLat[bi]  = bandTentLat[bi]
+            bandRidgeLng[bi]  = bandTentLng[bi]
+            bandRidgeElev[bi] = bandTentElev[bi]
+          }
+          // Record ocean→land transition at the far edge of this land segment
+          bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)
+        }
+        // Reset state for next azimuth
+        bandOceanState[bi] = ST_LAND
+        bandSeenOcean[bi] = false
       }
     }
 
@@ -889,12 +1102,23 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
       const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
 
+      // Per-band ocean/spike state machine (same as standard pass)
+      const hrOceanState: number[] = new Array(DEPTH_BANDS.length).fill(ST_LAND)
+      const hrLandStartDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
+      const hrTentAngle: number[] = new Array(DEPTH_BANDS.length).fill(-Math.PI / 2)
+      const hrTentDist:  number[] = new Array(DEPTH_BANDS.length).fill(0)
+      const hrTentLat:   number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
+      const hrTentLng:   number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+      const hrTentElev:  number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
+
       for (const dist of hiresLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
         const zoom    = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom)
+        const rawElevUnclamped = enableOceanDetection ? sampleRaw(sLat, sLng, zoom) : sampleBest(sLat, sLng, zoom)
+        const rawElev = Math.max(0, rawElevUnclamped)
+        const isOceanSample = enableOceanDetection && rawElevUnclamped <= 0
 
         const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev   = rawElev - curvDrop
@@ -906,8 +1130,70 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           const band = DEPTH_BANDS[bi]
           if (dist < band.minDist || dist > band.maxDist) continue
 
-          // Ridgeline: track maximum elevation angle
-          if (elevAngle > bandMaxAngles[bi]) {
+          // ── Ocean/spike state machine (same logic as standard pass) ──────
+          if (enableOceanDetection) {
+            const state = hrOceanState[bi]
+
+            if (isOceanSample) {
+              if (state === ST_TENTATIVE) {
+                const landWidth = hrLandStartDist[bi] - dist
+                if (landWidth < SPIKE_WIDTH_M) {
+                  // SPIKE — discard
+                } else {
+                  if (hrTentAngle[bi] > bandMaxAngles[bi]) {
+                    bandMaxAngles[bi] = hrTentAngle[bi]
+                    bandRidgeDist[bi] = hrTentDist[bi]
+                    bandRidgeLat[bi]  = hrTentLat[bi]
+                    bandRidgeLng[bi]  = hrTentLng[bi]
+                    bandRidgeElev[bi] = hrTentElev[bi]
+                  }
+                  bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
+                  bandCoastTemp[bi][ai].push(dist, 1.0)
+                }
+              } else if (state === ST_LAND) {
+                bandCoastTemp[bi][ai].push(dist, 1.0)
+              }
+              hrOceanState[bi] = ST_OCEAN
+            } else {
+              if (state === ST_OCEAN) {
+                hrOceanState[bi] = ST_TENTATIVE
+                hrLandStartDist[bi] = dist
+                hrTentAngle[bi] = elevAngle
+                hrTentDist[bi]  = dist
+                hrTentLat[bi]   = sLat
+                hrTentLng[bi]   = sLng
+                hrTentElev[bi]  = rawElev
+              } else if (state === ST_TENTATIVE) {
+                if (elevAngle > hrTentAngle[bi]) {
+                  hrTentAngle[bi] = elevAngle
+                  hrTentDist[bi]  = dist
+                  hrTentLat[bi]   = sLat
+                  hrTentLng[bi]   = sLng
+                  hrTentElev[bi]  = rawElev
+                }
+                const landWidth = hrLandStartDist[bi] - dist
+                if (landWidth >= SPIKE_WIDTH_M) {
+                  if (hrTentAngle[bi] > bandMaxAngles[bi]) {
+                    bandMaxAngles[bi] = hrTentAngle[bi]
+                    bandRidgeDist[bi] = hrTentDist[bi]
+                    bandRidgeLat[bi]  = hrTentLat[bi]
+                    bandRidgeLng[bi]  = hrTentLng[bi]
+                    bandRidgeElev[bi] = hrTentElev[bi]
+                  }
+                  bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
+                  hrOceanState[bi] = ST_LAND
+                }
+              }
+            }
+          }
+
+          // Ridgeline tracking — skip if in TENTATIVE/OCEAN state
+          const skipRidgeline = enableOceanDetection && (
+            hrOceanState[bi] === ST_OCEAN ||
+            hrOceanState[bi] === ST_TENTATIVE ||
+            isOceanSample
+          )
+          if (!skipRidgeline && elevAngle > bandMaxAngles[bi]) {
             bandMaxAngles[bi] = elevAngle
             bandRidgeDist[bi] = dist
             bandRidgeLat[bi]  = sLat
@@ -929,6 +1215,22 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           bandPrevDist[bi] = dist
           bandPrevLat[bi]  = sLat
           bandPrevLng[bi]  = sLng
+        }
+      }
+
+      // Flush pending TENTATIVE state at end of hi-res azimuth
+      if (enableOceanDetection) {
+        for (const bi of hiresBandIndices) {
+          if (hrOceanState[bi] === ST_TENTATIVE) {
+            if (hrTentAngle[bi] > bandMaxAngles[bi]) {
+              bandMaxAngles[bi] = hrTentAngle[bi]
+              bandRidgeDist[bi] = hrTentDist[bi]
+              bandRidgeLat[bi]  = hrTentLat[bi]
+              bandRidgeLng[bi]  = hrTentLng[bi]
+              bandRidgeElev[bi] = hrTentElev[bi]
+            }
+            bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
+          }
         }
       }
 
@@ -1195,6 +1497,39 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands[bi].crossingOffsets = offsets
   }
 
+  // ── Phase 5a: Pack coast transition data into flat arrays ─────────────────
+
+  let totalCoastTransitions = 0
+  for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+    const azCoast = bandCoastTemp[bi]
+    const bandAz = bands[bi].numAzimuths
+    const offsets = new Uint32Array(bandAz + 1)
+
+    let totalFloats = 0
+    for (let ai = 0; ai < bandAz; ai++) {
+      offsets[ai] = totalFloats
+      totalFloats += azCoast[ai].length  // Already in groups of 2 [distance, type]
+    }
+    offsets[bandAz] = totalFloats
+
+    const data = new Float32Array(totalFloats)
+    let idx = 0
+    for (let ai = 0; ai < bandAz; ai++) {
+      const c = azCoast[ai]
+      for (let j = 0; j < c.length; j++) {
+        data[idx++] = c[j]
+      }
+    }
+
+    bands[bi].coastDistances = data
+    bands[bi].coastOffsets = offsets
+    totalCoastTransitions += totalFloats / 2
+  }
+
+  if (enableOceanDetection) {
+    console.log(`[OCEAN] Packed ${totalCoastTransitions} coast transitions across ${DEPTH_BANDS.length} bands`)
+  }
+
   // ── Phase 5b: Pack silhouette candidates into flat transferable arrays ────
 
   const silOffsets = new Uint32Array(SILHOUETTE_NUM_AZIMUTHS + 1)
@@ -1349,6 +1684,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       band.distances.buffer as ArrayBuffer,
       band.ridgeLats.buffer as ArrayBuffer,
       band.ridgeLngs.buffer as ArrayBuffer,
+      band.coastDistances.buffer as ArrayBuffer,
+      band.coastOffsets.buffer as ArrayBuffer,
       band.crossingData.buffer as ArrayBuffer,
       band.crossingOffsets.buffer as ArrayBuffer,
     )
