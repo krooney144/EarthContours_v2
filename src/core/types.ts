@@ -292,9 +292,9 @@ export interface ContourLine {
  * Each band stores per-azimuth raw elevation + distance so the main thread can
  * re-project angles when AGL changes without a worker round-trip.
  *
- * Overlaps are scaled by distance (0.5 km close, 1 km mid, 2 km far) to prevent
- * seams at boundaries where a ridge straddles the cutoff.  Painter's order
- * (far drawn first, near on top) handles the visual overlap.
+ * Clean non-overlapping boundaries — the ray march step size (~100m at 10km)
+ * is fine enough that crossings at boundaries are always captured.
+ * Single source of truth: worker and main thread both import this config.
  */
 export interface DepthBandConfig {
   /** Unique label for debugging */
@@ -305,18 +305,20 @@ export interface DepthBandConfig {
   maxDist: number
   /** Azimuth resolution for this band (steps per degree). If omitted, uses the global resolution. */
   resolution?: number
+  /** Contour interval in metres for this band */
+  contourInterval: number
 }
 
-/** 6-band configuration: immediate through far, non-overlapping distance ranges.
+/** 6-band configuration: ultra-near through far, clean non-overlapping boundaries.
  *  Bands 0–3 are high-res (8 steps/°, 2880 azimuths).
- *  Bands 4–5 are standard-res (4 steps/°, 1440 azimuths). */
+ *  Bands 4–5 are standard-res (uses global resolution, typically 2 steps/°, 1440 azimuths). */
 export const DEPTH_BANDS: DepthBandConfig[] = [
-  { label: 'immediate',  minDist: 0,        maxDist: 1_000,   resolution: 8 },  // 0–1 km     (0.125°, 2880 az)
-  { label: 'ultra-near', minDist: 1_000,    maxDist: 5_000,   resolution: 8 },  // 1–5 km     (0.125°, 2880 az)
-  { label: 'near',       minDist: 5_000,    maxDist: 15_000,  resolution: 8 },  // 5–15 km    (0.125°, 2880 az)
-  { label: 'mid',        minDist: 15_000,   maxDist: 70_000,  resolution: 8 },  // 15–70 km   (0.125°, 2880 az)
-  { label: 'mid-far',    minDist: 70_000,   maxDist: 152_000 },                  // 70–152 km  (0.25°, 1440 az)
-  { label: 'far',        minDist: 152_000,  maxDist: 400_000 },                  // 152–400 km (0.25°, 1440 az)
+  { label: 'ultra-near', minDist: 0,        maxDist: 4_500,    resolution: 8, contourInterval: 15.24  },  // 0–4.5 km     50ft
+  { label: 'near',       minDist: 4_500,    maxDist: 10_500,   resolution: 8, contourInterval: 30.48  },  // 4.5–10.5 km  100ft
+  { label: 'mid-near',   minDist: 10_500,   maxDist: 31_000,   resolution: 8, contourInterval: 60.96  },  // 10.5–31 km   200ft
+  { label: 'mid',        minDist: 31_000,   maxDist: 81_000,   resolution: 8, contourInterval: 60.96  },  // 31–81 km     200ft
+  { label: 'mid-far',    minDist: 81_000,   maxDist: 152_000,                 contourInterval: 152.4  },  // 81–152 km    500ft
+  { label: 'far',        minDist: 152_000,  maxDist: 400_000,                 contourInterval: 304.8  },  // 152–400 km   1000ft
 ]
 
 /**

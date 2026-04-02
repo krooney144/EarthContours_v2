@@ -934,10 +934,7 @@ function renderSilhouetteStrokes(
 
 // ─── Contour Strand Precomputation ────────────────────────────────────────────
 
-/** Contour interval in metres for each depth band index.
- *  Progressive density: ultra-near = 50ft, near = 100ft, mid-near = 200ft,
- *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
-const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 60.96, 152.4, 304.8]
+// Contour intervals now in DEPTH_BANDS[bi].contourInterval (shared config from types.ts)
 
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
@@ -968,7 +965,7 @@ function buildContourStrands(
     const bandRes = band.resolution
     const offsets = band.crossingOffsets
     const data = band.crossingData
-    const interval = CONTOUR_INTERVALS_M[bi] || 152.4
+    const interval = DEPTH_BANDS[bi].contourInterval
 
     // DEBUG: Log crossing data availability per band
     console.log(`[CONTOUR-DEBUG] Band ${bi} (${bandAz}az, res=${bandRes}): crossingData=${data?.length ?? 0} floats, crossings≈${data ? Math.floor(data.length / 5) : 0}, offsets=${offsets?.length ?? 0}`)
@@ -3367,7 +3364,7 @@ const ScanScreen: React.FC = () => {
                       const bStyle = bandStyleForIndex(i, bandStats.length)
                       return (
                         <div key={bs.label} style={{ color: bandColor }}>
-                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidthNear.toFixed(0)}→{bStyle.lineWidthFar.toFixed(0)}px c:{Math.round((CONTOUR_INTERVALS_M[i] || 0) / 0.3048)}ft
+                          {bs.label} {rangeStr}: {bs.active}/{bs.bandAz}az{resLabel} lw:{bStyle.lineWidthNear.toFixed(0)}→{bStyle.lineWidthFar.toFixed(0)}px c:{Math.round((DEPTH_BANDS[i]?.contourInterval || 0) / 0.3048)}ft
                           {bs.active > 0 && (
                             <>
                               {' '}∠{(bs.centerAngle * 180 / Math.PI).toFixed(2)}°

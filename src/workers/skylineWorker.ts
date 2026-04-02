@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 
+import { DEPTH_BANDS } from '../core/types'
+
 /**
  * EarthContours — Skyline Web Worker
  *
@@ -63,14 +65,7 @@ const LIGHT_X = -0.5, LIGHT_Y = 0.707, LIGHT_Z = 0.5
  *  Progressive density: dense where visible (near), sparse where faded (far).
  *  ultra-near = 50ft, near = 100ft, mid-near = 200ft,
  *  mid = 200ft, mid-far = 500ft, far = 1000ft. */
-const CONTOUR_INTERVALS_M: number[] = [
-  15.24,   // ultra-near: 50ft
-  30.48,   // near:       100ft
-  60.96,   // mid-near:   200ft
-  60.96,   // mid:        200ft
-  152.4,   // mid-far:    500ft
-  304.8,   // far:        1000ft
-]
+// Contour intervals are now in DEPTH_BANDS[bi].contourInterval (shared config from types.ts)
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -85,22 +80,7 @@ export interface SkylineRequest {
   maxRange:     number
 }
 
-/** Depth band distance config — mirrors DEPTH_BANDS from types.ts */
-interface BandConfig {
-  label:      string
-  minDist:    number
-  maxDist:    number
-  resolution?: number   // Per-band azimuth resolution override
-}
-
-const DEPTH_BANDS: BandConfig[] = [
-  { label: 'ultra-near', minDist: 0,       maxDist: 4_500,   resolution: 8 },  // 0–4.5 km   (0.125°, 2880 az)
-  { label: 'near',       minDist: 4_000,   maxDist: 10_500,  resolution: 8 },  // 4–10.5 km  (0.125°, 2880 az)
-  { label: 'mid-near',   minDist: 10_000,  maxDist: 31_000,  resolution: 8 },  // 10–31 km   (0.125°, 2880 az)
-  { label: 'mid',        minDist: 30_000,  maxDist: 81_000,  resolution: 8 },  // 30–81 km   (0.125°, 2880 az)
-  { label: 'mid-far',    minDist: 80_000,  maxDist: 152_000 },                  // 80–152 km  (0.25°, 1440 az)
-  { label: 'far',        minDist: 150_000, maxDist: 400_000 },                  // 150–400 km (0.25°, 1440 az)
-]
+// DEPTH_BANDS and DepthBandConfig imported from '../core/types' (single source of truth)
 
 interface SkylineBand {
   elevations:  Float32Array
@@ -840,7 +820,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         }
 
         // Crossing detection — uses raw (uncorrected) elevation for contour levels
-        const interval = CONTOUR_INTERVALS_M[bi] || 152.4
+        const interval = DEPTH_BANDS[bi].contourInterval
         if (bandPrevElev[bi] !== -Infinity) {
           detectCrossings(
             bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
@@ -933,7 +913,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
           }
 
           // Crossing detection
-          const interval = CONTOUR_INTERVALS_M[bi] || 60.96
+          const interval = DEPTH_BANDS[bi].contourInterval
           if (bandPrevElev[bi] !== -Infinity) {
             detectCrossings(
               bandPrevElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
@@ -1019,7 +999,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         }
 
         // Crossing detection for ultra-near band
-        const interval = CONTOUR_INTERVALS_M[ultraBandIdx] || 15.24
+        const interval = DEPTH_BANDS[ultraBandIdx].contourInterval
         if (prevElev !== -Infinity) {
           detectCrossings(
             prevElev, prevDist, prevLat, prevLng,
