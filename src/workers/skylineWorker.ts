@@ -72,6 +72,17 @@ const CONTOUR_INTERVALS_M: number[] = [
   304.8,   // far:        1000ft
 ]
 
+// ─── Coast Detection ─────────────────────────────────────────────────────────
+
+/** Coast contour elevation in metres — crossings at this level mark the coastline.
+ *  Uses 0.5m rather than 0m to avoid noise from tiles encoding ocean as exactly 0. */
+const COAST_CONTOUR_M = 0.5
+
+// TODO: Exclusion zones for below-sea-level inland basins (Death Valley -86m,
+// Dead Sea -430m, Salton Sea -72m, Qattara Depression -133m, Turpan Basin -154m,
+// Caspian shore, Lake Eyre -15m). These would false-positive as ocean.
+// Add an isInExclusionZone(lat, lng) check here when needed.
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface SkylineRequest {
@@ -362,13 +373,19 @@ function sampleTileGrid(
   )
 }
 
+/** Raw elevation from tile cache — NO clamping. Returns actual Terrarium value
+ *  (negative for ocean). Returns 0 when tile is not cached. */
+function sampleRaw(lat: number, lng: number, zoom: number): number {
+  const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
+  const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
+  if (grid) return sampleTileGrid(grid, lat, lng, zoom, tx, ty)
+  return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
+}
+
 /** Best-available elevation: tile cache first, sea-level fallback.
  *  Clamps to 0 — ocean/negative elevations are treated as sea level. */
 function sampleBest(lat: number, lng: number, zoom: number): number {
-  const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
-  const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
-  if (grid) return Math.max(0, sampleTileGrid(grid, lat, lng, zoom, tx, ty))
-  return 0  // No tile cached — assume sea level (tiles are prefetched so this rarely fires)
+  return Math.max(0, sampleRaw(lat, lng, zoom))
 }
 
 /** Hill shade at a terrain point (NW-45° light). */
@@ -433,6 +450,54 @@ function detectCrossings(
 
     crossings.push(level, cDist, cLat, cLng, dir)
   }
+}
+
+// ─── Coast Crossing Detection ────────────────────────────────────────────────
+
+/**
+ * Detect a single coastline crossing between two consecutive ray steps.
+ * Uses UNCLAMPED elevations — ocean is negative, land is positive.
+ * Emits exactly ONE crossing at COAST_CONTOUR_M (0.5m) when the ray
+ * transitions between ocean (≤0) and land (>0.5m). No loop — avoids
+ * the dozens of spurious crossings that a general interval sweep would produce.
+ *
+ * Same 5-float format as detectCrossings: [elev, dist, lat, lng, direction].
+ * direction: +1.0 = ocean→land going outward, -1.0 = land→ocean going outward.
+ * (Convention matches detectCrossings: prev is farther, curr is nearer.)
+ */
+function detectCoastCrossing(
+  prevElev: number, prevDist: number, prevLat: number, prevLng: number,
+  currElev: number, currDist: number, currLat: number, currLng: number,
+  crossings: number[],
+): void {
+  if (prevElev === -Infinity || currElev === -Infinity) return
+
+  // One side must be ocean (≤0) and the other land (>0)
+  const prevIsOcean = prevElev <= 0
+  const currIsOcean = currElev <= 0
+  if (prevIsOcean === currIsOcean) return  // Both ocean or both land — no crossing
+
+  // Check if 0.5m level lies between the two elevations
+  const lo = Math.min(prevElev, currElev)
+  const hi = Math.max(prevElev, currElev)
+  if (COAST_CONTOUR_M < lo || COAST_CONTOUR_M > hi) return
+
+  const dElev = currElev - prevElev
+  if (Math.abs(dElev) < 0.01) return
+
+  const t = (COAST_CONTOUR_M - prevElev) / dElev
+  if (t < 0 || t > 1) return
+
+  const cDist = prevDist + t * (currDist - prevDist)
+  const cLat  = prevLat  + t * (currLat  - prevLat)
+  const cLng  = prevLng  + t * (currLng  - prevLng)
+
+  // Direction: prev is farther, curr is nearer.
+  // If prev is land (>0) and curr is ocean (≤0), going outward = ocean→land → dir +1
+  // If prev is ocean and curr is land, going outward = land→ocean → dir -1
+  const dir = prevIsOcean ? -1.0 : 1.0
+
+  crossings.push(COAST_CONTOUR_M, cDist, cLat, cLng, dir)
 }
 
 // ─── Worker Message Handler ───────────────────────────────────────────────────
@@ -786,13 +851,16 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
     const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
     const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+    // Unclamped elevation for coast crossing detection
+    const bandPrevRawElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
 
     for (const dist of logDists) {
       const sLat = viewerLat + (cosA * dist) / 111_132
       const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
-      const zoom    = distToZoom(dist)
-      const rawElev = sampleBest(sLat, sLng, zoom)
+      const zoom       = distToZoom(dist)
+      const unclamped  = sampleRaw(sLat, sLng, zoom)
+      const rawElev    = Math.max(0, unclamped)
 
       const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev   = rawElev - curvDrop
@@ -832,10 +900,21 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             bandCrossingsTemp[bi][ai],
           )
         }
-        bandPrevElev[bi] = rawElev
-        bandPrevDist[bi] = dist
-        bandPrevLat[bi]  = sLat
-        bandPrevLng[bi]  = sLng
+
+        // Coast crossing detection — uses UNCLAMPED elevation to find land↔ocean transitions
+        if (bandPrevRawElev[bi] !== -Infinity) {
+          detectCoastCrossing(
+            bandPrevRawElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
+            unclamped, dist, sLat, sLng,
+            bandCrossingsTemp[bi][ai],
+          )
+        }
+
+        bandPrevElev[bi]    = rawElev
+        bandPrevRawElev[bi] = unclamped
+        bandPrevDist[bi]    = dist
+        bandPrevLat[bi]     = sLat
+        bandPrevLng[bi]     = sLng
       }
     }
 
@@ -888,13 +967,16 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const bandPrevDist: number[] = new Array(DEPTH_BANDS.length).fill(0)
       const bandPrevLat:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLat)
       const bandPrevLng:  number[] = new Array(DEPTH_BANDS.length).fill(viewerLng)
+      // Unclamped elevation for coast crossing detection
+      const bandPrevRawElev: number[] = new Array(DEPTH_BANDS.length).fill(-Infinity)
 
       for (const dist of hiresLogDists) {
         const sLat = viewerLat + (cosA * dist) / 111_132
         const sLng = viewerLng + (sinA * dist) / (111_320 * cosViewerLat)
 
-        const zoom    = distToZoom(dist)
-        const rawElev = sampleBest(sLat, sLng, zoom)
+        const zoom       = distToZoom(dist)
+        const unclamped  = sampleRaw(sLat, sLng, zoom)
+        const rawElev    = Math.max(0, unclamped)
 
         const curvDrop  = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
         const effElev   = rawElev - curvDrop
@@ -925,10 +1007,21 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
               bandCrossingsTemp[bi][ai],
             )
           }
-          bandPrevElev[bi] = rawElev
-          bandPrevDist[bi] = dist
-          bandPrevLat[bi]  = sLat
-          bandPrevLng[bi]  = sLng
+
+          // Coast crossing detection — uses UNCLAMPED elevation to find land↔ocean transitions
+          if (bandPrevRawElev[bi] !== -Infinity) {
+            detectCoastCrossing(
+              bandPrevRawElev[bi], bandPrevDist[bi], bandPrevLat[bi], bandPrevLng[bi],
+              unclamped, dist, sLat, sLng,
+              bandCrossingsTemp[bi][ai],
+            )
+          }
+
+          bandPrevElev[bi]    = rawElev
+          bandPrevRawElev[bi] = unclamped
+          bandPrevDist[bi]    = dist
+          bandPrevLat[bi]     = sLat
+          bandPrevLng[bi]     = sLng
         }
       }
 
@@ -1193,6 +1286,27 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
     bands[bi].crossingData = data
     bands[bi].crossingOffsets = offsets
+
+    // Count coast crossings (elev ≈ COAST_CONTOUR_M) for debug logging
+    let coastCount = 0
+    for (let j = 0; j < data.length; j += 5) {
+      if (Math.abs(data[j] - COAST_CONTOUR_M) < 0.01) coastCount++
+    }
+    if (coastCount > 0) {
+      console.log(`[COAST-DEBUG] Band ${bi} (${DEPTH_BANDS[bi].label}): ${coastCount} coast crossings out of ${Math.floor(data.length / 5)} total`)
+    }
+  }
+
+  // Log total coast crossings across all bands
+  {
+    let totalCoast = 0
+    for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
+      const data = bands[bi].crossingData
+      for (let j = 0; j < data.length; j += 5) {
+        if (Math.abs(data[j] - COAST_CONTOUR_M) < 0.01) totalCoast++
+      }
+    }
+    console.log(`[COAST-DEBUG] Total coast crossings across all bands: ${totalCoast}`)
   }
 
   // ── Phase 5b: Pack silhouette candidates into flat transferable arrays ────

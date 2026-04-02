@@ -81,6 +81,10 @@ const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full
 const TERRAIN_FILL_DARK  = 'rgb(4, 10, 18)'     // Deep navy — darker than sky gradient, contour lines visible
 const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
 
+// ─── Ocean Fill ──────────────────────────────────────────────────────────────
+const OCEAN_FILL_DARK  = 'rgb(2, 5, 12)'     // Very dark blue-black — deeper than sky
+const OCEAN_FILL_LIGHT = 'rgb(25, 55, 95)'   // Medium navy blue — clearly distinct from sky and land
+
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
 /**
@@ -939,6 +943,10 @@ function renderSilhouetteStrokes(
  *  mid = 500ft, mid-far = 1000ft, far = 2000ft. */
 const CONTOUR_INTERVALS_M: number[] = [15.24, 30.48, 60.96, 60.96, 152.4, 304.8]
 
+/** Coast contour elevation — crossings at this level mark the coastline.
+ *  Must match COAST_CONTOUR_M in skylineWorker.ts. */
+const COAST_CONTOUR_M = 0.5
+
 /** A pre-built contour strand — world-space data ready for per-frame projection. */
 interface PrebuiltContourStrand {
   level:    number   // Contour elevation (m), snapped to interval grid
@@ -959,8 +967,9 @@ interface PrebuiltContourStrand {
 function buildContourStrands(
   skyline: SkylineData,
   viewerElev: number,
-): PrebuiltContourStrand[] {
+): { contourStrands: PrebuiltContourStrand[]; coastStrands: PrebuiltContourStrand[] } {
   const completed: PrebuiltContourStrand[] = []
+  const coastCompleted: PrebuiltContourStrand[] = []
 
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
@@ -1008,18 +1017,24 @@ function buildContourStrands(
         let runningMaxAngle = -Math.PI / 2
         const useOcclusion = bi >= 3  // Only occlude within mid/mid-far/far bands
         for (const c of azCrossings) {
+          const isCoast = Math.abs(c.elev - COAST_CONTOUR_M) < 0.01
+          // Coast crossings: project at sea level (0m) since the coastline IS sea level
+          const projElev = isCoast ? 0 : c.elev
           const curvDrop = (c.dist * c.dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-          const angle = Math.atan2(c.elev - curvDrop - viewerElev, c.dist)
+          const angle = Math.atan2(projElev - curvDrop - viewerElev, c.dist)
 
-          if (useOcclusion && angle <= runningMaxAngle) continue
-          if (useOcclusion) runningMaxAngle = angle
+          if (useOcclusion && !isCoast && angle <= runningMaxAngle) continue
+          if (useOcclusion && !isCoast) runningMaxAngle = angle
 
-          // Skip sea-level / near-sea-level elevation — avoids coastline artifacts
-          if (c.elev < 1) continue
+          // Skip sea-level / near-sea-level NON-COAST elevation — avoids contour artifacts.
+          // Coast crossings at 0.5m are handled separately and must NOT be skipped.
+          if (!isCoast && c.elev < 1) continue
 
-          // Snap level to nearest interval — eliminates floating point drift
-          const snappedLevel = Math.round(c.elev / interval) * interval
-          const levelKey = `${snappedLevel}_${c.dir > 0 ? 'u' : 'd'}`
+          // Level key: coast crossings use a special prefix to keep them separate from contours
+          const levelKey = isCoast
+            ? `COAST_${c.dir > 0 ? 'u' : 'd'}`
+            : `${Math.round(c.elev / interval) * interval}_${c.dir > 0 ? 'u' : 'd'}`
+          const snappedLevel = isCoast ? COAST_CONTOUR_M : Math.round(c.elev / interval) * interval
 
           let strands = activeStrands.get(levelKey)
           if (!strands) {
@@ -1028,13 +1043,14 @@ function buildContourStrands(
           }
 
           // Match to closest strand by distance proximity
-          // Per-band tolerance: tight for close bands (prevents jumpy connections),
-          // looser for far bands where large gaps are natural
-          const maxDistDiff = bi <= 1
-            ? Math.max(10, c.dist * 0.02)   // ultra-near + near: 2%, floor 10m
+          // Coast strands use slightly looser tolerance — coastlines curve gradually
+          const maxDistDiff = isCoast
+            ? Math.max(100, c.dist * 0.05)   // coast: 5%, floor 100m
+            : bi <= 1
+            ? Math.max(10, c.dist * 0.02)    // ultra-near + near: 2%, floor 10m
             : bi === 2
-            ? Math.max(50, c.dist * 0.03)   // mid-near: 3%, floor 50m
-            : Math.max(200, c.dist * 0.05)  // mid/mid-far/far: 5%, floor 200m (original)
+            ? Math.max(50, c.dist * 0.03)    // mid-near: 3%, floor 50m
+            : Math.max(200, c.dist * 0.05)   // mid/mid-far/far: 5%, floor 200m
           let bestIdx = -1
           let bestDiff = Infinity
           for (let si = 0; si < strands.length; si++) {
@@ -1067,10 +1083,12 @@ function buildContourStrands(
       if (ai % maxAzGap === 0) {
         for (const [key, strands] of activeStrands) {
           const remaining: typeof strands = []
+          const isCoastKey = key.startsWith('COAST_')
+          const target = isCoastKey ? coastCompleted : completed
           for (const s of strands) {
             if (ai - s.lastAi > maxAzGap) {
               if (s.points.length >= 2) {
-                completed.push({ level: s.level, bandIdx: bi, interval, points: s.points })
+                target.push({ level: s.level, bandIdx: bi, interval, points: s.points })
               }
             } else {
               remaining.push(s)
@@ -1083,10 +1101,12 @@ function buildContourStrands(
     }
 
     // Flush remaining active strands
-    for (const [, strands] of activeStrands) {
+    for (const [key, strands] of activeStrands) {
+      const isCoastKey = key.startsWith('COAST_')
+      const target = isCoastKey ? coastCompleted : completed
       for (const s of strands) {
         if (s.points.length >= 2) {
-          completed.push({ level: s.level, bandIdx: bi, interval, points: s.points })
+          target.push({ level: s.level, bandIdx: bi, interval, points: s.points })
         }
       }
     }
@@ -1094,10 +1114,14 @@ function buildContourStrands(
     // DEBUG: Count strands for this band
     const bandStrandCount = completed.filter(s => s.bandIdx === bi).length
     const bandPointCount = completed.filter(s => s.bandIdx === bi).reduce((sum, s) => sum + s.points.length, 0)
-    console.log(`[CONTOUR-DEBUG] Band ${bi}: ${bandStrandCount} strands, ${bandPointCount} total points`)
+    const coastStrandCount = coastCompleted.filter(s => s.bandIdx === bi).length
+    const coastPointCount = coastCompleted.filter(s => s.bandIdx === bi).reduce((sum, s) => sum + s.points.length, 0)
+    console.log(`[CONTOUR-DEBUG] Band ${bi}: ${bandStrandCount} contour strands (${bandPointCount} pts), ${coastStrandCount} coast strands (${coastPointCount} pts)`)
   }
 
-  return completed
+  console.log(`[COAST-DEBUG] Total coast strands: ${coastCompleted.length}, total coast points: ${coastCompleted.reduce((s, c) => s + c.points.length, 0)}`)
+
+  return { contourStrands: completed, coastStrands: coastCompleted }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1738,6 +1762,7 @@ function renderTerrain(
   silResolution: number = 0,
   silElevMin: number = 0,
   silElevMax: number = 0,
+  coastScreenY: Float32Array | null = null,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1778,16 +1803,22 @@ function renderTerrain(
 
     // ── Fill below this band's ridgeline ───────────────────────────────────
     ctx.beginPath()
-    ctx.moveTo(0, H)
+    // Start at bottom-left: use coast clip if available, canvas bottom otherwise
+    const startBottomY = coastScreenY ? coastScreenY[0] : H
+    ctx.moveTo(0, startBottomY)
     let hasVisiblePixels = false
 
     for (let col = 0; col < W; col++) {
       const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
       const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
+      // Bottom edge for this column: coastline if available, canvas bottom otherwise.
+      // This prevents sentinel columns from creating land bridges across ocean.
+      const bottomY = coastScreenY ? coastScreenY[col] : H
+
       // Skip columns where this band has no data (sentinel -PI/2)
       if (angle <= -Math.PI / 2 + 0.001) {
-        ctx.lineTo(col, H)
+        ctx.lineTo(col, bottomY)
         continue
       }
 
@@ -1797,7 +1828,9 @@ function renderTerrain(
       ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
     }
 
-    ctx.lineTo(W, H)
+    // Close at bottom-right with coast clip
+    const endBottomY = coastScreenY ? coastScreenY[W - 1] : H
+    ctx.lineTo(W, endBottomY)
     ctx.closePath()
     // Band fill: always draw as base coat (unified terrain color).
     // Covers sky completely from ridgeline to canvas bottom.
@@ -2256,6 +2289,7 @@ function drawScanCanvas(
   skylineData: SkylineData | null,
   projectedBands: ProjectedBands | null,
   contourStrands: PrebuiltContourStrand[],
+  coastStrands: PrebuiltContourStrand[],
   projectedArcs: ProjectedRefinedArc[] | null,
   silhouetteLayers: SilhouetteLayer[][] | null,
   projectedNearProfile: ProjectedNearProfile | null,
@@ -2330,6 +2364,96 @@ function drawScanCanvas(
   // in skylineData.nearProfile for future terrain-surface rendering.
   // Silhouette fills handle column-major occlusion instead.
 
+  // ── 1c. Ocean fill + coast clip lookup ──────────────────────────────────────
+  // Build per-column coastScreenY from coast strands. This array is used both
+  // for the ocean fill polygon (painted here) and for clipping band fill
+  // sentinel columns in renderTerrain (passed in as a parameter).
+  //
+  // For each screen column, find the nearest coast strand point by bearing and
+  // interpolate its screen Y. H = no coast at this column (inland behavior).
+  const coastScreenY = new Float32Array(W).fill(H)
+
+  if (coastStrands.length > 0) {
+    // Build a sorted array of all coast strand points projected to screen space.
+    // Group by strand so we can interpolate between adjacent points within a strand.
+    for (const strand of coastStrands) {
+      if (strand.points.length < 2) continue
+
+      for (let pi = 0; pi < strand.points.length - 1; pi++) {
+        const p0 = strand.points[pi]
+        const p1 = strand.points[pi + 1]
+
+        // Skip points outside the current view bearing range (with margin)
+        const bearMin = Math.min(p0.bearingDeg, p1.bearingDeg)
+        const bearMax = Math.max(p0.bearingDeg, p1.bearingDeg)
+        const viewMin = cam.heading_deg - cam.hfov * 0.6
+        const viewMax = cam.heading_deg + cam.hfov * 0.6
+        // Simple bearing overlap check (ignoring 360° wrap for now)
+        if (bearMax < viewMin && bearMax + 360 < viewMin) continue
+        if (bearMin > viewMax && bearMin - 360 > viewMax) continue
+
+        // Project both endpoints to screen Y
+        const s0 = project(p0.bearingDeg, p0.elevAngleRad, cam)
+        const s1 = project(p1.bearingDeg, p1.elevAngleRad, cam)
+
+        // Map bearing range to screen columns and interpolate
+        const col0 = Math.round(s0.x)
+        const col1 = Math.round(s1.x)
+        const colMin = Math.max(0, Math.min(col0, col1))
+        const colMax = Math.min(W - 1, Math.max(col0, col1))
+
+        if (colMax <= colMin) continue
+
+        for (let col = colMin; col <= colMax; col++) {
+          // Linear interpolation of screen Y between the two strand points
+          const t = (col - col0) / (col1 - col0)
+          const interpY = s0.y + t * (s1.y - s0.y)
+          const clampedY = Math.min(H, Math.max(0, Math.round(interpY)))
+
+          // Use the nearest (highest on screen = smallest Y) coast for this column.
+          // This represents the closest coastline to the viewer.
+          if (clampedY < coastScreenY[col]) {
+            coastScreenY[col] = clampedY
+          }
+        }
+      }
+    }
+
+    // Draw ocean fill polygon — smooth curve tracing coastScreenY, filled to canvas bottom.
+    // Only draw if any column has coast data (coastScreenY < H).
+    let hasCoast = false
+    for (let col = 0; col < W; col++) {
+      if (coastScreenY[col] < H) { hasCoast = true; break }
+    }
+
+    if (hasCoast) {
+      ctx.save()
+      ctx.fillStyle = darkMode ? OCEAN_FILL_DARK : OCEAN_FILL_LIGHT
+      ctx.beginPath()
+      ctx.moveTo(0, H)  // Start at bottom-left
+
+      // Trace coastline using quadraticCurveTo for smoothness.
+      // Walk columns, using midpoints as control points for smooth curves.
+      let prevY = coastScreenY[0]
+      ctx.lineTo(0, prevY)
+
+      const SMOOTH_STEP = 4  // Subsample every N pixels for curve control points
+      for (let col = SMOOTH_STEP; col < W; col += SMOOTH_STEP) {
+        const curY = coastScreenY[Math.min(col, W - 1)]
+        const midCol = col - SMOOTH_STEP / 2
+        const midY = (prevY + curY) / 2
+        ctx.quadraticCurveTo(midCol, prevY, col, midY)
+        prevY = curY
+      }
+      // Final segment to right edge
+      ctx.lineTo(W, coastScreenY[W - 1])
+      ctx.lineTo(W, H)  // Bottom-right
+      ctx.closePath()
+      ctx.fill()
+      ctx.restore()
+    }
+  }
+
   // ── 2. Terrain — unified depth-layered rendering (far→near painter's order) ─
   // Per band: silhouette fills → contours → band strokes.
   // Silhouette fills are interleaved with bands so nearer fills correctly
@@ -2350,7 +2474,8 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax)
+      silhouetteLayers, silRes, silElevMin, silElevMax,
+      coastScreenY)
   }
 
   // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
@@ -2589,10 +2714,10 @@ const ScanScreen: React.FC = () => {
     return reprojectBands(skylineData, viewerElev)
   }, [skylineData, height_m])
 
-  // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
+  // ── Pre-build contour + coast strands (full 360°, one-time on data/AGL change) ──
   // Uses the worker's z15-corrected ground elevation so contour angles match ridgelines.
-  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
-    if (!skylineData) return []
+  const { contourStrands, coastStrands } = useMemo<{ contourStrands: PrebuiltContourStrand[]; coastStrands: PrebuiltContourStrand[] }>(() => {
+    if (!skylineData) return { contourStrands: [], coastStrands: [] }
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
   }, [skylineData, height_m])
@@ -2969,7 +3094,7 @@ const ScanScreen: React.FC = () => {
       heading_deg, pitch_deg, height_m,
       activeLat, activeLng,
       fov, skylineData, projectedBands,
-      contourStrands, projectedArcs,
+      contourStrands, coastStrands, projectedArcs,
       silhouetteLayers,
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
@@ -2985,7 +3110,7 @@ const ScanScreen: React.FC = () => {
     heading_deg, pitch_deg, height_m, fov,
     activeLat, activeLng,
     activePeaks,
-    skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
+    skylineData, projectedBands, contourStrands, coastStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
     showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
   ])
