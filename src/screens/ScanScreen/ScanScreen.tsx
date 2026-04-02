@@ -98,10 +98,6 @@ const OCEAN_FILL_LIGHT = 'rgb(25, 55, 95)'       // Deep navy blue
 interface ProjectedBands {
   /** Per-band elevation angles (radians) at each azimuth. Index matches DEPTH_BANDS. */
   bandAngles: Float32Array[]
-  /** Per-band coast projection angles (radians) at each azimuth.
-   *  The angle of sea level at the nearest coast transition distance.
-   *  -PI/2 sentinel = no coast in this band at this azimuth (fill to canvas bottom). */
-  coastAngles: Float32Array[]
   /** Overall max angle per azimuth (across all bands) — replaces skylineData.angles for rendering */
   overallAngles: Float32Array
   /** The viewer elevation these were computed for (used to detect staleness) */
@@ -119,7 +115,6 @@ function reprojectBands(
 ): ProjectedBands {
   const { numAzimuths, bands } = skyline
   const bandAngles: Float32Array[] = []
-  const coastAngles: Float32Array[] = []
   const overallAngles = new Float32Array(numAzimuths)
   overallAngles.fill(-Math.PI / 2)
 
@@ -128,8 +123,6 @@ function reprojectBands(
     const bandAz = band.numAzimuths
     const bandRes = band.resolution
     const angles = new Float32Array(bandAz)
-    const cAngles = new Float32Array(bandAz)
-    cAngles.fill(-Math.PI / 2)  // sentinel: no coast
 
     for (let ai = 0; ai < bandAz; ai++) {
       const elev = band.elevations[ai]
@@ -148,40 +141,12 @@ function reprojectBands(
       if (angles[ai] > overallAngles[overallIdx]) {
         overallAngles[overallIdx] = angles[ai]
       }
-
-      // ── Coast angle projection ─────────────────────────────────────────
-      // Find the nearest coast transition to the ridgeline and compute the
-      // screen angle of sea level at that distance. This becomes the bottom
-      // edge of the band fill polygon at this azimuth.
-      if (band.coastDistances && band.coastOffsets) {
-        const cStart = band.coastOffsets[ai]
-        const cEnd   = band.coastOffsets[ai + 1]
-        if (cEnd > cStart) {
-          // Find the coast transition nearest to the ridgeline distance.
-          // Transitions are packed as [distance, type] pairs.
-          let bestCoastDist = -1
-          let bestDelta = Infinity
-          for (let ci = cStart; ci < cEnd; ci += 2) {
-            const cDist = band.coastDistances[ci]
-            const delta = Math.abs(cDist - dist)
-            if (delta < bestDelta) {
-              bestDelta = delta
-              bestCoastDist = cDist
-            }
-          }
-          if (bestCoastDist > 0) {
-            const cCurvDrop = (bestCoastDist * bestCoastDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-            cAngles[ai] = Math.atan2(-viewerElev - cCurvDrop, bestCoastDist)
-          }
-        }
-      }
     }
 
     bandAngles.push(angles)
-    coastAngles.push(cAngles)
   }
 
-  return { bandAngles, coastAngles, overallAngles, viewerElev }
+  return { bandAngles, overallAngles, viewerElev }
 }
 
 // ─── Refined Arc Re-Projection ──────────────────────────────────────────────
@@ -1414,43 +1379,6 @@ function bandAngleAt(
   return a0 * (1 - t) + a1 * t
 }
 
-/**
- * Coast projection angle at a fractional bearing for a given band.
- * Returns -PI/2 if no coast transition exists (fill to canvas bottom).
- * Uses pre-computed coastAngles from reprojectBands().
- */
-function bandCoastAngleAt(
-  skyline: SkylineData,
-  bandIndex: number,
-  bearingDeg: number,
-  projected: ProjectedBands | null,
-): number {
-  if (!projected || !projected.coastAngles || !projected.coastAngles[bandIndex]) {
-    return -Math.PI / 2
-  }
-
-  const band = skyline.bands[bandIndex]
-  const bandRes = band.resolution
-  const bandAz  = band.numAzimuths
-
-  const normBearing = ((bearingDeg % 360) + 360) % 360
-  const fracIdx = normBearing * bandRes
-  const idx0 = Math.floor(fracIdx) % bandAz
-  const idx1 = (idx0 + 1) % bandAz
-  const t = fracIdx - Math.floor(fracIdx)
-
-  const SENTINEL = -Math.PI / 2 + 0.001
-  const arr = projected.coastAngles[bandIndex]
-  const a0 = arr[idx0], a1 = arr[idx1]
-
-  // If both neighbors have no coast, no coast at this bearing
-  if (a0 <= SENTINEL && a1 <= SENTINEL) return -Math.PI / 2
-  // If one has coast and the other doesn't, use the one that does
-  if (a0 <= SENTINEL) return a1
-  if (a1 <= SENTINEL) return a0
-  return a0 * (1 - t) + a1 * t
-}
-
 /** Interpolated raw elevation at a fractional bearing for a given band. */
 function bandElevAt(
   skyline: SkylineData,
@@ -1853,54 +1781,29 @@ function renderTerrain(
     const lwRange = lwMax - lwMin
 
     // ── Fill below this band's ridgeline ───────────────────────────────────
-    // Two-edge polygon: top edge = ridgeline, bottom edge = coast or canvas bottom.
-    // Where a coast transition exists, the fill stops at the coast projection
-    // (sea level at the coast distance), letting the ocean layer show through.
-    const SENTINEL = -Math.PI / 2 + 0.001
-
-    // Collect per-column ridgeline Y and base Y
-    const ridgeYs = new Float32Array(W)
-    const baseYs  = new Float32Array(W)
+    ctx.beginPath()
+    ctx.moveTo(0, H)
     let hasVisiblePixels = false
 
     for (let col = 0; col < W; col++) {
       const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
       const angle = bandAngleAt(skyline, bi, bearingDeg, projected)
 
-      if (angle <= SENTINEL) {
-        ridgeYs[col] = H
-        baseYs[col]  = H
+      // Skip columns where this band has no data (sentinel -PI/2)
+      if (angle <= -Math.PI / 2 + 0.001) {
+        ctx.lineTo(col, H)
         continue
       }
 
       hasVisiblePixels = true
       const { y } = project(bearingDeg, angle, cam)
-      ridgeYs[col] = Math.min(H, Math.max(0, Math.round(y)))
-
-      // Determine base Y: coast projection or canvas bottom
-      const coastAngle = bandCoastAngleAt(skyline, bi, bearingDeg, projected)
-      if (coastAngle > SENTINEL) {
-        // Coast exists — fill stops at the coast's screen Y
-        const { y: coastY } = project(bearingDeg, coastAngle, cam)
-        baseYs[col] = Math.min(H, Math.max(ridgeYs[col], Math.round(coastY)))
-      } else {
-        // No coast — fill extends to canvas bottom (inland terrain)
-        baseYs[col] = H
-      }
+      const screenY = Math.round(y)
+      ctx.lineTo(col, Math.min(H, Math.max(0, screenY)))
     }
 
+    ctx.lineTo(W, H)
+    ctx.closePath()
     if (hasVisiblePixels && showFill) {
-      ctx.beginPath()
-      // Forward pass: trace ridgeline left→right (top edge)
-      ctx.moveTo(0, ridgeYs[0])
-      for (let col = 1; col < W; col++) {
-        ctx.lineTo(col, ridgeYs[col])
-      }
-      // Reverse pass: trace base right→left (bottom edge)
-      for (let col = W - 1; col >= 0; col--) {
-        ctx.lineTo(col, baseYs[col])
-      }
-      ctx.closePath()
       ctx.fillStyle = darkMode ? TERRAIN_FILL_DARK : TERRAIN_FILL_LIGHT
       ctx.fill()
     }
@@ -2429,15 +2332,9 @@ function drawScanCanvas(
   // in skylineData.nearProfile for future terrain-surface rendering.
   // Silhouette fills handle column-major occlusion instead.
 
-  // ── 1c. Ocean fill layer ──────────────────────────────────────────────────
-  // Solid ocean color below the horizon. Terrain band fills paint on top where
-  // land exists. Where band fills stop at coastlines (coast transitions), the
-  // ocean color shows through. Inland views: terrain covers this completely.
-  if (showOcean) {
-    const oceanTop = Math.max(0, Math.round(horizonY))
-    ctx.fillStyle = darkMode ? OCEAN_FILL_DARK : OCEAN_FILL_LIGHT
-    ctx.fillRect(0, oceanTop, W, H - oceanTop)
-  }
+  // ── 1c. Ocean fill — placeholder for per-azimuth ocean (Bug A fix) ─────
+  // Ocean fill will be painted per-column, only in directions where the ray
+  // march detected water. Implemented in a subsequent commit.
 
   // ── 2. Terrain — unified depth-layered rendering (far→near painter's order) ─
   // Per band: silhouette fills → contours → band strokes.

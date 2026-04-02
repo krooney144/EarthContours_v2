@@ -342,14 +342,6 @@ export interface SkylineBand {
    *  Azimuth ai's crossings are at indices crossingOffsets[ai]..crossingOffsets[ai+1].
    *  Each crossing occupies 5 floats: [elevation_m, distance_m, lat, lng, direction]. */
   crossingOffsets: Uint32Array
-  /** Coast transitions: packed [distance_m, type] per transition within this band.
-   *  type: +1.0 = land-to-ocean, -1.0 = ocean-to-land.
-   *  All azimuths concatenated — use coastOffsets to index. */
-  coastDistances:  Float32Array
-  /** Per-azimuth offset into coastDistances (length = numAzimuths + 1).
-   *  Azimuth ai's transitions are at coastOffsets[ai]..coastOffsets[ai+1].
-   *  Each transition occupies 2 floats: [distance_m, type]. */
-  coastOffsets:    Uint32Array
   /** Azimuth resolution for this band (steps per degree). Defaults to SkylineData.resolution. */
   resolution: number
   /** Number of azimuth samples in this band's arrays = 360 × resolution */

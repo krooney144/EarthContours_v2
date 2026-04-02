@@ -109,8 +109,6 @@ interface SkylineBand {
   ridgeLngs:   Float32Array
   crossingData:    Float32Array
   crossingOffsets: Uint32Array
-  coastDistances:  Float32Array   // Packed [distance_m, type] per coast transition
-  coastOffsets:    Uint32Array    // Per-azimuth offset into coastDistances
   resolution:  number      // Steps per degree for this band
   numAzimuths: number      // 360 × resolution
 }
@@ -824,8 +822,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       ridgeLngs:       new Float32Array(bandAz),
       crossingData:    new Float32Array(0),  // Will be packed after march
       crossingOffsets: new Uint32Array(bandAz + 1),
-      coastDistances:  new Float32Array(0),  // Will be packed after march
-      coastOffsets:    new Uint32Array(bandAz + 1),
       resolution:      bandRes,
       numAzimuths:     bandAz,
     }
@@ -838,13 +834,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     return Array.from({ length: bandAz }, () => [])
   })
 
-  // Temp storage for coast transitions: per-band, per-azimuth
-  // bandCoastTemp[bi][ai] = [distance_m, type, distance_m, type, ...]
-  // type: +1.0 = land-to-ocean, -1.0 = ocean-to-land
-  const bandCoastTemp: number[][][] = DEPTH_BANDS.map((cfg) => {
-    const bandAz = Math.round(360 * (cfg.resolution || resolution))
-    return Array.from({ length: bandAz }, () => [])
-  })
 
   // Pass 1: Standard resolution (720 azimuths) — populates overall skyline + standard bands
   for (let ai = 0; ai < numAzimuths; ai++) {
@@ -947,14 +936,9 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                   bandRidgeLng[bi]  = bandTentLng[bi]
                   bandRidgeElev[bi] = bandTentElev[bi]
                 }
-                // Record coast transitions: ocean→land at landStartDist, land→ocean at dist
-                bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)  // ocean→land (far edge)
-                bandCoastTemp[bi][ai].push(dist, 1.0)                     // land→ocean (near edge)
               }
-            } else if (state === ST_LAND) {
-              // First ocean sample after confirmed land — record coast transition
-              bandCoastTemp[bi][ai].push(dist, 1.0)  // land→ocean
             }
+            // (Coast transitions now tracked via 0.5m contour crossings, not here)
             bandOceanState[bi] = ST_OCEAN
             bandSeenOcean[bi] = true
             bandLastOceanDist[bi] = dist
@@ -989,8 +973,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                   bandRidgeLng[bi]  = bandTentLng[bi]
                   bandRidgeElev[bi] = bandTentElev[bi]
                 }
-                // Record ocean→land transition at the far edge
-                bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)
                 bandOceanState[bi] = ST_LAND
               }
             }
@@ -1043,8 +1025,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             bandRidgeLng[bi]  = bandTentLng[bi]
             bandRidgeElev[bi] = bandTentElev[bi]
           }
-          // Record ocean→land transition at the far edge of this land segment
-          bandCoastTemp[bi][ai].push(bandLandStartDist[bi], -1.0)
         }
         // Reset state for next azimuth
         bandOceanState[bi] = ST_LAND
@@ -1147,11 +1127,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                     bandRidgeLng[bi]  = hrTentLng[bi]
                     bandRidgeElev[bi] = hrTentElev[bi]
                   }
-                  bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
-                  bandCoastTemp[bi][ai].push(dist, 1.0)
                 }
-              } else if (state === ST_LAND) {
-                bandCoastTemp[bi][ai].push(dist, 1.0)
               }
               hrOceanState[bi] = ST_OCEAN
             } else {
@@ -1180,7 +1156,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                     bandRidgeLng[bi]  = hrTentLng[bi]
                     bandRidgeElev[bi] = hrTentElev[bi]
                   }
-                  bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
                   hrOceanState[bi] = ST_LAND
                 }
               }
@@ -1229,7 +1204,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
               bandRidgeLng[bi]  = hrTentLng[bi]
               bandRidgeElev[bi] = hrTentElev[bi]
             }
-            bandCoastTemp[bi][ai].push(hrLandStartDist[bi], -1.0)
           }
         }
       }
@@ -1497,39 +1471,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     bands[bi].crossingOffsets = offsets
   }
 
-  // ── Phase 5a: Pack coast transition data into flat arrays ─────────────────
-
-  let totalCoastTransitions = 0
-  for (let bi = 0; bi < DEPTH_BANDS.length; bi++) {
-    const azCoast = bandCoastTemp[bi]
-    const bandAz = bands[bi].numAzimuths
-    const offsets = new Uint32Array(bandAz + 1)
-
-    let totalFloats = 0
-    for (let ai = 0; ai < bandAz; ai++) {
-      offsets[ai] = totalFloats
-      totalFloats += azCoast[ai].length  // Already in groups of 2 [distance, type]
-    }
-    offsets[bandAz] = totalFloats
-
-    const data = new Float32Array(totalFloats)
-    let idx = 0
-    for (let ai = 0; ai < bandAz; ai++) {
-      const c = azCoast[ai]
-      for (let j = 0; j < c.length; j++) {
-        data[idx++] = c[j]
-      }
-    }
-
-    bands[bi].coastDistances = data
-    bands[bi].coastOffsets = offsets
-    totalCoastTransitions += totalFloats / 2
-  }
-
-  if (enableOceanDetection) {
-    console.log(`[OCEAN] Packed ${totalCoastTransitions} coast transitions across ${DEPTH_BANDS.length} bands`)
-  }
-
   // ── Phase 5b: Pack silhouette candidates into flat transferable arrays ────
 
   const silOffsets = new Uint32Array(SILHOUETTE_NUM_AZIMUTHS + 1)
@@ -1684,8 +1625,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       band.distances.buffer as ArrayBuffer,
       band.ridgeLats.buffer as ArrayBuffer,
       band.ridgeLngs.buffer as ArrayBuffer,
-      band.coastDistances.buffer as ArrayBuffer,
-      band.coastOffsets.buffer as ArrayBuffer,
       band.crossingData.buffer as ArrayBuffer,
       band.crossingOffsets.buffer as ArrayBuffer,
     )
