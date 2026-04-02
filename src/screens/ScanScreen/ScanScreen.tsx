@@ -1661,7 +1661,7 @@ function renderBandContours(
   // Unlike the old silhouette-layer check, this has data at EVERY azimuth
   // (no flank gaps) and transitions smoothly across azimuths (no sharp
   // vertical cutoffs → no rectangular block artifacts).
-  const hasOcclusion = !!(occlusion && occlusion.numCheckpoints > 0)
+  const hasOcclusion = false // TEMP: disabled to diagnose gaps — was: !!(occlusion && occlusion.numCheckpoints > 0)
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
