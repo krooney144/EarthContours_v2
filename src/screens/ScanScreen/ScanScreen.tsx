@@ -286,9 +286,11 @@ function buildOcclusionProfile(
 ): OcclusionProfile {
   const { profileData, profileDists, numCheckpoints, numAzimuths, resolution } = profile
 
-  // Phase 1: Build raw running-max envelope per azimuth
-  const raw = new Float32Array(numAzimuths * numCheckpoints)
-  raw.fill(-Math.PI / 2)
+  // Build running-max envelope per azimuth.
+  // profileData stores effElev = rawElev - curvDrop (curvature already applied
+  // in the worker), so we compute the angle directly without re-applying curvature.
+  const envelope = new Float32Array(numAzimuths * numCheckpoints)
+  envelope.fill(-Math.PI / 2)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
     let maxAngle = -Math.PI / 2
@@ -297,36 +299,23 @@ function buildOcclusionProfile(
     for (let ci = 0; ci < numCheckpoints; ci++) {
       const effElev = profileData[base + ci]
       if (effElev === -Infinity) {
-        raw[base + ci] = maxAngle  // carry forward
+        envelope[base + ci] = maxAngle  // carry forward
         continue
       }
 
       const dist = profileDists[ci]
-      const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
-      const angle = Math.atan2(effElev - curvDrop - viewerElev, dist)
+      // effElev already has curvature drop applied — do NOT subtract again
+      const angle = Math.atan2(effElev - viewerElev, dist)
 
       if (angle > maxAngle) maxAngle = angle
-      raw[base + ci] = maxAngle
+      envelope[base + ci] = maxAngle
     }
   }
 
-  // Phase 2: ±2 azimuth max-window smoothing
-  // Prevents single-azimuth gaps from creating sharp vertical cutoffs.
-  const envelope = new Float32Array(numAzimuths * numCheckpoints)
-  const SMOOTH_RADIUS = 2
-
-  for (let ci = 0; ci < numCheckpoints; ci++) {
-    for (let ai = 0; ai < numAzimuths; ai++) {
-      let best = raw[ai * numCheckpoints + ci]
-      for (let da = -SMOOTH_RADIUS; da <= SMOOTH_RADIUS; da++) {
-        if (da === 0) continue
-        const nai = ((ai + da) % numAzimuths + numAzimuths) % numAzimuths
-        const v = raw[nai * numCheckpoints + ci]
-        if (v > best) best = v
-      }
-      envelope[ai * numCheckpoints + ci] = best
-    }
-  }
+  // No azimuth smoothing — the terrain profile has continuous data at every
+  // azimuth (2880 samples, 0.125° apart), so there are no single-azimuth gaps
+  // to smooth over. Smoothing leaks ridge occlusion into adjacent valleys,
+  // creating the dark gap artifacts we're trying to eliminate.
 
   return { envelope, profileDists, numCheckpoints, resolution, numAzimuths }
 }
