@@ -1,40 +1,44 @@
 #!/usr/bin/env node
 /**
- * Diagnostic: Spike Erosion Test
+ * Diagnostic: Spike Erosion vs Flood-Fill Comparison
  *
- * Fetches real AWS Terrarium tiles, runs the proposed 2-pass 6/8 erosion,
- * and generates an HTML report with before/after visualization.
+ * Fetches real AWS Terrarium tiles, runs BOTH approaches:
+ *   A) 2-pass neighbor erosion (zoom-adaptive threshold)
+ *   B) Flood-fill ocean mask (connected-component, size-thresholded)
+ * Generates an HTML report with 4 canvases per tile for visual comparison.
  *
  * Usage:  node diagnostic/erosion-test.mjs
  * Output: diagnostic/erosion-report.html (open in browser)
- *
- * NO dependencies beyond Node built-ins (fetch + fs + Buffer).
- * Does NOT modify any app code.
  */
 
 import { writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { createInflate } from 'zlib'
+import { execSync } from 'child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const AWS_BASE = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium'
 const TILE_PX = 256
+const OCEAN_THRESHOLD = 0
 
 // ─── Test Locations ────────────────────────────────────────────────────────────
 
 const TEST_LOCATIONS = [
-  { name: 'Anchorage (z8 — far band)',  lat: 61.3252, lng: -149.8744, zoom: 8  },
-  { name: 'Anchorage (z10 — mid band)', lat: 61.3252, lng: -149.8744, zoom: 10 },
-  { name: 'Anchorage (z11 — mid-near)', lat: 61.3252, lng: -149.8744, zoom: 11 },
-  { name: 'Hawaii Maui (z8 — far)',     lat: 20.7984, lng: -156.3319, zoom: 8  },
-  { name: 'Hawaii Maui (z10 — mid)',    lat: 20.7984, lng: -156.3319, zoom: 10 },
+  { name: 'Anchorage (z8 — far band)',   lat: 61.3252, lng: -149.8744, zoom: 8  },
+  { name: 'Anchorage (z10 — mid band)',  lat: 61.3252, lng: -149.8744, zoom: 10 },
+  { name: 'Anchorage (z11 — mid-near)',  lat: 61.3252, lng: -149.8744, zoom: 11 },
+  { name: 'Hawaii Maui (z8 — far)',      lat: 20.7984, lng: -156.3319, zoom: 8  },
+  { name: 'Hawaii Maui (z10 — mid)',     lat: 20.7984, lng: -156.3319, zoom: 10 },
   { name: 'Colorado Rockies (z8)',       lat: 39.1178, lng: -106.4453, zoom: 8  },
   { name: 'Colorado Rockies (z10)',      lat: 39.1178, lng: -106.4453, zoom: 10 },
-  // Fire Island in Cook Inlet — small island, should NOT be eroded at z11
   { name: 'Fire Island AK (z11)',        lat: 61.17,   lng: -150.22,  zoom: 11 },
+  // Knik Arm directly — the noisiest area
+  { name: 'Knik Arm center (z11)',       lat: 61.35,   lng: -150.05,  zoom: 11 },
+  { name: 'Knik Arm center (z8)',        lat: 61.35,   lng: -150.05,  zoom: 8  },
 ]
 
-// ─── Tile Math (matches skylineWorker.ts exactly) ──────────────────────────────
+// ─── Tile Math ─────────────────────────────────────────────────────────────────
 
 function latLngToTileXY(lat, lng, zoom) {
   const x = Math.floor(((lng + 180) / 360) * Math.pow(2, zoom))
@@ -52,116 +56,76 @@ function tileTopLeft(x, y, zoom) {
   return { lat: (latR * 180) / Math.PI, lng }
 }
 
-// ─── Fetch & Decode a Terrarium Tile ───────────────────────────────────────────
+// ─── Fetch & Decode ────────────────────────────────────────────────────────────
 
 async function fetchTile(z, x, y) {
   const url = `${AWS_BASE}/${z}/${x}/${y}.png`
   console.log(`  Fetching ${url}`)
-
-  // Use curl because Node fetch may be blocked in some environments
-  const { execSync } = await import('child_process')
   const buf = execSync(`curl -s "${url}"`, { maxBuffer: 10 * 1024 * 1024 })
   const pngBytes = new Uint8Array(buf)
-
-  // Decode PNG using a minimal approach: extract IDAT chunks and inflate
   const pixels = await decodePNG(pngBytes)
-
-  // Convert Terrarium RGB → elevation
   const elevations = new Float32Array(TILE_PX * TILE_PX)
   for (let i = 0; i < TILE_PX * TILE_PX; i++) {
-    const r = pixels[i * 4]
-    const g = pixels[i * 4 + 1]
-    const b = pixels[i * 4 + 2]
-    elevations[i] = r * 256 + g + b / 256 - 32768
+    elevations[i] = pixels[i * 4] * 256 + pixels[i * 4 + 1] + pixels[i * 4 + 2] / 256 - 32768
   }
-  return { elevations, pngBytes, pixels }
+  return { elevations }
 }
-
-// ─── Minimal PNG decoder (no dependencies) ─────────────────────────────────────
-
-import { createInflate } from 'zlib'
 
 function decodePNG(pngBytes) {
   return new Promise((resolve, reject) => {
-    // Verify PNG signature
     const sig = [137, 80, 78, 71, 13, 10, 26, 10]
     for (let i = 0; i < 8; i++) {
       if (pngBytes[i] !== sig[i]) return reject(new Error('Not a PNG'))
     }
-
-    // Parse chunks, collect IDAT data
     let offset = 8
     let width = 0, height = 0, bitDepth = 0, colorType = 0
     const idatChunks = []
-
     while (offset < pngBytes.length) {
-      const len = readU32(pngBytes, offset)
-      const type = String.fromCharCode(
-        pngBytes[offset + 4], pngBytes[offset + 5],
-        pngBytes[offset + 6], pngBytes[offset + 7]
-      )
-
+      const len = (pngBytes[offset] << 24 | pngBytes[offset+1] << 16 | pngBytes[offset+2] << 8 | pngBytes[offset+3]) >>> 0
+      const type = String.fromCharCode(pngBytes[offset+4], pngBytes[offset+5], pngBytes[offset+6], pngBytes[offset+7])
       if (type === 'IHDR') {
-        width = readU32(pngBytes, offset + 8)
-        height = readU32(pngBytes, offset + 12)
-        bitDepth = pngBytes[offset + 16]
-        colorType = pngBytes[offset + 17]
+        width = (pngBytes[offset+8] << 24 | pngBytes[offset+9] << 16 | pngBytes[offset+10] << 8 | pngBytes[offset+11]) >>> 0
+        height = (pngBytes[offset+12] << 24 | pngBytes[offset+13] << 16 | pngBytes[offset+14] << 8 | pngBytes[offset+15]) >>> 0
+        bitDepth = pngBytes[offset+16]; colorType = pngBytes[offset+17]
       } else if (type === 'IDAT') {
         idatChunks.push(pngBytes.slice(offset + 8, offset + 8 + len))
-      } else if (type === 'IEND') {
-        break
-      }
-
-      offset += 12 + len // 4 len + 4 type + data + 4 crc
+      } else if (type === 'IEND') { break }
+      offset += 12 + len
     }
-
-    // Concatenate IDAT chunks and inflate
     const compressed = Buffer.concat(idatChunks.map(c => Buffer.from(c)))
     const inflate = createInflate()
     const chunks = []
     inflate.on('data', chunk => chunks.push(chunk))
     inflate.on('end', () => {
       const raw = Buffer.concat(chunks)
-      // De-filter: each row has a filter byte + width * bytesPerPixel
-      const bpp = colorType === 2 ? 3 : 4 // RGB=3, RGBA=4
+      const bpp = colorType === 2 ? 3 : 4
       const rowBytes = width * bpp
       const pixels = new Uint8Array(width * height * 4)
-
       let prevRow = new Uint8Array(rowBytes)
       for (let row = 0; row < height; row++) {
         const filterByte = raw[row * (rowBytes + 1)]
         const rowStart = row * (rowBytes + 1) + 1
         const currRow = new Uint8Array(rowBytes)
-
         for (let i = 0; i < rowBytes; i++) {
           const x = raw[rowStart + i]
           const a = i >= bpp ? currRow[i - bpp] : 0
           const b = prevRow[i]
           const c = i >= bpp ? prevRow[i - bpp] : 0
-
           switch (filterByte) {
-            case 0: currRow[i] = x; break                          // None
-            case 1: currRow[i] = (x + a) & 0xff; break            // Sub
-            case 2: currRow[i] = (x + b) & 0xff; break            // Up
-            case 3: currRow[i] = (x + ((a + b) >> 1)) & 0xff; break // Average
-            case 4: currRow[i] = (x + paethPredictor(a, b, c)) & 0xff; break // Paeth
+            case 0: currRow[i] = x; break
+            case 1: currRow[i] = (x + a) & 0xff; break
+            case 2: currRow[i] = (x + b) & 0xff; break
+            case 3: currRow[i] = (x + ((a + b) >> 1)) & 0xff; break
+            case 4: { const p=a+b-c; const pa=Math.abs(p-a); const pb=Math.abs(p-b); const pc=Math.abs(p-c); currRow[i] = (x + (pa<=pb&&pa<=pc?a:pb<=pc?b:c)) & 0xff; break }
             default: currRow[i] = x
           }
         }
-
-        // Copy to RGBA output
         for (let col = 0; col < width; col++) {
-          const srcOff = col * bpp
-          const dstOff = (row * width + col) * 4
-          pixels[dstOff]     = currRow[srcOff]
-          pixels[dstOff + 1] = currRow[srcOff + 1]
-          pixels[dstOff + 2] = currRow[srcOff + 2]
-          pixels[dstOff + 3] = bpp === 4 ? currRow[srcOff + 3] : 255
+          const s = col * bpp, d = (row * width + col) * 4
+          pixels[d] = currRow[s]; pixels[d+1] = currRow[s+1]; pixels[d+2] = currRow[s+2]; pixels[d+3] = bpp === 4 ? currRow[s+3] : 255
         }
-
         prevRow = currRow
       }
-
       resolve(pixels)
     })
     inflate.on('error', reject)
@@ -169,72 +133,156 @@ function decodePNG(pngBytes) {
   })
 }
 
-function readU32(buf, off) {
-  return (buf[off] << 24 | buf[off + 1] << 16 | buf[off + 2] << 8 | buf[off + 3]) >>> 0
-}
+// ─── Method A: Neighbor Erosion (zoom-adaptive) ───────────────────────────────
 
-function paethPredictor(a, b, c) {
-  const p = a + b - c
-  const pa = Math.abs(p - a)
-  const pb = Math.abs(p - b)
-  const pc = Math.abs(p - c)
-  if (pa <= pb && pa <= pc) return a
-  if (pb <= pc) return b
-  return c
-}
-
-// ─── Erosion Logic (proposed algorithm) ────────────────────────────────────────
-
-const OCEAN_THRESHOLD = 0     // elevation <= this is ocean
-
-// Zoom-adaptive thresholds: how many of 8 neighbors must be ocean to erode
 function spikeThresholdForZoom(zoom) {
-  if (zoom <= 10) return 6   // z8-z10 (150-610m/px): aggressive — no real 1px features
-  if (zoom <= 13) return 7   // z11-z13 (19-76m/px): conservative — narrow peninsulas possible
-  return 9                    // z14-z15: effectively disabled (can't have 9/8)
+  if (zoom <= 10) return 6
+  if (zoom <= 13) return 7
+  return 9
 }
 
-function runErosion(elevations, passes = 2, zoom = 8) {
+function runErosion(elevations, zoom) {
   const N = TILE_PX
-  const result = new Float32Array(elevations)  // copy
-  const erodedPixels = []  // track what we erode for visualization
-
-  for (let pass = 0; pass < passes; pass++) {
-    const snapshot = new Float32Array(result)  // read from snapshot, write to result
-    let passEroded = 0
-
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
-        const idx = row * N + col
-        if (snapshot[idx] <= OCEAN_THRESHOLD) continue  // already ocean
-
-        // Count ocean neighbors (8-connected)
-        let oceanCount = 0
-        let neighborCount = 0
-        for (let dr = -1; dr <= 1; dr++) {
-          for (let dc = -1; dc <= 1; dc++) {
-            if (dr === 0 && dc === 0) continue
-            const nr = row + dr, nc = col + dc
-            if (nr < 0 || nr >= N || nc < 0 || nc >= N) {
-              // Edge pixels: treat tile boundary as unknown (not ocean)
-              continue
-            }
-            neighborCount++
-            if (snapshot[nr * N + nc] <= OCEAN_THRESHOLD) oceanCount++
-          }
+  const result = new Float32Array(elevations)
+  const erodedPixels = []
+  for (let pass = 0; pass < 2; pass++) {
+    const snap = new Float32Array(result)
+    let cnt = 0
+    for (let r = 0; r < N; r++) {
+      for (let c = 0; c < N; c++) {
+        const idx = r * N + c
+        if (snap[idx] <= OCEAN_THRESHOLD) continue
+        let ocean = 0, neighbors = 0
+        for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue
+          const nr = r + dr, nc = c + dc
+          if (nr < 0 || nr >= N || nc < 0 || nc >= N) continue
+          neighbors++
+          if (snap[nr * N + nc] <= OCEAN_THRESHOLD) ocean++
         }
-
-        if (neighborCount > 0 && oceanCount >= spikeThresholdForZoom(zoom)) {
+        if (neighbors > 0 && ocean >= spikeThresholdForZoom(zoom)) {
           result[idx] = 0
-          erodedPixels.push({ row, col, pass, origElev: elevations[idx], oceanNeighbors: oceanCount })
-          passEroded++
+          erodedPixels.push({ row: r, col: c, origElev: elevations[idx] })
+          cnt++
         }
       }
     }
-    console.log(`    Pass ${pass + 1}: eroded ${passEroded} pixels`)
+    console.log(`    [Erosion] Pass ${pass+1}: ${cnt} pixels`)
+  }
+  return { result, erodedPixels }
+}
+
+// ─── Method B: Flood-Fill Connected Component ─────────────────────────────────
+//
+// 1. Flood-fill from every EDGE pixel with elevation <= 0 → "connected ocean"
+// 2. Flood-fill from every EDGE pixel with elevation > 0 → "connected land"
+// 3. Any land pixel NOT connected to edge = isolated fragment
+//    If fragment size < threshold → erase (set to 0)
+//
+// Size threshold scales with zoom: at z8 (610m/px), 16px = ~10km (way bigger
+// than noise). At z11 (36m/px), 16px = ~576m.
+
+function floodFillClean(elevations, zoom) {
+  const N = TILE_PX
+  const total = N * N
+  const result = new Float32Array(elevations)
+
+  // Label array: 0 = unvisited, positive = component ID
+  const labels = new Int32Array(total)
+  const componentSizes = new Map()   // componentId -> pixel count
+  const componentIsEdge = new Map()  // componentId -> touches tile edge?
+  const componentIsLand = new Map()  // componentId -> land or ocean?
+  let nextLabel = 1
+
+  // BFS flood fill
+  function bfs(startIdx, isLand) {
+    const label = nextLabel++
+    const queue = [startIdx]
+    labels[startIdx] = label
+    let size = 0
+    let touchesEdge = false
+
+    while (queue.length > 0) {
+      const idx = queue.pop()  // DFS-style for speed (stack not queue)
+      size++
+      const r = (idx / N) | 0
+      const c = idx % N
+
+      if (r === 0 || r === N - 1 || c === 0 || c === N - 1) touchesEdge = true
+
+      // 4-connected neighbors (faster, sufficient for flood fill)
+      const neighbors = []
+      if (r > 0)     neighbors.push(idx - N)
+      if (r < N - 1) neighbors.push(idx + N)
+      if (c > 0)     neighbors.push(idx - 1)
+      if (c < N - 1) neighbors.push(idx + 1)
+
+      for (const ni of neighbors) {
+        if (labels[ni] !== 0) continue
+        const niIsLand = result[ni] > OCEAN_THRESHOLD
+        if (niIsLand === isLand) {
+          labels[ni] = label
+          queue.push(ni)
+        }
+      }
+    }
+
+    componentSizes.set(label, size)
+    componentIsEdge.set(label, touchesEdge)
+    componentIsLand.set(label, isLand)
+    return label
   }
 
-  return { eroded: result, erodedPixels }
+  // Pass 1: Label all connected components
+  for (let i = 0; i < total; i++) {
+    if (labels[i] !== 0) continue
+    const isLand = result[i] > OCEAN_THRESHOLD
+    bfs(i, isLand)
+  }
+
+  // Size threshold: land fragments smaller than this get erased
+  // At z8: 16px * 610m = ~10km — generous, only erases tiny noise
+  // At z11: 16px * 36m = ~576m — catches mudflat noise, preserves real features
+  // Fire Island (~3km x 1km at z11) = ~80x27 = 2160 pixels — well above threshold
+  const MIN_ISLAND_PX = zoom <= 10 ? 8 : 16
+
+  // Erase isolated small land fragments
+  const erodedPixels = []
+  let erasedComponents = 0
+  for (const [label, size] of componentSizes) {
+    if (!componentIsLand.get(label)) continue  // skip ocean components
+    if (componentIsEdge.get(label)) continue   // connected to edge = real land
+    if (size >= MIN_ISLAND_PX) continue        // big enough to be a real island
+
+    // This is a small isolated land fragment — erase it
+    erasedComponents++
+    for (let i = 0; i < total; i++) {
+      if (labels[i] === label) {
+        erodedPixels.push({ row: (i / N) | 0, col: i % N, origElev: elevations[i] })
+        result[i] = 0
+      }
+    }
+  }
+
+  // Stats
+  let totalComponents = 0, landComponents = 0, edgeLand = 0, isolatedLand = 0, preservedIslands = 0
+  for (const [label, ] of componentSizes) {
+    totalComponents++
+    if (componentIsLand.get(label)) {
+      landComponents++
+      if (componentIsEdge.get(label)) edgeLand++
+      else {
+        isolatedLand++
+        if (componentSizes.get(label) >= MIN_ISLAND_PX) preservedIslands++
+      }
+    }
+  }
+
+  console.log(`    [FloodFill] ${totalComponents} components (${landComponents} land, ${totalComponents - landComponents} ocean)`)
+  console.log(`    [FloodFill] Land: ${edgeLand} edge-connected, ${isolatedLand} isolated (${erasedComponents} erased, ${preservedIslands} preserved as islands)`)
+  console.log(`    [FloodFill] ${erodedPixels.length} pixels erased (threshold: ${MIN_ISLAND_PX}px)`)
+
+  return { result, erodedPixels, stats: { totalComponents, landComponents, edgeLand, isolatedLand, erasedComponents, preservedIslands, minIslandPx: MIN_ISLAND_PX } }
 }
 
 // ─── Statistics ────────────────────────────────────────────────────────────────
@@ -250,258 +298,145 @@ function tileStats(elevations) {
   return { oceanPx, landPx, minElev, maxElev, total: elevations.length }
 }
 
-// ─── HTML Report Generator ─────────────────────────────────────────────────────
+// ─── HTML Report ───────────────────────────────────────────────────────────────
 
 function generateHTML(results) {
-  const tileCanvases = results.map((r, idx) => {
-    // Encode elevation data as base64 for the browser to render
+  const tiles = results.map((r, idx) => {
     const rawB64 = Buffer.from(r.raw.buffer).toString('base64')
-    const erodedB64 = Buffer.from(r.eroded.buffer).toString('base64')
-    // Encode eroded pixel coordinates
-    const erodedPxJson = JSON.stringify(r.erodedPixels)
+    const erosionB64 = Buffer.from(r.erosionResult.buffer).toString('base64')
+    const floodB64 = Buffer.from(r.floodResult.buffer).toString('base64')
+    const erosionPxJson = JSON.stringify(r.erosionPixels.map(p => [p.row, p.col]))
+    const floodPxJson = JSON.stringify(r.floodPixels.map(p => [p.row, p.col]))
 
     return `
-    <div class="tile-pair" id="tile-${idx}">
+    <div class="tile-pair">
       <h2>${r.name}</h2>
       <p>Tile: z${r.zoom}/${r.tx}/${r.ty} &nbsp;|&nbsp;
-         ${r.stats.oceanPx} ocean px (${(r.stats.oceanPx / r.stats.total * 100).toFixed(1)}%)
-         &nbsp;|&nbsp; ${r.stats.landPx} land px
-         &nbsp;|&nbsp; Elev range: ${r.stats.minElev.toFixed(1)}m to ${r.stats.maxElev.toFixed(1)}m
-         &nbsp;|&nbsp; <strong>${r.erodedPixels.length} pixels eroded</strong></p>
+         ${r.stats.oceanPx} ocean (${(r.stats.oceanPx / r.stats.total * 100).toFixed(1)}%)
+         &nbsp;|&nbsp; ${r.stats.landPx} land
+         &nbsp;|&nbsp; Elev: ${r.stats.minElev.toFixed(0)}m to ${r.stats.maxElev.toFixed(0)}m</p>
+      <p>Neighbor erosion: <strong class="eroded">${r.erosionPixels.length} pixels</strong> erased
+         &nbsp;|&nbsp; Flood-fill: <strong class="flood">${r.floodPixels.length} pixels</strong> erased
+         ${r.floodStats ? `(${r.floodStats.erasedComponents} fragments, threshold ${r.floodStats.minIslandPx}px, ${r.floodStats.preservedIslands} islands preserved)` : ''}</p>
       <div class="canvases">
-        <div>
-          <h3>Before (raw DEM)</h3>
-          <canvas id="before-${idx}" width="256" height="256"></canvas>
-        </div>
-        <div>
-          <h3>After (eroded) — red = eroded pixels</h3>
-          <canvas id="after-${idx}" width="256" height="256"></canvas>
-        </div>
-        <div>
-          <h3>Diff only (eroded pixels highlighted)</h3>
-          <canvas id="diff-${idx}" width="256" height="256"></canvas>
-        </div>
+        <div><h3>Raw DEM</h3><canvas id="c${idx}a" width="256" height="256"></canvas></div>
+        <div><h3>Neighbor Erosion (red = erased)</h3><canvas id="c${idx}b" width="256" height="256"></canvas></div>
+        <div><h3>Flood-Fill Clean (magenta = erased)</h3><canvas id="c${idx}c" width="256" height="256"></canvas></div>
+        <div><h3>Side-by-side diff</h3><canvas id="c${idx}d" width="256" height="256"></canvas></div>
       </div>
-      ${r.erodedPixels.length > 0 ? `
-      <details>
-        <summary>Eroded pixel details (${r.erodedPixels.length} pixels)</summary>
-        <table>
-          <tr><th>Row</th><th>Col</th><th>Pass</th><th>Original Elev (m)</th><th>Ocean Neighbors</th></tr>
-          ${r.erodedPixels.map(p =>
-            `<tr><td>${p.row}</td><td>${p.col}</td><td>${p.pass + 1}</td><td>${p.origElev.toFixed(2)}</td><td>${p.oceanNeighbors}/8</td></tr>`
-          ).join('')}
-        </table>
+      ${r.floodPixels.length > 0 ? `
+      <details><summary>Flood-fill erased elevations (${r.floodPixels.length} px)</summary>
+        <p style="font-size:11px;max-height:100px;overflow:auto">${r.floodPixels.map(p => p.origElev.toFixed(1)+'m').join(', ')}</p>
       </details>` : ''}
-      <script>
-        (function() {
-          const rawB64 = "${rawB64}";
-          const erodedB64 = "${erodedB64}";
-          const erodedPx = ${erodedPxJson};
-          const N = 256;
-
-          function b64ToF32(b64) {
-            const bin = atob(b64);
-            const buf = new ArrayBuffer(bin.length);
-            const u8 = new Uint8Array(buf);
-            for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-            return new Float32Array(buf);
-          }
-
-          function drawElevation(canvasId, elevData, highlightPixels) {
-            const canvas = document.getElementById(canvasId);
-            const ctx = canvas.getContext('2d');
-            const imgData = ctx.createImageData(N, N);
-
-            // Find elevation range for this tile
-            let minE = Infinity, maxE = -Infinity;
-            for (let i = 0; i < elevData.length; i++) {
-              if (elevData[i] > 0) {
-                if (elevData[i] < minE) minE = elevData[i];
-                if (elevData[i] > maxE) maxE = elevData[i];
-              }
-            }
-            const range = maxE - minE || 1;
-
-            for (let i = 0; i < N * N; i++) {
-              const off = i * 4;
-              if (elevData[i] <= 0) {
-                // Ocean: dark blue
-                imgData.data[off]     = 5;
-                imgData.data[off + 1] = 15;
-                imgData.data[off + 2] = 40;
-              } else {
-                // Land: green-to-brown elevation ramp
-                const t = (elevData[i] - minE) / range;
-                imgData.data[off]     = Math.round(40 + 160 * t);
-                imgData.data[off + 1] = Math.round(120 + 80 * (1 - t));
-                imgData.data[off + 2] = Math.round(30 + 30 * (1 - t));
-              }
-              imgData.data[off + 3] = 255;
-            }
-
-            // Highlight eroded pixels in bright red
-            if (highlightPixels) {
-              for (const p of highlightPixels) {
-                const off = (p.row * N + p.col) * 4;
-                imgData.data[off]     = 255;
-                imgData.data[off + 1] = 0;
-                imgData.data[off + 2] = 0;
-                imgData.data[off + 3] = 255;
-              }
-            }
-
-            ctx.putImageData(imgData, 0, 0);
-          }
-
-          function drawDiff(canvasId, rawData, erodedPx) {
-            const canvas = document.getElementById(canvasId);
-            const ctx = canvas.getContext('2d');
-            const imgData = ctx.createImageData(N, N);
-
-            // Dim background
-            for (let i = 0; i < N * N; i++) {
-              const off = i * 4;
-              if (rawData[i] <= 0) {
-                imgData.data[off] = 2; imgData.data[off+1] = 5; imgData.data[off+2] = 15;
-              } else {
-                imgData.data[off] = 30; imgData.data[off+1] = 40; imgData.data[off+2] = 20;
-              }
-              imgData.data[off + 3] = 255;
-            }
-
-            // Bright red for eroded, yellow halo for their neighbors
-            for (const p of erodedPx) {
-              // Yellow halo (3x3 around eroded pixel)
-              for (let dr = -2; dr <= 2; dr++) {
-                for (let dc = -2; dc <= 2; dc++) {
-                  const nr = p.row + dr, nc = p.col + dc;
-                  if (nr >= 0 && nr < N && nc >= 0 && nc < N) {
-                    const off = (nr * N + nc) * 4;
-                    if (imgData.data[off] < 200) {  // don't overwrite red
-                      imgData.data[off] = 255; imgData.data[off+1] = 255; imgData.data[off+2] = 0;
-                    }
-                  }
-                }
-              }
-              // Red center
-              const off = (p.row * N + p.col) * 4;
-              imgData.data[off] = 255; imgData.data[off+1] = 0; imgData.data[off+2] = 0;
-            }
-
-            ctx.putImageData(imgData, 0, 0);
-          }
-
-          const raw = b64ToF32(rawB64);
-          const eroded = b64ToF32(erodedB64);
-          drawElevation('before-${idx}', raw, null);
-          drawElevation('after-${idx}', eroded, erodedPx);
-          drawDiff('diff-${idx}', raw, erodedPx);
-        })();
-      </script>
+      <script>(function(){
+        const N=256, rawB64="${rawB64}", erosionB64="${erosionB64}", floodB64="${floodB64}";
+        const erosionPx=${erosionPxJson}, floodPx=${floodPxJson};
+        function d(b){const s=atob(b),a=new ArrayBuffer(s.length),u=new Uint8Array(a);for(let i=0;i<s.length;i++)u[i]=s.charCodeAt(i);return new Float32Array(a)}
+        function elRange(e){let mn=Infinity,mx=-Infinity;for(let i=0;i<e.length;i++){if(e[i]>0){if(e[i]<mn)mn=e[i];if(e[i]>mx)mx=e[i]}}return[mn,mx-mn||1]}
+        function draw(id,elev,highlights,hColor){
+          const cv=document.getElementById(id),ctx=cv.getContext('2d'),img=ctx.createImageData(N,N);
+          const[mn,rng]=elRange(elev);
+          for(let i=0;i<N*N;i++){const o=i*4;if(elev[i]<=0){img.data[o]=5;img.data[o+1]=15;img.data[o+2]=40}else{const t=(elev[i]-mn)/rng;img.data[o]=Math.round(40+160*t);img.data[o+1]=Math.round(120+80*(1-t));img.data[o+2]=Math.round(30+30*(1-t))}img.data[o+3]=255}
+          if(highlights)for(const[r,c]of highlights){const o=(r*N+c)*4;img.data[o]=hColor[0];img.data[o+1]=hColor[1];img.data[o+2]=hColor[2]}
+          ctx.putImageData(img,0,0);
+        }
+        function drawDiff(id,raw,erosionPx,floodPx){
+          const cv=document.getElementById(id),ctx=cv.getContext('2d'),img=ctx.createImageData(N,N);
+          for(let i=0;i<N*N;i++){const o=i*4;if(raw[i]<=0){img.data[o]=2;img.data[o+1]=5;img.data[o+2]=15}else{img.data[o]=30;img.data[o+1]=40;img.data[o+2]=20}img.data[o+3]=255}
+          // Flood-fill only: magenta
+          const floodSet=new Set(floodPx.map(([r,c])=>r*N+c));
+          const erosionSet=new Set(erosionPx.map(([r,c])=>r*N+c));
+          for(const idx of floodSet){if(!erosionSet.has(idx)){const o=idx*4;img.data[o]=255;img.data[o+1]=0;img.data[o+2]=255}}
+          // Erosion only: red
+          for(const idx of erosionSet){if(!floodSet.has(idx)){const o=idx*4;img.data[o]=255;img.data[o+1]=0;img.data[o+2]=0}}
+          // Both: yellow
+          for(const idx of floodSet){if(erosionSet.has(idx)){const o=idx*4;img.data[o]=255;img.data[o+1]=255;img.data[o+2]=0}}
+          ctx.putImageData(img,0,0);
+        }
+        const raw=d(rawB64),erosion=d(erosionB64),flood=d(floodB64);
+        draw('c${idx}a',raw,null,[0,0,0]);
+        draw('c${idx}b',erosion,erosionPx,[255,0,0]);
+        draw('c${idx}c',flood,floodPx,[255,0,255]);
+        drawDiff('c${idx}d',raw,erosionPx,floodPx);
+      })()</script>
     </div>`
   }).join('\n')
 
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <title>Spike Erosion Diagnostic</title>
-  <style>
-    body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; max-width: 1400px; margin: 0 auto; padding: 20px; }
-    h1 { color: #84d1db; }
-    h2 { color: #a0d0a0; border-bottom: 1px solid #333; padding-bottom: 8px; }
-    h3 { color: #ccc; font-size: 14px; }
-    .tile-pair { margin-bottom: 40px; background: #0f0f23; padding: 20px; border-radius: 8px; }
-    .canvases { display: flex; gap: 20px; flex-wrap: wrap; }
-    .canvases > div { text-align: center; }
-    canvas { border: 1px solid #333; image-rendering: pixelated; width: 256px; height: 256px; }
-    table { border-collapse: collapse; margin-top: 10px; font-size: 12px; }
-    th, td { border: 1px solid #444; padding: 4px 8px; text-align: right; }
-    th { background: #1a2a1a; }
-    details { margin-top: 10px; }
-    summary { cursor: pointer; color: #84d1db; }
-    p { color: #aaa; }
-    strong { color: #ff6b6b; }
-    .summary-box { background: #0a1a2a; padding: 15px; border-radius: 8px; margin-bottom: 30px; border: 1px solid #234; }
-    .summary-box h2 { border: none; margin: 0 0 10px 0; }
-    .pass { color: #ffd700; }
-    .safe { color: #4caf50; }
-    .eroded { color: #ff6b6b; }
-  </style>
-</head>
-<body>
-  <h1>Spike Erosion Diagnostic Report</h1>
+  return `<!DOCTYPE html><html><head><title>Erosion vs Flood-Fill Comparison</title>
+<style>
+  body{background:#1a1a2e;color:#e0e0e0;font-family:monospace;max-width:1600px;margin:0 auto;padding:20px}
+  h1{color:#84d1db} h2{color:#a0d0a0;border-bottom:1px solid #333;padding-bottom:8px} h3{color:#ccc;font-size:13px}
+  .tile-pair{margin-bottom:40px;background:#0f0f23;padding:20px;border-radius:8px}
+  .canvases{display:flex;gap:16px;flex-wrap:wrap} .canvases>div{text-align:center}
+  canvas{border:1px solid #333;image-rendering:pixelated;width:256px;height:256px}
+  p{color:#aaa;font-size:13px} strong{color:#ff6b6b}
+  .flood{color:#ff44ff}
+  .summary-box{background:#0a1a2a;padding:15px;border-radius:8px;margin-bottom:30px;border:1px solid #234}
+  .summary-box h2{border:none;margin:0 0 10px 0}
+  details{margin-top:8px} summary{cursor:pointer;color:#84d1db}
+</style></head><body>
+  <h1>Spike Removal: Neighbor Erosion vs Flood-Fill</h1>
   <div class="summary-box">
-    <h2>Algorithm: 2-pass, zoom-adaptive neighbor threshold</h2>
-    <p>For each land pixel (elevation > 0), count how many of its 8 immediate neighbors have elevation ≤ 0.
-       Threshold: z8-z10 → 6/8, z11-z13 → 7/8, z14-z15 → disabled. Run twice to catch small clusters.</p>
-    <p>Color key: <span style="color:#050f28">■</span> ocean &nbsp;
-       <span style="color:#78a030">■</span> land &nbsp;
-       <span class="eroded">■</span> eroded pixel &nbsp;
-       <span style="color:#ffff00">■</span> halo (context around eroded)</p>
+    <h2>Two approaches compared</h2>
+    <p><strong style="color:#ff6666">Method A — Neighbor Erosion:</strong> For each land pixel, count ocean neighbors.
+       z8-z10: erase if >= 6/8 ocean. z11-z13: >= 7/8. Two passes.</p>
+    <p><strong style="color:#ff44ff">Method B — Flood-Fill:</strong> Label all connected land components.
+       Any land fragment NOT connected to the tile edge AND smaller than threshold (z8-z10: 8px, z11+: 16px) is erased.</p>
+    <p>Diff canvas: <span style="color:#f00">red</span> = erosion only,
+       <span style="color:#f0f">magenta</span> = flood-fill only,
+       <span style="color:#ff0">yellow</span> = both agree</p>
   </div>
-  ${tileCanvases}
-</body>
-</html>`
+  ${tiles}
+</body></html>`
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('=== Spike Erosion Diagnostic ===\n')
+  console.log('=== Erosion vs Flood-Fill Comparison ===\n')
   const results = []
 
   for (const loc of TEST_LOCATIONS) {
     console.log(`\n${loc.name}:`)
     const { x: tx, y: ty } = latLngToTileXY(loc.lat, loc.lng, loc.zoom)
-    console.log(`  Tile coords: z${loc.zoom}/${tx}/${ty}`)
-
-    // Compute tile geographic bounds
+    console.log(`  Tile: z${loc.zoom}/${tx}/${ty}`)
     const nw = tileTopLeft(tx, ty, loc.zoom)
     const se = tileTopLeft(tx + 1, ty + 1, loc.zoom)
-    console.log(`  Bounds: ${nw.lat.toFixed(4)}°N ${nw.lng.toFixed(4)}°E → ${se.lat.toFixed(4)}°N ${se.lng.toFixed(4)}°E`)
     const pixelSize = ((nw.lat - se.lat) * 111132) / 256
-    console.log(`  Pixel size: ~${pixelSize.toFixed(1)}m`)
+    console.log(`  Pixel: ~${pixelSize.toFixed(1)}m`)
 
     try {
       const { elevations } = await fetchTile(loc.zoom, tx, ty)
       const stats = tileStats(elevations)
-      console.log(`  Stats: ${stats.oceanPx} ocean, ${stats.landPx} land, elev ${stats.minElev.toFixed(1)} to ${stats.maxElev.toFixed(1)}m`)
+      console.log(`  Ocean: ${stats.oceanPx}, Land: ${stats.landPx}, Elev: ${stats.minElev.toFixed(0)} to ${stats.maxElev.toFixed(0)}m`)
 
       if (stats.oceanPx === 0) {
-        console.log(`  ✓ No ocean pixels — erosion skipped (early-out)`)
-        results.push({
-          name: loc.name, zoom: loc.zoom, tx, ty,
-          raw: elevations, eroded: elevations,
-          erodedPixels: [], stats,
-        })
+        console.log(`  No ocean — skipped`)
+        results.push({ name: loc.name, zoom: loc.zoom, tx, ty, raw: elevations,
+          erosionResult: elevations, erosionPixels: [],
+          floodResult: elevations, floodPixels: [], floodStats: null, stats })
         continue
       }
 
-      const { eroded, erodedPixels } = runErosion(elevations, 2, loc.zoom)
-      console.log(`  → ${erodedPixels.length} total pixels eroded`)
+      console.log(`  --- Method A: Neighbor Erosion ---`)
+      const erosion = runErosion(elevations, loc.zoom)
 
-      if (erodedPixels.length > 0) {
-        console.log(`  Eroded pixel elevations: ${erodedPixels.map(p => p.origElev.toFixed(1) + 'm').join(', ')}`)
-      }
+      console.log(`  --- Method B: Flood-Fill ---`)
+      const flood = floodFillClean(elevations, loc.zoom)
 
-      results.push({
-        name: loc.name, zoom: loc.zoom, tx, ty,
-        raw: elevations, eroded, erodedPixels, stats,
-      })
+      results.push({ name: loc.name, zoom: loc.zoom, tx, ty, raw: elevations,
+        erosionResult: erosion.result, erosionPixels: erosion.erodedPixels,
+        floodResult: flood.result, floodPixels: flood.erodedPixels,
+        floodStats: flood.stats, stats })
     } catch (err) {
-      console.error(`  ✗ Failed: ${err.message}`)
+      console.error(`  FAILED: ${err.message}`)
     }
   }
 
-  // Generate HTML report
   const html = generateHTML(results)
   const outPath = join(__dirname, 'erosion-report.html')
   writeFileSync(outPath, html)
-  console.log(`\n✓ Report written to: ${outPath}`)
-  console.log('  Open in a browser to see before/after visualizations.')
+  console.log(`\n✓ Report: ${outPath}`)
 }
 
-main().catch(err => {
-  console.error('Fatal:', err)
-  process.exit(1)
-})
+main().catch(err => { console.error('Fatal:', err); process.exit(1) })
