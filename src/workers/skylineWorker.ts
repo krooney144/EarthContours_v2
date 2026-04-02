@@ -437,6 +437,46 @@ function sampleRaw(lat: number, lng: number, zoom: number): number {
   return -1  // No tile — treat as ocean
 }
 
+/** Check if a sample point is an isolated SRTM spike by reading its DEM tile neighborhood.
+ *  Reads a 5×5 pixel kernel centered on the sample's tile position. If >60% of the
+ *  25 pixels have raw elevation ≤ 0, the point is surrounded by ocean and is a spike.
+ *  This catches spikes regardless of their height — the signal is isolation, not elevation.
+ *  Only called on suspicious samples (tentative land after ocean, 1-3 march steps). */
+function isIsolatedSpike(lat: number, lng: number, zoom: number): boolean {
+  const { x: tx, y: ty } = latLngToTileXY(lat, lng, zoom)
+  const grid = tileCacheW.get(`${zoom}/${tx}/${ty}`)
+  if (!grid) return true  // No tile data — assume ocean
+
+  const nw = tileTopLeft(tx, ty, zoom)
+  const se = tileTopLeft(tx + 1, ty + 1, zoom)
+  const nx = (lng - nw.lng) / (se.lng - nw.lng)
+  const ny = (nw.lat - lat) / (nw.lat - se.lat)
+  const cx = Math.round(nx * (TILE_PX - 1))
+  const cy = Math.round(ny * (TILE_PX - 1))
+
+  const RADIUS = 2  // 5×5 kernel (2 pixels each direction)
+  let oceanCount = 0
+  let totalCount = 0
+
+  for (let dy = -RADIUS; dy <= RADIUS; dy++) {
+    for (let dx = -RADIUS; dx <= RADIUS; dx++) {
+      const px = cx + dx
+      const py = cy + dy
+      if (px < 0 || px >= TILE_PX || py < 0 || py >= TILE_PX) {
+        oceanCount++  // Out of bounds on tile edge — likely ocean
+        totalCount++
+        continue
+      }
+      const elev = grid[py * TILE_PX + px]  // Raw tile value (pre-decode already done)
+      if (elev <= 0) oceanCount++
+      totalCount++
+    }
+  }
+
+  // >60% of neighborhood is ocean → this is an isolated spike
+  return oceanCount / totalCount > 0.6
+}
+
 /** Hill shade at a terrain point (NW-45° light). */
 function hillShade(lat: number, lng: number, zoom: number): number {
   const STEP   = zoom >= 11 ? 0.0005 : 0.002
@@ -922,11 +962,15 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
 
           if (isOceanSample) {
             if (state === ST_TENTATIVE) {
-              // Land segment ended (went back to ocean) — check width
+              // Land segment ended (went back to ocean) — check if spike
               const landWidth = bandLandStartDist[bi] - dist
-              if (landWidth < SPIKE_WIDTH_M) {
-                // SPIKE — discard buffered ridgeline candidate, don't record transition
-                // (The land→ocean and ocean→land transitions from this spike are erased)
+              // Width check + DEM kernel check: even if width exceeds threshold,
+              // verify the sample isn't an isolated spike via tile neighborhood
+              const isSpikeByWidth = landWidth < SPIKE_WIDTH_M
+              const isSpikeByKernel = !isSpikeByWidth && isIsolatedSpike(
+                bandTentLat[bi], bandTentLng[bi], distToZoom(bandTentDist[bi]))
+              if (isSpikeByWidth || isSpikeByKernel) {
+                // SPIKE — discard buffered ridgeline candidate
               } else {
                 // Real land segment — flush buffered ridgeline
                 if (bandTentAngle[bi] > bandMaxAngles[bi]) {
@@ -938,7 +982,6 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                 }
               }
             }
-            // (Coast transitions now tracked via 0.5m contour crossings, not here)
             bandOceanState[bi] = ST_OCEAN
             bandSeenOcean[bi] = true
             bandLastOceanDist[bi] = dist
@@ -965,15 +1008,20 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
               // Check if land segment is now wide enough to confirm
               const landWidth = bandLandStartDist[bi] - dist
               if (landWidth >= SPIKE_WIDTH_M) {
-                // Confirmed real land — flush buffer and switch to CONFIRMED_LAND
-                if (bandTentAngle[bi] > bandMaxAngles[bi]) {
-                  bandMaxAngles[bi] = bandTentAngle[bi]
-                  bandRidgeDist[bi] = bandTentDist[bi]
-                  bandRidgeLat[bi]  = bandTentLat[bi]
-                  bandRidgeLng[bi]  = bandTentLng[bi]
-                  bandRidgeElev[bi] = bandTentElev[bi]
+                // Width says real land, but verify with DEM kernel
+                if (isIsolatedSpike(bandTentLat[bi], bandTentLng[bi], distToZoom(bandTentDist[bi]))) {
+                  // Kernel says spike — stay tentative (will be discarded when ocean returns)
+                } else {
+                  // Confirmed real land — flush buffer
+                  if (bandTentAngle[bi] > bandMaxAngles[bi]) {
+                    bandMaxAngles[bi] = bandTentAngle[bi]
+                    bandRidgeDist[bi] = bandTentDist[bi]
+                    bandRidgeLat[bi]  = bandTentLat[bi]
+                    bandRidgeLng[bi]  = bandTentLng[bi]
+                    bandRidgeElev[bi] = bandTentElev[bi]
+                  }
+                  bandOceanState[bi] = ST_LAND
                 }
-                bandOceanState[bi] = ST_LAND
               }
             }
             // ST_LAND (confirmed): normal ridgeline tracking below
@@ -1117,7 +1165,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             if (isOceanSample) {
               if (state === ST_TENTATIVE) {
                 const landWidth = hrLandStartDist[bi] - dist
-                if (landWidth < SPIKE_WIDTH_M) {
+                const isSpikeByWidth = landWidth < SPIKE_WIDTH_M
+                const isSpikeByKernel = !isSpikeByWidth && isIsolatedSpike(
+                  hrTentLat[bi], hrTentLng[bi], distToZoom(hrTentDist[bi]))
+                if (isSpikeByWidth || isSpikeByKernel) {
                   // SPIKE — discard
                 } else {
                   if (hrTentAngle[bi] > bandMaxAngles[bi]) {
@@ -1149,14 +1200,18 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
                 }
                 const landWidth = hrLandStartDist[bi] - dist
                 if (landWidth >= SPIKE_WIDTH_M) {
-                  if (hrTentAngle[bi] > bandMaxAngles[bi]) {
-                    bandMaxAngles[bi] = hrTentAngle[bi]
-                    bandRidgeDist[bi] = hrTentDist[bi]
-                    bandRidgeLat[bi]  = hrTentLat[bi]
-                    bandRidgeLng[bi]  = hrTentLng[bi]
-                    bandRidgeElev[bi] = hrTentElev[bi]
+                  if (isIsolatedSpike(hrTentLat[bi], hrTentLng[bi], distToZoom(hrTentDist[bi]))) {
+                    // Kernel says spike — stay tentative
+                  } else {
+                    if (hrTentAngle[bi] > bandMaxAngles[bi]) {
+                      bandMaxAngles[bi] = hrTentAngle[bi]
+                      bandRidgeDist[bi] = hrTentDist[bi]
+                      bandRidgeLat[bi]  = hrTentLat[bi]
+                      bandRidgeLng[bi]  = hrTentLng[bi]
+                      bandRidgeElev[bi] = hrTentElev[bi]
+                    }
+                    hrOceanState[bi] = ST_LAND
                   }
-                  hrOceanState[bi] = ST_LAND
                 }
               }
             }
