@@ -566,6 +566,34 @@ export interface NearFieldProfile {
   floatsPerSample: 2
 }
 
+// ─── SCAN — Continuous Terrain Profile ────────────────────────────────────────
+
+/**
+ * Full-range terrain profile: records the highest effective elevation
+ * at 80 log-spaced distance checkpoints (100m–100km) per azimuth.
+ *
+ * Collected during the silhouette candidate pass (Phase 4c) — zero extra
+ * tile lookups.  The main thread converts effElev→angle at the current
+ * viewerElev and builds a running-max occlusion envelope.
+ *
+ * Memory: 2880 × 80 × 4 bytes = ~900 KB (profileData)
+ *       + 80 × 4 bytes (profileDists) — negligible.
+ */
+export interface TerrainProfile {
+  /** Highest effElev at each checkpoint.
+   *  Flat layout: profileData[ai * numCheckpoints + ci] = max effElev.
+   *  Sentinel: -Infinity means no terrain sampled at that checkpoint. */
+  profileData: Float32Array
+  /** Distance (metres) of each checkpoint. Length = numCheckpoints. */
+  profileDists: Float32Array
+  /** Number of distance checkpoints (80). */
+  numCheckpoints: number
+  /** Azimuth resolution (steps per degree). Matches silhouette resolution (8). */
+  resolution: number
+  /** Total azimuths = 360 × resolution (2880). */
+  numAzimuths: number
+}
+
 // ─── SCAN — Skyline Precomputation ────────────────────────────────────────────
 
 /**
@@ -609,6 +637,10 @@ export interface SkylineData {
    *  the ridgeline, not the full terrain surface shape.
    *  Null if near-field profile was not computed (e.g. very old worker). */
   nearProfile: NearFieldProfile | null
+  /** Full-range terrain profile (100m–100km, 80 log-spaced checkpoints).
+   *  Max effElev per azimuth per checkpoint — used for contour occlusion
+   *  envelope.  Null if not computed. */
+  terrainProfile: TerrainProfile | null
   /** Steps per degree — 2 means 0.5°/step (720 azimuths) */
   resolution:  number
   /** Total azimuth steps = 360 × resolution */

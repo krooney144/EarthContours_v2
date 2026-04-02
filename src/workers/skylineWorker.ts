@@ -146,6 +146,15 @@ interface NearFieldProfileW {
   floatsPerSample: 2
 }
 
+/** Full-range terrain profile (mirrors types.ts TerrainProfile). */
+interface TerrainProfileW {
+  profileData:     Float32Array
+  profileDists:    Float32Array
+  numCheckpoints:  number
+  resolution:      number
+  numAzimuths:     number
+}
+
 export interface SkylineData {
   /** Max elevation angle (radians) at each azimuth step */
   angles:      Float32Array
@@ -161,6 +170,8 @@ export interface SkylineData {
   silhouette:  SilhouetteDataW | null
   /** Dense near-field elevation profile (0–2km) for opaque terrain occlusion */
   nearProfile: NearFieldProfileW | null
+  /** Full-range terrain profile (100m–100km, 80 checkpoints) for contour occlusion */
+  terrainProfile: TerrainProfileW | null
   /** Steps per degree used during computation */
   resolution:  number
   /** Total azimuth steps (= 360 × resolution) */
@@ -1043,8 +1054,36 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // detects local elevation maxima (hilltops/ridgetops).  These are stored in
   // per-bin min-heaps keyed on effElev (AGL-independent).
   //
+  // Also collects the full-range terrain profile: 80 log-spaced checkpoints
+  // (100m–100km) recording the max effElev at each checkpoint per azimuth.
+  // Zero extra tile lookups — piggybacks on the same distance samples.
+  //
   // The march reuses tiles already in cache — no new fetches.  Marches
   // NEAR → FAR so we can track valley floors on the viewer side of each peak.
+
+  // ── Terrain profile setup (80 log-spaced checkpoints, 100m–100km) ──
+  const TP_NUM_CHECKPOINTS = 80
+  const TP_MIN_DIST = 100     // metres
+  const TP_MAX_DIST = 100_000 // metres
+  const tpDists = new Float32Array(TP_NUM_CHECKPOINTS)
+  {
+    const logMin = Math.log(TP_MIN_DIST)
+    const logMax = Math.log(TP_MAX_DIST)
+    const logStep = (logMax - logMin) / (TP_NUM_CHECKPOINTS - 1)
+    for (let i = 0; i < TP_NUM_CHECKPOINTS; i++) {
+      tpDists[i] = Math.exp(logMin + i * logStep)
+    }
+  }
+  // Pre-compute upper bound of each checkpoint bin for fast assignment:
+  // checkpoint ci covers distances from tpDists[ci] to tpBounds[ci]
+  const tpBounds = new Float32Array(TP_NUM_CHECKPOINTS)
+  for (let ci = 0; ci < TP_NUM_CHECKPOINTS - 1; ci++) {
+    tpBounds[ci] = (tpDists[ci] + tpDists[ci + 1]) / 2
+  }
+  tpBounds[TP_NUM_CHECKPOINTS - 1] = Infinity
+
+  const tpData = new Float32Array(SILHOUETTE_NUM_AZIMUTHS * TP_NUM_CHECKPOINTS)
+  tpData.fill(-Infinity)  // sentinel for empty checkpoints
 
   // Build combined distance steps: ultra-near (20-200m @ 1.005×) + near (200m-31km @ 1.01×) + far (500m-400km @ 1.015×)
   const silDists: number[] = []
@@ -1095,6 +1134,18 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const rawElev = sampleBest(sLat, sLng, zoom)
       const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev  = rawElev - curvDrop
+
+      // ── Terrain profile: record max effElev at nearest checkpoint ──
+      if (dist >= TP_MIN_DIST && dist <= TP_MAX_DIST) {
+        // Binary search for the right checkpoint bin
+        let lo = 0, hi = TP_NUM_CHECKPOINTS - 1
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (dist <= tpBounds[mid]) hi = mid; else lo = mid + 1
+        }
+        const off = ai * TP_NUM_CHECKPOINTS + lo
+        if (effElev > tpData[off]) tpData[off] = effElev
+      }
 
       // Detect local maxima: effElev was rising, now falling
       if (wasRising && effElev < prevEffElev) {
@@ -1320,6 +1371,19 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     floatsPerSample: NEAR_PROFILE_FPS as 2,
   }
 
+  // Count non-empty terrain profile checkpoints
+  let tpFilled = 0
+  for (let i = 0; i < tpData.length; i++) { if (tpData[i] > -Infinity) tpFilled++ }
+  console.log(`[TERRAIN-PROFILE] ${tpFilled}/${tpData.length} checkpoints filled (${(tpData.byteLength / 1024).toFixed(0)} KB)`)
+
+  const terrainProfile: TerrainProfileW = {
+    profileData:    tpData,
+    profileDists:   tpDists,
+    numCheckpoints: TP_NUM_CHECKPOINTS,
+    resolution:     SILHOUETTE_RESOLUTION,
+    numAzimuths:    SILHOUETTE_NUM_AZIMUTHS,
+  }
+
   const skyline: SkylineData = {
     angles,
     distances,
@@ -1328,6 +1392,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     refinedArcs: [],  // Arcs now come via separate 'refine-peaks' → 'refined-arcs' flow
     silhouette,
     nearProfile,
+    terrainProfile,
     resolution,
     numAzimuths,
     computedAt: {
@@ -1348,6 +1413,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     silOffsets.buffer as ArrayBuffer,
     npData.buffer as ArrayBuffer,
     npCounts.buffer as ArrayBuffer,
+    tpData.buffer as ArrayBuffer,
+    tpDists.buffer as ArrayBuffer,
   ]
   for (const band of bands) {
     transferables.push(
