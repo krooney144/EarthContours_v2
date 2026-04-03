@@ -369,9 +369,12 @@ function matchSilhouetteStrands(
   // silhouette lines exist. Same mountain at same AGL = same silhouettes.
   const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
 
-  // Determine visible azimuth range
-  const bearingStart = heading_deg - hfov * 0.5
-  const bearingEnd   = heading_deg + hfov * 0.5
+  // Determine visible azimuth range — pad 10° beyond FOV on each side so
+  // silhouette strands extend naturally past the screen edges instead of
+  // ending abruptly at the viewport boundary.
+  const AZ_PAD_DEG = 10
+  const bearingStart = heading_deg - hfov * 0.5 - AZ_PAD_DEG
+  const bearingEnd   = heading_deg + hfov * 0.5 + AZ_PAD_DEG
 
   const aiStart = Math.floor(((bearingStart % 360 + 360) % 360) * resolution)
   const aiEnd   = Math.ceil(((bearingEnd % 360 + 360) % 360) * resolution)
