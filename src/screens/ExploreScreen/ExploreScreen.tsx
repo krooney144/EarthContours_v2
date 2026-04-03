@@ -453,6 +453,19 @@ const ExploreScreen: React.FC = () => {
         </div>
       </div>
 
+      {/* Compass rose — rotates with camera theta */}
+      <div
+        className={styles.compass}
+        style={{ transform: `rotate(${orbitTheta}rad)` }}
+        aria-label={`Compass: North is ${(((-orbitTheta * 180 / Math.PI) % 360 + 360) % 360).toFixed(0)}° from top`}
+      >
+        <span className={styles.compassN}>N</span>
+        <svg className={styles.compassRing} viewBox="0 0 48 48" aria-hidden="true">
+          <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4" />
+          <line x1="24" y1="4" x2="24" y2="14" stroke="var(--ec-glow)" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      </div>
+
       {/* 3D Canvas area — ALWAYS mounted so Three.js renderer survives reloads */}
       <div
         ref={containerRef}

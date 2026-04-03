@@ -44,6 +44,37 @@
   letter-spacing: 0.08em;
 }
 
+/* ── Compass Rose ──────────────────────────────────────────────────────────── */
+
+.compass {
+  position: absolute;
+  top: 58px;
+  left: var(--space-3, 12px);
+  width: 48px;
+  height: 48px;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+  transition: transform 0.15s ease-out;
+}
+
+.compassRing {
+  width: 48px;
+  height: 48px;
+  color: var(--ec-text-muted);
+}
+
+.compassN {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--ec-glow);
+}
+
 /* Data source badge — shows REAL DATA or SIMULATED in the header */
 .dataSourceBadge {
   font-family: var(--font-display);
