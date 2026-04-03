@@ -404,20 +404,33 @@ const ExploreScreen: React.FC = () => {
       {isLoading && (
         <div className={styles.loadingOverlay}>
           <div className={styles.loadingContent}>
-            <div className={styles.loadingMessage}>
-              {loadingState === 'loading' ? loadingMessage || 'LOADING TERRAIN...' : 'LOADING TERRAIN...'}
-            </div>
-            {loadingState === 'loading' && loadingProgress > 0 && (
-              <div className={styles.loadingBarTrack}>
-                <div
-                  className={styles.loadingBarFill}
-                  style={{ width: `${loadingProgress}%` }}
-                />
-              </div>
+            {loadingState === 'error' ? (
+              <>
+                <div className={styles.loadingMessage}>
+                  {loadingMessage || 'Failed to load elevation data'}
+                </div>
+                <div className={styles.loadingHint}>
+                  Check your network connection and try again
+                </div>
+              </>
+            ) : (
+              <>
+                <div className={styles.loadingMessage}>
+                  {loadingMessage || 'LOADING TERRAIN...'}
+                </div>
+                {loadingProgress > 0 && (
+                  <div className={styles.loadingBarTrack}>
+                    <div
+                      className={styles.loadingBarFill}
+                      style={{ width: `${loadingProgress}%` }}
+                    />
+                  </div>
+                )}
+                <div className={styles.loadingHint}>
+                  Select an area on the Map screen to explore any location in 3D
+                </div>
+              </>
             )}
-            <div className={styles.loadingHint}>
-              Select an area on the Map screen to explore any location in 3D
-            </div>
           </div>
         </div>
       )}

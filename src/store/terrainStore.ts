@@ -7,21 +7,17 @@
  *   1. IndexedDB (cached from prior session — instant)
  *   2. Local /tiles/elevation/ files (offline bundle)
  *   3. AWS Terrarium tiles (live network)
- *   4. Simulated procedural terrain (fallback if all network fails)
  *
- * The four fallback levels mean the app works:
- *   - On fast WiFi (AWS tiles)
- *   - Offline with pre-bundled tiles (local files)
- *   - Offline with prior cached data (IndexedDB)
- *   - With no data at all (simulated — always works)
+ * On failure, retries at progressively lower zoom levels (fewer tiles)
+ * before showing an error. No simulated/fake terrain is ever displayed.
  */
 
 import { create } from 'zustand'
 import type { Peak, River, WaterBody, Glacier, Coastline, TerrainMeshData, LoadingState, Region } from '../core/types'
 import { createLogger } from '../core/logger'
 import { TerrainLoadError } from '../core/errors'
-import { loadRegionElevation, adaptiveZoomForArea } from '../data/elevationLoader'
-import { generateSimulatedTerrain } from '../data/simulatedTerrain'
+import { loadRegionElevation, adaptiveZoomForArea, TERRAIN_ZOOM } from '../data/elevationLoader'
+// generateSimulatedTerrain removed — always use real elevation data
 import { COLORADO_PEAKS, ALASKA_PEAKS } from '../data/simulatedData'
 import { fetchPeaksInBounds } from '../data/peakLoader'
 import { REGIONS } from '../data/regions'
@@ -104,31 +100,35 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       log.info('Peak data loaded', { peaks: peaks.length })
       set({ peaks, loadingProgress: 15 })
 
-      // ── Phase 2: Real elevation data (AWS Terrarium with fallback) ─────────
-      let elevations: Float32Array | null = null
-      let isRealElevation = false
+      // ── Phase 2: Real elevation data with retry at lower zoom ────────────
+      let elevations!: Float32Array
 
-      set({ loadingMessage: 'Fetching elevation tiles...' })
-      log.info('Attempting real elevation load (AWS Terrarium tiles)', { region: region.id })
+      // Try loading at default zoom, then retry at progressively lower zooms
+      // (fewer tiles = more likely to succeed on slow/flaky mobile networks).
+      const zoomLevels = [TERRAIN_ZOOM, Math.max(8, TERRAIN_ZOOM - 1), Math.max(8, TERRAIN_ZOOM - 2)]
+      // Deduplicate in case TERRAIN_ZOOM is already low
+      const uniqueZooms = [...new Set(zoomLevels)]
 
-      try {
-        elevations = await loadRegionElevation(
-          region,
-          TERRAIN_GRID_SIZE,
-          (p) => set({ loadingProgress: 15 + Math.round(p * 65) }),
-        )
-        isRealElevation = true
-        log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', { region: region.id })
-      } catch (elevErr) {
-        log.warn('━━━ TERRAIN SOURCE: SIMULATED (real data unavailable) ━━━', { region: region.id, reason: elevErr })
-        set({ loadingMessage: 'Network unavailable — using simulated terrain...' })
-
-        // Simulated terrain fallback — always works, no network needed
-        const simData = await generateSimulatedTerrain(region, (p) => {
-          set({ loadingProgress: 15 + Math.round(p * 65) })
-        })
-        elevations = simData.elevations
-        isRealElevation = false
+      for (const z of uniqueZooms) {
+        set({ loadingMessage: `Fetching z${z} elevation tiles...` })
+        log.info('Attempting elevation load', { region: region.id, zoom: z })
+        try {
+          elevations = await loadRegionElevation(
+            region,
+            TERRAIN_GRID_SIZE,
+            (p) => set({ loadingProgress: 15 + Math.round(p * 65) }),
+            z,
+          )
+          log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', { region: region.id, zoom: z })
+          break
+        } catch (elevErr) {
+          log.warn(`Elevation load failed at z${z}`, { region: region.id, reason: String(elevErr) })
+          if (z === uniqueZooms[uniqueZooms.length - 1]) {
+            // All zoom levels exhausted — propagate the error
+            throw new TerrainLoadError(region.id, `Elevation data unavailable — check your network connection`)
+          }
+          set({ loadingMessage: `Retrying at lower resolution (z${z - 1})...` })
+        }
       }
 
       // ── Phase 3: Assemble TerrainMeshData ──────────────────────────────────
@@ -144,7 +144,7 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
         min: `${minElev.toFixed(0)}m`,
         max: `${maxElev.toFixed(0)}m`,
         range: `${(maxElev - minElev).toFixed(0)}m`,
-        isReal: isRealElevation,
+        isReal: true,
       })
 
       // Compute real physical dimensions from the region's lat/lng bounds
@@ -178,16 +178,14 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       set({
         meshData,
         contourElevations,
-        isRealElevation,
+        isRealElevation: true,
         terrainZoom: 10,
         loadingState: 'success',
         loadingProgress: 100,
-        loadingMessage: isRealElevation
-          ? `${region.name} — real elevation data`
-          : `${region.name} — simulated terrain`,
+        loadingMessage: `${region.name} — real elevation data`,
       })
 
-      log.info('Region load COMPLETE', { regionId, isRealElevation, peaks: peaks.length })
+      log.info('Region load COMPLETE', { regionId, peaks: peaks.length })
 
     } catch (err) {
       const loadError = new TerrainLoadError(regionId, err)
@@ -247,33 +245,36 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       }
       set({ peaks, loadingProgress: 12 })
 
-      // ── Phase 2: Real elevation data with adaptive zoom ─────────────────
-      let elevations: Float32Array | null = null
-      let isRealElevation = false
+      // ── Phase 2: Real elevation data with retry at lower zoom ────────────
+      let elevations!: Float32Array
 
-      set({ loadingMessage: `Fetching z${tileZoom} elevation tiles...` })
+      // Try loading at the adaptive zoom, then retry at progressively lower zooms
+      // (fewer tiles = more likely to succeed on slow/flaky mobile networks).
+      const MIN_ZOOM = 8
+      const zoomLevels = [tileZoom, Math.max(MIN_ZOOM, tileZoom - 1), Math.max(MIN_ZOOM, tileZoom - 2)]
+      const uniqueZooms = [...new Set(zoomLevels)]
 
-      try {
-        elevations = await loadRegionElevation(
-          customRegion,
-          TERRAIN_GRID_SIZE,
-          (p) => set({ loadingProgress: 12 + Math.round(p * 65) }),
-          tileZoom,
-        )
-        isRealElevation = true
-        log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', {
-          region: customRegion.id, zoom: tileZoom,
-        })
-      } catch (elevErr) {
-        log.warn('━━━ TERRAIN SOURCE: SIMULATED (real data unavailable) ━━━', {
-          region: customRegion.id, reason: elevErr,
-        })
-        set({ loadingMessage: 'Network unavailable — using simulated terrain...' })
-        const simData = await generateSimulatedTerrain(customRegion, (p) => {
-          set({ loadingProgress: 12 + Math.round(p * 65) })
-        })
-        elevations = simData.elevations
-        isRealElevation = false
+      for (const z of uniqueZooms) {
+        set({ loadingMessage: `Fetching z${z} elevation tiles...` })
+        log.info('Attempting elevation load', { region: customRegion.id, zoom: z })
+        try {
+          elevations = await loadRegionElevation(
+            customRegion,
+            TERRAIN_GRID_SIZE,
+            (p) => set({ loadingProgress: 12 + Math.round(p * 65) }),
+            z,
+          )
+          log.info('━━━ TERRAIN SOURCE: REAL (AWS Terrarium DEM tiles) ━━━', {
+            region: customRegion.id, zoom: z,
+          })
+          break
+        } catch (elevErr) {
+          log.warn(`Elevation load failed at z${z}`, { region: customRegion.id, reason: String(elevErr) })
+          if (z === uniqueZooms[uniqueZooms.length - 1]) {
+            throw new TerrainLoadError(customRegion.id, `Elevation data unavailable — check your network connection`)
+          }
+          set({ loadingMessage: `Retrying at lower resolution (z${z - 1})...` })
+        }
       }
 
       // ── Phase 3: Assemble TerrainMeshData ──────────────────────────────────
@@ -314,16 +315,14 @@ export const useTerrainStore = create<TerrainStore>()((set, get) => ({
       set({
         meshData,
         contourElevations,
-        isRealElevation,
+        isRealElevation: true,
         loadingState: 'success',
         loadingProgress: 100,
-        loadingMessage: isRealElevation
-          ? `Custom area — real elevation data (z${tileZoom})`
-          : 'Custom area — simulated terrain',
+        loadingMessage: `Custom area — real elevation data (z${tileZoom})`,
       })
 
       log.info('Custom bounds load COMPLETE', {
-        tileZoom, isRealElevation, peaks: peaks.length,
+        tileZoom, peaks: peaks.length,
         widthKm: worldWidth_km.toFixed(1), heightKm: worldDepth_km.toFixed(1),
       })
 
