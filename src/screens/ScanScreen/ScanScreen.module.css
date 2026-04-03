@@ -211,7 +211,7 @@
   position: absolute;
   left: var(--space-3);
   top: 72px;                           /* below compass */
-  bottom: calc(var(--ec-nav-height) + 60px);  /* above HUD */
+  bottom: 60px;  /* above HUD */
   width: 28px;
   display: flex;
   flex-direction: column;
@@ -372,7 +372,7 @@
   position: absolute;
   right: var(--space-3);
   top: 72px;
-  bottom: calc(var(--ec-nav-height) + 60px);
+  bottom: 60px;
   width: 36px;
   display: flex;
   flex-direction: column;
@@ -435,7 +435,7 @@
 
 .hud {
   position: absolute;
-  bottom: var(--ec-nav-height);
+  bottom: 0;
   left: 0;
   right: 0;
   height: 52px;
@@ -502,7 +502,7 @@
 
 .dragHint {
   position: absolute;
-  bottom: calc(var(--ec-nav-height) + 64px);
+  bottom: 64px;
   left: 50%;
   transform: translateX(-50%);
   font-family: var(--font-body);
@@ -528,7 +528,7 @@
 
 .actionButtons {
   position: absolute;
-  bottom: calc(var(--ec-nav-height, 64px) + 62px);
+  bottom: 62px;
   right: calc(var(--space-3, 12px) + 44px);
   display: flex;
   flex-direction: row;

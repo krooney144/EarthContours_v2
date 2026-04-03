@@ -294,7 +294,7 @@ const ExploreScreen: React.FC = () => {
       }
 
       // Dampen 2-finger pan for touch — raw deltas move terrain too fast
-      const panDamping = e.pointerType === 'touch' ? 0.5 : 1
+      const panDamping = e.pointerType === 'touch' ? 0.35 : 1
       applyOrbitPan((e.clientX - prev.x) * panDamping, (e.clientY - prev.y) * panDamping)
     } else {
       const deltaX = e.clientX - prev.x

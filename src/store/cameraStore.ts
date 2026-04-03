@@ -208,7 +208,7 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
 
     // Pan sensitivity: scales with zoom so the terrain feels consistent at any distance.
     // orbitDefaultRadius is the "full terrain in view" reference distance.
-    const PAN_SENSITIVITY = 0.0025 * (orbitRadius / orbitDefaultRadius)
+    const PAN_SENSITIVITY = 0.0012 * (orbitRadius / orbitDefaultRadius)
     // Vertical drag pans in depth — adjust for viewing angle (more top-down = more depth per pixel)
     const vertSens = PAN_SENSITIVITY / Math.max(0.5, Math.sin(orbitPhi))
 
@@ -235,9 +235,11 @@ export const useCameraStore = create<CameraStore>()((set, get) => ({
    * Used for scroll wheel, pinch gesture.
    */
   applyOrbitZoom: (delta) => {
-    const { orbitRadius } = get()
-    // Multiply radius by a factor — exponential feel regardless of scale
-    const newRadius = clamp(orbitRadius * (1 + delta * 0.15), ORBIT_RADIUS_MIN_M, ORBIT_RADIUS_MAX_M)
+    const { orbitRadius, orbitPhi } = get()
+    // Multiply radius by a factor — exponential feel regardless of scale.
+    // Dampen zoom when looking more horizontally (high phi) to reduce perceived speed.
+    const phiDamping = 0.4 + 0.6 * (1 - orbitPhi / 1.45)
+    const newRadius = clamp(orbitRadius * (1 + delta * 0.15 * phiDamping), ORBIT_RADIUS_MIN_M, ORBIT_RADIUS_MAX_M)
     log.debug('Orbit zoom applied', {
       delta: delta.toFixed(3),
       oldRadius: orbitRadius.toFixed(2),
