@@ -172,14 +172,20 @@ export interface SkylineData {
 
 /** [minDist_m, maxDist_m, maxCandidates] — must stay in sync with types.ts */
 const SILHOUETTE_BINS: readonly [number, number, number][] = [
-  [0,        1_000,   5],
-  [1_000,    5_000,   5],
-  [5_000,   15_000,   5],
-  [15_000,  40_000,   4],
-  [40_000, 100_000,   3],
+  [0,        1_000,  10],   // was 5 — extra capacity for profile samples
+  [1_000,    5_000,  10],   // was 5
+  [5_000,   15_000,  10],   // was 5
+  [15_000,  40_000,   8],   // was 4
+  [40_000, 100_000,   6],   // was 3
   [100_000, 250_000,  2],
   [250_000, 400_000,  2],
 ]
+
+/** Interval (in ray-march steps) between profile samples within 100km.
+ *  Every PROFILE_SAMPLE_INTERVAL steps, the current terrain elevation is
+ *  stored as a candidate regardless of whether it's a local maximum.
+ *  This gives buildSilhouetteLayers dense surface coverage for flank capture. */
+const PROFILE_SAMPLE_INTERVAL = 8
 const SILHOUETTE_FLOATS = 8  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags
 const SILHOUETTE_RESOLUTION = 8  // 0.125° per step = 2880 azimuths (matches hi-res bands)
 const SILHOUETTE_NUM_AZIMUTHS = 360 * SILHOUETTE_RESOLUTION  // 2880
@@ -1110,6 +1116,27 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
         // Reset valley tracking after recording a peak
         valleyEffElev = effElev
         valleyDist    = dist
+      }
+
+      // ── Profile sampling: record terrain surface at regular intervals (<100km)
+      // These are NOT local maxima — they're evenly-spaced terrain elevation
+      // samples that give buildSilhouetteLayers dense surface coverage for
+      // flank/slope capture.  The heap keeps the highest-elevation samples per
+      // bin, so profile samples on mountain flanks naturally win over valleys.
+      if (dist < 100_000 && si % PROFILE_SAMPLE_INTERVAL === 0 && rawElev > 2.0) {
+        const binIdx = distToBin(dist)
+        if (binIdx >= 0) {
+          binHeaps[binIdx].insert({
+            effElev,
+            rawElev,
+            dist,
+            lat:         sLat,
+            lng:         sLng,
+            baseEffElev: valleyEffElev === Infinity ? effElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? dist : valleyDist,
+            flags:       0,
+          })
+        }
       }
 
       // Track rising/falling

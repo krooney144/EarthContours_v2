@@ -452,11 +452,11 @@ export interface PeakRefineItem {
  * Format: [minDist_m, maxDist_m, maxCandidates]
  */
 export const DISTANCE_BINS: readonly [number, number, number][] = [
-  [0,        1_000,   5],   // Bin 0: ultra-near cliffs/hills
-  [1_000,    5_000,   5],   // Bin 1: near valleys/ridges
-  [5_000,   15_000,   5],   // Bin 2: mid-near ranges
-  [15_000,  40_000,   4],   // Bin 3: mid-range peaks
-  [40_000, 100_000,   3],   // Bin 4: far ridges
+  [0,        1_000,  10],   // Bin 0: ultra-near cliffs/hills (extra for profile samples)
+  [1_000,    5_000,  10],   // Bin 1: near valleys/ridges
+  [5_000,   15_000,  10],   // Bin 2: mid-near ranges
+  [15_000,  40_000,   8],   // Bin 3: mid-range peaks
+  [40_000, 100_000,   6],   // Bin 4: far ridges
   [100_000, 250_000,  2],   // Bin 5: distant ranges
   [250_000, 400_000,  2],   // Bin 6: horizon features
 ] as const
