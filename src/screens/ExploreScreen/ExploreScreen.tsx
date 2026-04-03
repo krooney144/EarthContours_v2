@@ -459,11 +459,38 @@ const ExploreScreen: React.FC = () => {
         style={{ transform: `rotate(${orbitTheta}rad)` }}
         aria-label={`Compass: North is ${(((-orbitTheta * 180 / Math.PI) % 360 + 360) % 360).toFixed(0)}° from top`}
       >
-        <span className={styles.compassN}>N</span>
-        <svg className={styles.compassRing} viewBox="0 0 48 48" aria-hidden="true">
-          <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.4" />
-          <line x1="24" y1="4" x2="24" y2="14" stroke="var(--ec-glow)" strokeWidth="2" strokeLinecap="round" />
+        <svg className={styles.compassRing} viewBox="0 0 64 64" aria-hidden="true">
+          {/* Outer ring */}
+          <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3" />
+          {/* Tick marks — 8 directions */}
+          {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => {
+            const rad = (deg * Math.PI) / 180
+            const isCardinal = deg % 90 === 0
+            const r1 = isCardinal ? 22 : 24
+            const r2 = 28
+            return (
+              <line
+                key={deg}
+                x1={32 + r1 * Math.sin(rad)} y1={32 - r1 * Math.cos(rad)}
+                x2={32 + r2 * Math.sin(rad)} y2={32 - r2 * Math.cos(rad)}
+                stroke="currentColor" strokeWidth={isCardinal ? 1.5 : 0.8} opacity={isCardinal ? 0.5 : 0.3}
+              />
+            )
+          })}
+          {/* North pointer — diamond shape */}
+          <polygon points="32,6 34.5,32 32,30 29.5,32" fill="var(--ec-glow)" opacity="0.9" />
+          {/* South pointer */}
+          <polygon points="32,58 34.5,32 32,34 29.5,32" fill="currentColor" opacity="0.25" />
+          {/* East-West crosshair */}
+          <line x1="22" y1="32" x2="28" y2="32" stroke="currentColor" strokeWidth="0.8" opacity="0.3" />
+          <line x1="36" y1="32" x2="42" y2="32" stroke="currentColor" strokeWidth="0.8" opacity="0.3" />
+          {/* Center dot */}
+          <circle cx="32" cy="32" r="2" fill="currentColor" opacity="0.3" />
         </svg>
+        <span className={styles.compassLabel} style={{ top: 0 }}>N</span>
+        <span className={styles.compassLabel} style={{ bottom: 0 }}>S</span>
+        <span className={styles.compassLabel} style={{ left: 0, top: '50%', transform: 'translateY(-50%)' }}>W</span>
+        <span className={styles.compassLabel} style={{ right: 0, top: '50%', transform: 'translateY(-50%)' }}>E</span>
       </div>
 
       {/* 3D Canvas area — ALWAYS mounted so Three.js renderer survives reloads */}

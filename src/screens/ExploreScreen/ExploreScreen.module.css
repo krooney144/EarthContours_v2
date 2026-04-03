@@ -48,31 +48,37 @@
 
 .compass {
   position: absolute;
-  top: 58px;
+  top: 56px;
   left: var(--space-3, 12px);
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   z-index: var(--z-overlay);
   pointer-events: none;
   transition: transform 0.15s ease-out;
 }
 
 .compassRing {
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   color: var(--ec-text-muted);
 }
 
-.compassN {
+.compassLabel {
   position: absolute;
-  top: -2px;
+  font-family: var(--font-display);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--ec-text-muted);
+  line-height: 1;
   left: 50%;
   transform: translateX(-50%);
-  font-family: var(--font-display);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
+}
+
+/* Highlight north label */
+.compassLabel:first-of-type {
   color: var(--ec-glow);
+  font-size: 9px;
 }
 
 /* Data source badge — shows REAL DATA or SIMULATED in the header */
