@@ -453,6 +453,61 @@ const ExploreScreen: React.FC = () => {
         </div>
       </div>
 
+      {/* Compass rose — rotates with camera theta */}
+      <div
+        className={styles.compass}
+        style={{ transform: `rotate(${orbitTheta}rad)` }}
+        aria-label={`Compass: North is ${(((-orbitTheta * 180 / Math.PI) % 360 + 360) % 360).toFixed(0)}° from top`}
+      >
+        <svg className={styles.compassRing} viewBox="0 0 100 100" aria-hidden="true">
+          {/* Outer circle */}
+          <circle cx="50" cy="50" r="39" fill="none" stroke="var(--ec-glow)" strokeWidth="1.2" opacity="0.45" />
+          {/* Inner circle */}
+          <circle cx="50" cy="50" r="14" fill="none" stroke="var(--ec-glow)" strokeWidth="0.8" opacity="0.3" />
+
+          {/* 8-point star — generated programmatically for precise geometry */}
+          {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => {
+            const isCardinal = deg % 90 === 0
+            const tipR = isCardinal ? 38 : 26
+            const halfW = isCardinal ? 3.5 : 3
+            const rad = (deg * Math.PI) / 180
+            const sin = Math.sin(rad)
+            const cos = Math.cos(rad)
+            // Tip of the point
+            const tx = 50 + tipR * sin
+            const ty = 50 - tipR * cos
+            // Base sides — perpendicular to the point's axis at center
+            const cwX = 50 + halfW * cos
+            const cwY = 50 + halfW * sin
+            const ccwX = 50 - halfW * cos
+            const ccwY = 50 - halfW * sin
+            const darkOpacity = isCardinal ? 0.9 : 0.8
+            const blueOpacity = isCardinal ? 0.65 : 0.45
+            return (
+              <g key={deg}>
+                <polygon
+                  points={`${tx},${ty} ${cwX},${cwY} 50,50`}
+                  fill="var(--ec-bg-primary)" opacity={darkOpacity}
+                  stroke="var(--ec-glow)" strokeWidth="0.3" strokeOpacity="0.3"
+                />
+                <polygon
+                  points={`${tx},${ty} ${ccwX},${ccwY} 50,50`}
+                  fill="var(--ec-glow)" opacity={blueOpacity}
+                  stroke="var(--ec-glow)" strokeWidth="0.3" strokeOpacity="0.3"
+                />
+              </g>
+            )
+          })}
+
+          {/* Center dot */}
+          <circle cx="50" cy="50" r="2.5" fill="var(--ec-glow)" opacity="0.5" />
+        </svg>
+        <span className={`${styles.compassLabel} ${styles.compassN}`}>N</span>
+        <span className={styles.compassLabel} style={{ bottom: -2, left: '50%', transform: 'translateX(-50%)' }}>S</span>
+        <span className={styles.compassLabel} style={{ left: -1, top: '50%', transform: 'translateY(-50%)' }}>W</span>
+        <span className={styles.compassLabel} style={{ right: -1, top: '50%', transform: 'translateY(-50%)' }}>E</span>
+      </div>
+
       {/* 3D Canvas area — ALWAYS mounted so Three.js renderer survives reloads */}
       <div
         ref={containerRef}
