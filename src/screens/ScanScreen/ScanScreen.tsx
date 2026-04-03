@@ -338,36 +338,39 @@ function buildSilhouetteLayers(
       const flags       = candidateData[off + 7]
 
       const peakAngle = Math.atan2(effElev - viewerElev, dist)
-      const isOcean   = (flags & 1) !== 0
+      const isOcean       = (flags & 1) !== 0
+      const isProfileOnly = (flags & 2) !== 0  // bit 1 = profile sample, not a local max
 
       // Skip ocean candidates — no terrain fill for ocean
       if (isOcean) continue
 
-      // Record envelope entry BEFORE updating maxAngle — envelope tracks the
-      // running max from all terrain NEARER than this candidate's distance.
-      // After processing this candidate, maxAngle may increase.
+      // Record envelope entry — envelope tracks running max from all terrain
+      // (including profile samples) for contour occlusion.
       envPairs.push(dist, Math.max(maxAngle, peakAngle))
 
       // Visible only if this candidate peeks above all nearer terrain
       if (peakAngle > maxAngle) {
-        // Base angle: either the valley floor angle or the current running max
-        // (whichever is higher — we can't see below the running max)
-        const rawBaseAngle = baseDist > 0
-          ? Math.atan2(baseEffElev - viewerElev, baseDist)
-          : -Math.PI / 2
-        const baseAngle = Math.max(rawBaseAngle, maxAngle)
+        // Profile samples contribute to the envelope and update maxAngle
+        // (they ARE terrain that occludes things behind them) but don't
+        // create visible silhouette layers — they're not ridgeline features.
+        if (!isProfileOnly) {
+          const rawBaseAngle = baseDist > 0
+            ? Math.atan2(baseEffElev - viewerElev, baseDist)
+            : -Math.PI / 2
+          const baseAngle = Math.max(rawBaseAngle, maxAngle)
 
-        layers.push({
-          peakAngle,
-          baseAngle,
-          rawElev,
-          dist,
-          lat,
-          lng,
-          effElev,
-          baseEffElev,
-          isOcean,
-        })
+          layers.push({
+            peakAngle,
+            baseAngle,
+            rawElev,
+            dist,
+            lat,
+            lng,
+            effElev,
+            baseEffElev,
+            isOcean,
+          })
+        }
 
         maxAngle = peakAngle
       }
@@ -1628,21 +1631,20 @@ function renderBandContours(
   silhouetteLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
-  occlusionEnvelope: OcclusionEnvelope | null = null,
+  _occlusionEnvelope: OcclusionEnvelope | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // ── Occlusion setup ─────────────────────────────────────────────────────
-  // Primary: occlusion envelope (dense distance→maxAngle lookup from all
-  // silhouette candidates including profile samples).  Binary-search per
-  // contour point — O(log N) where N ≈ 20–40 entries per azimuth.
-  // Fallback: sparse silhouette layer check (legacy, used if no envelope).
-  const hasEnvelope = !!(occlusionEnvelope && silResolution > 0)
-  const hasSilOcclusion = !hasEnvelope && !!(silhouetteLayers && silResolution > 0)
-  const numSilAz = silResolution > 0 ? silResolution * 360 : 0
-  const OCCLUSION_TOLERANCE_PX = 2  // Cull contours within 2px of ridgeline edge
+  // ── Silhouette-frame containment ────────────────────────────────────────
+  // Instead of asking "is this contour hidden by nearer terrain?", we ask
+  // "is this contour ON a visible terrain surface?"  For each contour point
+  // we find the silhouette layer at that azimuth whose distance is closest,
+  // then check if the contour's elevation angle falls within the layer's
+  // (baseAngle, peakAngle) range.  Only contours on visible surfaces draw.
+  const hasSilLayers = !!(silhouetteLayers && silResolution > 0)
+  const numSilAz = hasSilLayers ? silResolution * 360 : 0
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1695,40 +1697,48 @@ function renderBandContours(
         continue
       }
 
-      // ── Occlusion check ──────────────────────────────────────────────────
-      // Primary: envelope-based — binary search the per-azimuth occlusion
-      // envelope for the max elevation angle from all terrain nearer than
-      // this contour point.  If contour angle <= envelope angle, it's hidden.
-      // Fallback: sparse silhouette layer check (legacy).
-      if (hasEnvelope && occlusionEnvelope) {
-        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silResolution) % numSilAz
-        const maxNearer = envelopeAngleAt(occlusionEnvelope, ai, pt.dist)
-        // Project the envelope's max angle to screen Y for pixel-level comparison
-        const envY = project(pt.bearingDeg, maxNearer, cam).y
-        if (y >= envY - OCCLUSION_TOLERANCE_PX) {
-          // Contour point is at or below the max angle of all nearer terrain
-          if (pathStarted) { ctx.stroke(); pathStarted = false }
-          continue
-        }
-      } else if (hasSilOcclusion && silhouetteLayers) {
+      // ── Silhouette-frame containment check ─────────────────────────────
+      // Only draw contour points that fall ON a visible terrain surface.
+      // Find the silhouette layer at this azimuth whose distance best matches
+      // the contour's distance, then check if the contour's elevation angle
+      // is within the layer's visible range (baseAngle → peakAngle).
+      if (hasSilLayers && silhouetteLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const ai = Math.round(normBearing * silResolution) % numSilAz
         const azLayers = silhouetteLayers[ai]
-        let occluded = false
-        if (azLayers) {
+
+        let contained = false
+        if (azLayers && azLayers.length > 0) {
+          // Find the layer whose distance is closest to this contour point.
+          // Layers are sorted near→far.
+          let bestLayer: SilhouetteLayer | null = null
+          let bestDiff = Infinity
           for (let li = 0; li < azLayers.length; li++) {
             const layer = azLayers[li]
             if (layer.isOcean) continue
-            if (layer.dist >= pt.dist) break
-            const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
-            if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
-              occluded = true
-              break
+            const diff = Math.abs(layer.dist - pt.dist)
+            // Distance tolerance: scale with distance (similar to strand matching)
+            const tol = pt.dist < 10_000
+              ? Math.max(500, pt.dist * 0.20)    // near: 20%, floor 500m
+              : pt.dist < 50_000
+              ? Math.max(1000, pt.dist * 0.25)   // mid: 25%, floor 1km
+              : Math.max(2000, pt.dist * 0.30)   // far: 30%, floor 2km
+            if (diff < bestDiff && diff < tol) {
+              bestLayer = layer
+              bestDiff = diff
             }
           }
+
+          if (bestLayer) {
+            // Contour angle must be within the layer's visible vertical range
+            // Small angular tolerance to avoid culling contours right at edges
+            const angleTol = 0.003  // ~0.17°
+            contained = pt.elevAngleRad >= bestLayer.baseAngle - angleTol &&
+                        pt.elevAngleRad <= bestLayer.peakAngle + angleTol
+          }
         }
-        if (occluded) {
+
+        if (!contained) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue
         }

@@ -1121,8 +1121,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       // ── Profile sampling: record terrain surface at regular intervals (<100km)
       // These are NOT local maxima — they're evenly-spaced terrain elevation
       // samples that give buildSilhouetteLayers dense surface coverage for
-      // flank/slope capture.  The heap keeps the highest-elevation samples per
-      // bin, so profile samples on mountain flanks naturally win over valleys.
+      // flank/slope capture.  Flagged with bit 1 so they contribute to the
+      // occlusion envelope but don't create visible silhouette strands.
       if (dist < 100_000 && si % PROFILE_SAMPLE_INTERVAL === 0 && rawElev > 2.0) {
         const binIdx = distToBin(dist)
         if (binIdx >= 0) {
@@ -1134,7 +1134,7 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             lng:         sLng,
             baseEffElev: valleyEffElev === Infinity ? effElev : valleyEffElev,
             baseDist:    valleyEffElev === Infinity ? dist : valleyDist,
-            flags:       0,
+            flags:       2,  // bit 1 = profile sample (not a local maximum)
           })
         }
       }
