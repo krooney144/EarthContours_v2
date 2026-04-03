@@ -369,10 +369,9 @@ function matchSilhouetteStrands(
   // silhouette lines exist. Same mountain at same AGL = same silhouettes.
   const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
 
-  // Determine visible azimuth range — pad 10° beyond FOV on each side so
-  // silhouette strands extend naturally past the screen edges instead of
-  // ending abruptly at the viewport boundary.
-  const AZ_PAD_DEG = 10
+  // Determine visible azimuth range — pad beyond FOV so strands can start
+  // building before the screen edge (extension step then continues them further).
+  const AZ_PAD_DEG = 5
   const bearingStart = heading_deg - hfov * 0.5 - AZ_PAD_DEG
   const bearingEnd   = heading_deg + hfov * 0.5 + AZ_PAD_DEG
 
@@ -476,6 +475,112 @@ function matchSilhouetteStrands(
         avgDist:  s.distSum / s.segments.length,
       })
     }
+  }
+
+  // ── Extend strands left and right ──────────────────────────────────────────
+  // Walk azimuths beyond each strand's endpoints, probing the layer data for
+  // terrain at approximately the same distance. This continues ridgelines
+  // across azimuth gaps where the forward sweep couldn't find a match.
+  const EXT_MAX_DEG = 15                              // max extension in degrees
+  const EXT_MAX_AZ  = Math.ceil(resolution * EXT_MAX_DEG)
+  const EXT_GAP_LIMIT = Math.ceil(resolution * 3)     // allow 3° gap during extension
+
+  for (const strand of completed) {
+    const segs = strand.segments
+    const refDist = strand.avgDist
+
+    // Looser tolerance for extension — we're reaching into less certain terrain
+    const extTol = refDist < 10_000
+      ? Math.max(400, refDist * 0.18)    // near: 18%, floor 400m
+      : refDist < 50_000
+      ? Math.max(800, refDist * 0.22)    // mid: 22%, floor 800m
+      : Math.max(1500, refDist * 0.25)   // far: 25%, floor 1.5km
+
+    // Extend LEFT (decreasing azimuth from first segment)
+    {
+      const firstAi = segs[0].ai
+      let trackDist = segs[0].layer.dist
+      let gapCount = 0
+      const prepend: Array<{ ai: number; layer: SilhouetteLayer }> = []
+
+      for (let step = 1; step <= EXT_MAX_AZ; step++) {
+        const ai = (firstAi - step + numAzimuths) % numAzimuths
+        const azLayers = layers[ai]
+        if (!azLayers || azLayers.length === 0) {
+          gapCount++
+          if (gapCount > EXT_GAP_LIMIT) break
+          continue
+        }
+
+        // Find closest layer by distance
+        let bestLayer: SilhouetteLayer | null = null
+        let bestDiff = Infinity
+        for (const layer of azLayers) {
+          if (layer.peakAngle < MIN_PEAK_ANGLE) continue
+          const diff = Math.abs(layer.dist - trackDist)
+          if (diff < bestDiff && diff < extTol) {
+            bestDiff = diff
+            bestLayer = layer
+          }
+        }
+
+        if (bestLayer) {
+          prepend.push({ ai, layer: bestLayer })
+          trackDist = bestLayer.dist
+          gapCount = 0
+        } else {
+          gapCount++
+          if (gapCount > EXT_GAP_LIMIT) break
+        }
+      }
+
+      if (prepend.length > 0) {
+        prepend.reverse()
+        segs.unshift(...prepend)
+      }
+    }
+
+    // Extend RIGHT (increasing azimuth from last segment)
+    {
+      const lastAi = segs[segs.length - 1].ai
+      let trackDist = segs[segs.length - 1].layer.dist
+      let gapCount = 0
+
+      for (let step = 1; step <= EXT_MAX_AZ; step++) {
+        const ai = (lastAi + step) % numAzimuths
+        const azLayers = layers[ai]
+        if (!azLayers || azLayers.length === 0) {
+          gapCount++
+          if (gapCount > EXT_GAP_LIMIT) break
+          continue
+        }
+
+        let bestLayer: SilhouetteLayer | null = null
+        let bestDiff = Infinity
+        for (const layer of azLayers) {
+          if (layer.peakAngle < MIN_PEAK_ANGLE) continue
+          const diff = Math.abs(layer.dist - trackDist)
+          if (diff < bestDiff && diff < extTol) {
+            bestDiff = diff
+            bestLayer = layer
+          }
+        }
+
+        if (bestLayer) {
+          segs.push({ ai, layer: bestLayer })
+          trackDist = bestLayer.dist
+          gapCount = 0
+        } else {
+          gapCount++
+          if (gapCount > EXT_GAP_LIMIT) break
+        }
+      }
+    }
+
+    // Recalculate avgDist after extension
+    let distSum = 0
+    for (const seg of segs) distSum += seg.layer.dist
+    strand.avgDist = distSum / segs.length
   }
 
   // Sort far→near for painter's order (far drawn first, near on top)
