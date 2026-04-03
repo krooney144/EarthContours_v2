@@ -295,20 +295,24 @@ function envelopeAngleAt(envelope: OcclusionEnvelope, ai: number, dist: number):
  * running maxAngle.  This gives a dense distance→maxAngle lookup for contour
  * occlusion that doesn't depend on band ridgelines.
  *
- * Returns { layers, envelope } or null.
+ * Returns { drawableLayers, allLayers, envelope } or null.
+ *  - drawableLayers: peaks only → for silhouette strand matching + stroke rendering
+ *  - allLayers: peaks + profile samples → for contour containment (dense coverage)
+ *  - envelope: distance→maxAngle lookup (kept for potential future use)
  *
  * Cost: ~48 candidates × 2880 azimuths = ~138K atan2 calls.  Sub-millisecond.
  */
 function buildSilhouetteLayers(
   skyline: SkylineData,
   viewerElev: number,
-): { layers: SilhouetteLayer[][]; envelope: OcclusionEnvelope } | null {
+): { drawableLayers: SilhouetteLayer[][]; allLayers: SilhouetteLayer[][]; envelope: OcclusionEnvelope } | null {
   const sil = skyline.silhouette
   if (!sil || !sil.candidateData || sil.candidateData.length === 0) return null
 
   const { candidateData, candidateOffsets, numAzimuths } = sil
   const FPC = 8  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
-  const layersResult: SilhouetteLayer[][] = new Array(numAzimuths)
+  const drawableResult: SilhouetteLayer[][] = new Array(numAzimuths)
+  const allResult: SilhouetteLayer[][] = new Array(numAzimuths)
   const envelopeData: Float64Array[] = new Array(numAzimuths)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
@@ -316,14 +320,15 @@ function buildSilhouetteLayers(
     const end   = candidateOffsets[ai + 1]
 
     if (start >= end) {
-      layersResult[ai] = []
+      drawableResult[ai] = []
+      allResult[ai] = []
       envelopeData[ai] = new Float64Array(0)
       continue
     }
 
-    const layers: SilhouetteLayer[] = []
+    const drawableLayers: SilhouetteLayer[] = []
+    const allLayers: SilhouetteLayer[] = []
     let maxAngle = -Math.PI / 2
-    // Temporary buffer for envelope pairs (dist, maxAngle)
     const envPairs: number[] = []
 
     // Candidates are sorted near→far by distance
@@ -339,48 +344,48 @@ function buildSilhouetteLayers(
 
       const peakAngle = Math.atan2(effElev - viewerElev, dist)
       const isOcean       = (flags & 1) !== 0
-      const isProfileOnly = (flags & 2) !== 0  // bit 1 = profile sample, not a local max
+      const isProfileOnly = (flags & 2) !== 0
 
-      // Skip ocean candidates — no terrain fill for ocean
       if (isOcean) continue
 
-      // Record envelope entry — envelope tracks running max from all terrain
-      // (including profile samples) for contour occlusion.
       envPairs.push(dist, Math.max(maxAngle, peakAngle))
 
       // Visible only if this candidate peeks above all nearer terrain
       if (peakAngle > maxAngle) {
-        // Profile samples contribute to the envelope and update maxAngle
-        // (they ARE terrain that occludes things behind them) but don't
-        // create visible silhouette layers — they're not ridgeline features.
-        if (!isProfileOnly) {
-          const rawBaseAngle = baseDist > 0
-            ? Math.atan2(baseEffElev - viewerElev, baseDist)
-            : -Math.PI / 2
-          const baseAngle = Math.max(rawBaseAngle, maxAngle)
+        const rawBaseAngle = baseDist > 0
+          ? Math.atan2(baseEffElev - viewerElev, baseDist)
+          : -Math.PI / 2
+        const baseAngle = Math.max(rawBaseAngle, maxAngle)
 
-          layers.push({
-            peakAngle,
-            baseAngle,
-            rawElev,
-            dist,
-            lat,
-            lng,
-            effElev,
-            baseEffElev,
-            isOcean,
-          })
+        const layer: SilhouetteLayer = {
+          peakAngle,
+          baseAngle,
+          rawElev,
+          dist,
+          lat,
+          lng,
+          effElev,
+          baseEffElev,
+          isOcean,
+        }
+
+        // All visible candidates → allLayers (for contour containment)
+        allLayers.push(layer)
+        // Only true peaks → drawableLayers (for silhouette strokes)
+        if (!isProfileOnly) {
+          drawableLayers.push(layer)
         }
 
         maxAngle = peakAngle
       }
     }
 
-    layersResult[ai] = layers
+    drawableResult[ai] = drawableLayers
+    allResult[ai] = allLayers
     envelopeData[ai] = Float64Array.from(envPairs)
   }
 
-  return { layers: layersResult, envelope: { data: envelopeData } }
+  return { drawableLayers: drawableResult, allLayers: allResult, envelope: { data: envelopeData } }
 }
 
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
@@ -1628,22 +1633,21 @@ function renderBandContours(
   cam: CameraParams,
   globalElevMin: number,
   globalElevMax: number,
-  silhouetteLayers: SilhouetteLayer[][] | null,
+  contourOcclusionLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
-  _occlusionEnvelope: OcclusionEnvelope | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
   // ── Silhouette-frame containment ────────────────────────────────────────
-  // Instead of asking "is this contour hidden by nearer terrain?", we ask
-  // "is this contour ON a visible terrain surface?"  For each contour point
-  // we find the silhouette layer at that azimuth whose distance is closest,
-  // then check if the contour's elevation angle falls within the layer's
-  // (baseAngle, peakAngle) range.  Only contours on visible surfaces draw.
-  const hasSilLayers = !!(silhouetteLayers && silResolution > 0)
+  // Only draw contour points that fall ON a visible terrain surface.
+  // Uses allLayers (peaks + profile samples) for dense surface coverage.
+  // For each contour point, find the silhouette layer at that azimuth whose
+  // distance is closest, then check if the contour's elevation angle falls
+  // within the layer's (baseAngle, peakAngle) range.
+  const hasSilLayers = !!(contourOcclusionLayers && silResolution > 0)
   const numSilAz = hasSilLayers ? silResolution * 360 : 0
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
@@ -1702,10 +1706,10 @@ function renderBandContours(
       // Find the silhouette layer at this azimuth whose distance best matches
       // the contour's distance, then check if the contour's elevation angle
       // is within the layer's visible range (baseAngle → peakAngle).
-      if (hasSilLayers && silhouetteLayers) {
+      if (hasSilLayers && contourOcclusionLayers) {
         const normBearing = ((pt.bearingDeg % 360) + 360) % 360
         const ai = Math.round(normBearing * silResolution) % numSilAz
-        const azLayers = silhouetteLayers[ai]
+        const azLayers = contourOcclusionLayers[ai]
 
         let contained = false
         if (azLayers && azLayers.length > 0) {
@@ -1803,6 +1807,7 @@ function renderTerrain(
   silElevMin: number = 0,
   silElevMax: number = 0,
   occlusionEnvelope: OcclusionEnvelope | null = null,
+  contourOcclusionLayers: SilhouetteLayer[][] | null = null,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1887,7 +1892,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode, occlusionEnvelope)
+          contourOcclusionLayers, silResolution, darkMode)
       }
     }
 
@@ -2323,6 +2328,7 @@ function drawScanCanvas(
   contourStrands: PrebuiltContourStrand[],
   projectedArcs: ProjectedRefinedArc[] | null,
   silhouetteLayers: SilhouetteLayer[][] | null,
+  contourOcclusionLayers: SilhouetteLayer[][] | null,
   occlusionEnvelope: OcclusionEnvelope | null,
   projectedNearProfile: ProjectedNearProfile | null,
   showBandLines: boolean = true,
@@ -2416,7 +2422,8 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax, occlusionEnvelope)
+      silhouetteLayers, silRes, silElevMin, silElevMax, occlusionEnvelope,
+      contourOcclusionLayers)
   }
 
   // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
@@ -2674,21 +2681,26 @@ const ScanScreen: React.FC = () => {
 
   // ── Build silhouette layers + occlusion envelope (AGL-dependent) ──────────
   // Front-to-back sweep over AGL-independent candidates.  ~138K atan2 calls, sub-ms.
-  const silhouetteResult = useMemo<{ layers: SilhouetteLayer[][]; envelope: OcclusionEnvelope } | null>(() => {
+  // Produces two layer sets:
+  //   drawableLayers = peaks only → silhouette strokes
+  //   allLayers = peaks + profile samples → contour containment (dense coverage)
+  const silhouetteResult = useMemo<{ drawableLayers: SilhouetteLayer[][]; allLayers: SilhouetteLayer[][]; envelope: OcclusionEnvelope } | null>(() => {
     if (!skylineData || !skylineData.silhouette) return null
     const viewerElev = skylineData.computedAt.groundElev + height_m
     const t0 = performance.now()
     const result = buildSilhouetteLayers(skylineData, viewerElev)
     const dt = performance.now() - t0
     if (result) {
-      let totalLayers = 0, maxLayers = 0
-      for (const azLayers of result.layers) {
-        totalLayers += azLayers.length
-        if (azLayers.length > maxLayers) maxLayers = azLayers.length
+      let totalDrawable = 0, totalAll = 0, maxLayers = 0
+      for (let ai = 0; ai < result.drawableLayers.length; ai++) {
+        totalDrawable += result.drawableLayers[ai].length
+        totalAll += result.allLayers[ai].length
+        if (result.allLayers[ai].length > maxLayers) maxLayers = result.allLayers[ai].length
       }
       log.info('Silhouette layers built', {
-        totalLayers,
-        avgPerAz: (totalLayers / result.layers.length).toFixed(1),
+        drawableLayers: totalDrawable,
+        allLayers: totalAll,
+        avgAllPerAz: (totalAll / result.allLayers.length).toFixed(1),
         maxPerAz: maxLayers,
         viewerElev: viewerElev.toFixed(0),
         ms: dt.toFixed(2),
@@ -2696,7 +2708,10 @@ const ScanScreen: React.FC = () => {
     }
     return result
   }, [skylineData, height_m])
-  const silhouetteLayers = silhouetteResult?.layers ?? null
+  // drawableLayers: peaks only → silhouette strands/strokes + debug panel
+  const silhouetteLayers = silhouetteResult?.drawableLayers ?? null
+  // allLayers: peaks + profiles → contour containment (dense surface coverage)
+  const contourOcclusionLayers = silhouetteResult?.allLayers ?? null
   const occlusionEnvelope = silhouetteResult?.envelope ?? null
 
   // ── Re-project near-field occlusion profile (AGL < 60m only) ──────────────
@@ -3039,6 +3054,7 @@ const ScanScreen: React.FC = () => {
       fov, skylineData, projectedBands,
       contourStrands, projectedArcs,
       silhouetteLayers,
+      contourOcclusionLayers,
       occlusionEnvelope,
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
@@ -3055,7 +3071,7 @@ const ScanScreen: React.FC = () => {
     activeLat, activeLng,
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
-    occlusionEnvelope, projectedNearProfile,
+    contourOcclusionLayers, occlusionEnvelope, projectedNearProfile,
     showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
   ])
 
