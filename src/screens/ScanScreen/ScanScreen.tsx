@@ -360,6 +360,8 @@ function matchSilhouetteStrands(
   numAzimuths: number,
   resolution: number,
   cam: CameraParams,
+  skyline?: SkylineData,
+  viewerElev?: number,
 ): SilhouetteStrand[] {
   const { heading_deg, hfov, W } = cam
 
@@ -479,11 +481,49 @@ function matchSilhouetteStrands(
 
   // ── Extend strands left and right ──────────────────────────────────────────
   // Walk azimuths beyond each strand's endpoints, probing the layer data for
-  // terrain at approximately the same distance. This continues ridgelines
-  // across azimuth gaps where the forward sweep couldn't find a match.
+  // terrain at approximately the same distance. Falls back to band ridgeline
+  // data when no silhouette candidate exists at an azimuth — this captures
+  // ridge shoulders where the terrain is still prominent but wasn't a local
+  // maximum in the radial profile.
   const EXT_MAX_DEG = 15                              // max extension in degrees
   const EXT_MAX_AZ  = Math.ceil(resolution * EXT_MAX_DEG)
   const EXT_GAP_LIMIT = Math.ceil(resolution * 3)     // allow 3° gap during extension
+
+  // Helper: synthesize a SilhouetteLayer from band data at a bearing & distance
+  const synthFromBand = (bearingDeg: number, targetDist: number, tol: number): SilhouetteLayer | null => {
+    if (!skyline || viewerElev == null) return null
+    // Find the band that covers this distance
+    for (let bi = 0; bi < skyline.bands.length && bi < DEPTH_BANDS.length; bi++) {
+      const cfg = DEPTH_BANDS[bi]
+      if (targetDist < cfg.minDist || targetDist > cfg.maxDist) continue
+      const bandDist = bandDistAt(skyline, bi, bearingDeg)
+      if (bandDist <= 0) continue
+      if (Math.abs(bandDist - targetDist) > tol) continue
+      const bandElev = bandElevAt(skyline, bi, bearingDeg)
+      if (bandElev === -Infinity || bandElev <= 0) continue
+      const curvDrop = (bandDist * bandDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+      const effElev = bandElev - curvDrop
+      const peakAngle = Math.atan2(effElev - viewerElev, bandDist)
+      if (peakAngle < MIN_PEAK_ANGLE) continue
+      // Get GPS from band
+      const band = skyline.bands[bi]
+      const normB = ((bearingDeg % 360) + 360) % 360
+      const fracIdx = normB * band.resolution
+      const idx = Math.round(fracIdx) % band.numAzimuths
+      return {
+        peakAngle,
+        baseAngle: -Math.PI / 2,
+        rawElev: bandElev,
+        dist: bandDist,
+        lat: band.ridgeLats[idx],
+        lng: band.ridgeLngs[idx],
+        effElev,
+        baseEffElev: effElev,
+        isOcean: false,
+      }
+    }
+    return null
+  }
 
   for (const strand of completed) {
     const segs = strand.segments
@@ -529,8 +569,17 @@ function matchSilhouetteStrands(
           trackDist = bestLayer.dist
           gapCount = 0
         } else {
-          gapCount++
-          if (gapCount > EXT_GAP_LIMIT) break
+          // Fallback: synthesize from band ridgeline data
+          const bearing = ai / resolution
+          const synth = synthFromBand(bearing, trackDist, extTol)
+          if (synth) {
+            prepend.push({ ai, layer: synth })
+            trackDist = synth.dist
+            gapCount = 0
+          } else {
+            gapCount++
+            if (gapCount > EXT_GAP_LIMIT) break
+          }
         }
       }
 
@@ -550,8 +599,17 @@ function matchSilhouetteStrands(
         const ai = (lastAi + step) % numAzimuths
         const azLayers = layers[ai]
         if (!azLayers || azLayers.length === 0) {
-          gapCount++
-          if (gapCount > EXT_GAP_LIMIT) break
+          // Try band fallback even when no silhouette layers
+          const bearing = ai / resolution
+          const synth = synthFromBand(bearing, trackDist, extTol)
+          if (synth) {
+            segs.push({ ai, layer: synth })
+            trackDist = synth.dist
+            gapCount = 0
+          } else {
+            gapCount++
+            if (gapCount > EXT_GAP_LIMIT) break
+          }
           continue
         }
 
@@ -571,8 +629,17 @@ function matchSilhouetteStrands(
           trackDist = bestLayer.dist
           gapCount = 0
         } else {
-          gapCount++
-          if (gapCount > EXT_GAP_LIMIT) break
+          // Fallback: synthesize from band ridgeline data
+          const bearing = ai / resolution
+          const synth = synthFromBand(bearing, trackDist, extTol)
+          if (synth) {
+            segs.push({ ai, layer: synth })
+            trackDist = synth.dist
+            gapCount = 0
+          } else {
+            gapCount++
+            if (gapCount > EXT_GAP_LIMIT) break
+          }
         }
       }
     }
@@ -717,7 +784,6 @@ function renderSilhouetteGlow(
   const hasElevRange = elevRange > 1
   const maxDist = 400_000
   const MIN_PEAK_ANGLE = -0.35
-  const MAX_ANGLE_JUMP = 0.005
   const MIN_STRAND_SEGS = 8
   const numAzimuths = silResolution * 360
   const MAX_AZ_GAP = 4
@@ -778,10 +844,11 @@ function renderSilhouetteGlow(
 
     // Glow passes: drawn wide→narrow so narrower overlays wider.
     // Y offset: negative = sky (up), positive = terrain (down).
+    // Reduced widthMul for subtler glow that doesn't overwhelm the crisp strokes.
     const passes = [
-      { widthMul: 6,   alphaMul: 0.10, yOff: +baseOffset },        // terrain bleed (wide, dim, down)
-      { widthMul: 3,   alphaMul: 0.22, yOff: -baseOffset * 0.7 },  // sky halo (medium, brighter, up)
-      { widthMul: 1.5, alphaMul: 0.45, yOff: -baseOffset * 0.3 },  // sky core (tight, brightest, slight up)
+      { widthMul: 4,   alphaMul: 0.08, yOff: +baseOffset },        // terrain bleed (wide, dim, down)
+      { widthMul: 2,   alphaMul: 0.18, yOff: -baseOffset * 0.7 },  // sky halo (medium, brighter, up)
+      { widthMul: 1.2, alphaMul: 0.35, yOff: -baseOffset * 0.3 },  // sky core (tight, brightest, slight up)
     ]
 
     // [GLOW-DIAG] Log first 3 strands (far) + last 2 (near) — shows full distance range
@@ -812,6 +879,15 @@ function renderSilhouetteGlow(
     }
     if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
 
+    // Distance-proportional angle jump threshold: near terrain flanks drop
+    // faster in elevation per azimuth step than far terrain, so they need
+    // more slack. Near (<10km): 0.025 rad, far (>100km): 0.008 rad.
+    const maxAngleJumpGlow = strand.avgDist < 10_000
+      ? 0.025
+      : strand.avgDist < 50_000
+      ? 0.015
+      : 0.008
+
     for (const run of runs) {
       // Project points — angle continuity check keeps the path smooth
       const projected: Array<{ x: number; y: number }> = []
@@ -824,7 +900,7 @@ function renderSilhouetteGlow(
           prevPeakAngle = -999
           continue
         }
-        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
+        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > maxAngleJumpGlow) {
           projected.push({ x: 0, y: -9999 })
           prevPeakAngle = layer.peakAngle
           continue
@@ -943,10 +1019,18 @@ function renderSilhouetteStrokes(
     }
     if (segs.length - runStart >= 3) runs.push({ start: runStart, end: segs.length })
 
+    // Distance-proportional angle jump threshold: near terrain flanks drop
+    // faster in elevation per azimuth step than far terrain.
+    // Near (<10km): 0.025 rad, far (>100km): 0.008 rad.
+    const maxAngleJump = strand.avgDist < 10_000
+      ? 0.025
+      : strand.avgDist < 50_000
+      ? 0.015
+      : 0.008
+
     for (const run of runs) {
       // Pre-project all points in this run, filtering out low-angle segments
       // and marking angle discontinuities as path breaks
-      const MAX_ANGLE_JUMP = 0.005  // rad — max natural peakAngle change per 0.125° azimuth step
       interface SilPt { x: number; y: number; rawElev: number; curvature: number }
       const projected: SilPt[] = []
       let prevPeakAngle = -999  // sentinel for first point
@@ -962,9 +1046,9 @@ function renderSilhouetteStrokes(
 
         // Angle continuity check — break path if peakAngle jumps too much
         // between adjacent strand segments. This catches cross-ridge mismatches
-        // that slipped through distance-based matching. AGL-stable because
-        // peakAngle already encodes viewer elevation.
-        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > MAX_ANGLE_JUMP) {
+        // that slipped through distance-based matching. Distance-proportional
+        // so near terrain flanks (which drop faster) don't break the path.
+        if (prevPeakAngle > -999 && Math.abs(layer.peakAngle - prevPeakAngle) > maxAngleJump) {
           projected.push({ x: 0, y: -9999, rawElev: 0, curvature: 0 })
           prevPeakAngle = layer.peakAngle  // reset for next segment
           continue
@@ -2469,6 +2553,8 @@ function drawScanCanvas(
       skylineData.silhouette.numAzimuths,
       skylineData.silhouette.resolution,
       cam,
+      skylineData,
+      eyeElev,
     )
     renderSilhouetteGlow(ctx, strands, cam, silElevMin, silElevMax, silRes, darkMode)
     renderSilhouetteStrokes(ctx, silhouetteLayers, strands, cam, silElevMin, silElevMax,

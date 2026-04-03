@@ -1148,6 +1148,48 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       }
     }
 
+    // ── Ridge shoulder candidates ──────────────────────────────────────────
+    // The peak-only detection misses mountain flanks/shoulders that are at
+    // similar distance but lower elevation. These are visible terrain that
+    // should continue the silhouette line. For each bin, also track the
+    // highest terrain sample seen (regardless of local-max status) and insert
+    // it if it wasn't already captured as a peak candidate.
+    // This ensures the most prominent terrain at each distance range always
+    // has at least one candidate, even on monotonic slopes (ridge shoulders).
+    for (let bi = 0; bi < binHeaps.length; bi++) {
+      const heap = binHeaps[bi]
+      const [binMin, binMax] = SILHOUETTE_BINS[bi]
+      // Scan the distance steps in this bin to find the highest effElev sample
+      let bestElev = -Infinity, bestRaw = 0, bestDist = 0
+      let bestLat = viewerLat, bestLng = viewerLng
+      for (let si2 = 0; si2 < silDistsDeduped.length; si2++) {
+        const d = silDistsDeduped[si2]
+        if (d < binMin || d >= binMax) continue
+        const sLat2 = viewerLat + (cosA * d) / 111_132
+        const sLng2 = viewerLng + (sinA * d) / (111_320 * cosViewerLat)
+        const z2 = distToZoom(d)
+        const rE = sampleBest(sLat2, sLng2, z2)
+        const cD = (d * d) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const eE = rE - cD
+        if (eE > bestElev) {
+          bestElev = eE; bestRaw = rE; bestDist = d
+          bestLat = sLat2; bestLng = sLng2
+        }
+      }
+      // Insert if this highest sample isn't already a candidate (check by distance proximity)
+      if (bestElev > -Infinity && bestRaw >= 2.0) {
+        const alreadyCaptured = heap.items.some(c => Math.abs(c.dist - bestDist) < bestDist * 0.05)
+        if (!alreadyCaptured) {
+          heap.insert({
+            effElev: bestElev, rawElev: bestRaw, dist: bestDist,
+            lat: bestLat, lng: bestLng,
+            baseEffElev: bestElev, baseDist: bestDist,
+            flags: 0,
+          })
+        }
+      }
+    }
+
     // Flatten all bins into a single sorted-by-distance candidate list
     const allCandidates: SilCandidate[] = []
     for (const heap of binHeaps) {
