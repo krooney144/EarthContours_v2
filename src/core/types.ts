@@ -243,6 +243,7 @@ export interface AppSettings {
 
   // Debug & Developer
   showDebugPanel: boolean
+  debugSilhouette: boolean
 
   // Data & Downloads
   downloadOnWifiOnly: boolean
@@ -493,6 +494,13 @@ export interface SilhouetteData {
   resolution: number
   /** Number of azimuth samples = 360 × resolution. */
   numAzimuths: number
+  /** Continuous terrain profile — raw effElev at log-spaced distance checkpoints.
+   *  Used for contour occlusion with distance buffer. */
+  profileData?: Float32Array
+  /** Distance of each checkpoint in metres (length = profileN) */
+  profileDists?: Float32Array
+  /** Number of distance checkpoints */
+  profileN?: number
 }
 
 /** A single visible silhouette layer at one azimuth, computed at render time.
@@ -516,6 +524,10 @@ export interface SilhouetteLayer {
   baseEffElev: number
   /** Is this candidate over ocean? */
   isOcean: boolean
+  /** Elevation angle of terrain at azimuth-1, same distance (lateral slope left) */
+  leftPeakAngle?: number
+  /** Elevation angle of terrain at azimuth+1, same distance (lateral slope right) */
+  rightPeakAngle?: number
 }
 
 /** Per-azimuth array of visible silhouette layers.

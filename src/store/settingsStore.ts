@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 
   // Debug & Developer
   showDebugPanel: false,
+  debugSilhouette: false,
 
   // Performance & Battery
   batteryMode: 'auto',
@@ -97,6 +98,7 @@ interface SettingsStore extends AppSettings {
   setLabelSize: (size: LabelSize) => void
   toggleReduceMotion: () => void
   toggleDebugPanel: () => void
+  toggleDebugSilhouette: () => void
   setLocationAccuracy: (accuracy: GPSAccuracy) => void
   toggleAutoDetectRegion: () => void
   setBatteryMode: (mode: BatteryMode) => void
@@ -227,6 +229,12 @@ export const useSettingsStore = create<SettingsStore>()(
         const next = !get().showDebugPanel
         log.info('Debug panel toggled', { now: next })
         set({ showDebugPanel: next })
+      },
+
+      toggleDebugSilhouette: () => {
+        const next = !get().debugSilhouette
+        log.info('Debug silhouette toggled', { now: next })
+        set({ debugSilhouette: next })
       },
 
       setLocationAccuracy: (locationAccuracy) => {
@@ -367,6 +375,7 @@ export const useSettingsStore = create<SettingsStore>()(
         labelSize: state.labelSize,
         reduceMotion: state.reduceMotion,
         showDebugPanel: state.showDebugPanel,
+        debugSilhouette: state.debugSilhouette,
         locationAccuracy: state.locationAccuracy,
         autoDetectRegion: state.autoDetectRegion,
         batteryMode: state.batteryMode,

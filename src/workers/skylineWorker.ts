@@ -135,6 +135,10 @@ interface SilhouetteDataW {
   candidateOffsets: Uint32Array
   resolution:       number
   numAzimuths:      number
+  // Continuous terrain profile for contour occlusion
+  profileData?:     Float32Array
+  profileDists?:    Float32Array
+  profileN?:        number
 }
 
 /** Near-field profile data produced by the worker (mirrors types.ts NearFieldProfile). */
@@ -180,7 +184,7 @@ const SILHOUETTE_BINS: readonly [number, number, number][] = [
   [100_000, 250_000,  2],
   [250_000, 400_000,  2],
 ]
-const SILHOUETTE_FLOATS = 8  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags
+const SILHOUETTE_FLOATS = 10  // per candidate: effElev, rawElev, dist, lat, lng, baseEffElev, baseDist, flags, leftEffElev, rightEffElev
 const SILHOUETTE_RESOLUTION = 8  // 0.125° per step = 2880 azimuths (matches hi-res bands)
 const SILHOUETTE_NUM_AZIMUTHS = 360 * SILHOUETTE_RESOLUTION  // 2880
 
@@ -197,7 +201,7 @@ function distToBin(distM: number): number {
 
 // ─── Silhouette Candidate Heap ───────────────────────────────────────────────
 
-/** A silhouette candidate: a local elevation maximum along an azimuth ray. */
+/** A silhouette candidate: a local elevation maximum or inflection along an azimuth ray. */
 interface SilCandidate {
   effElev:     number  // rawElev - curvDrop (AGL-independent)
   rawElev:     number  // original DEM elevation
@@ -207,6 +211,8 @@ interface SilCandidate {
   baseEffElev: number  // valley floor before this peak
   baseDist:    number  // distance to valley floor
   flags:       number  // bit 0 = isOcean
+  leftEffElev: number  // terrain effElev at (azimuth-1, same dist) — lateral slope
+  rightEffElev: number // terrain effElev at (azimuth+1, same dist) — lateral slope
 }
 
 /** Per-bin min-heap keyed on effElev, capped at maxSize. */
@@ -1063,6 +1069,39 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
   // Per-azimuth silhouette candidate heaps
   const silCandidatesTemp: SilCandidate[][] = new Array(SILHOUETTE_NUM_AZIMUTHS)
 
+  // ── Continuous Terrain Profile (for contour occlusion) ──────────────────
+  // 80 log-spaced distance checkpoints from 100m to 400km.
+  // At each checkpoint, store the raw effElev sampled during the ray march.
+  // Main thread builds a running-max angle envelope with distance buffer.
+  const PROFILE_N = 80
+  const PROFILE_LOG_MIN = Math.log(100)
+  const PROFILE_LOG_MAX = Math.log(400_000)
+  const PROFILE_LOG_STEP = (PROFILE_LOG_MAX - PROFILE_LOG_MIN) / (PROFILE_N - 1)
+  const profileDists = new Float32Array(PROFILE_N)
+  for (let i = 0; i < PROFILE_N; i++) {
+    profileDists[i] = Math.exp(PROFILE_LOG_MIN + i * PROFILE_LOG_STEP)
+  }
+  // Per-azimuth effElev at each checkpoint — initialized to -Infinity (no data)
+  const profileData = new Float32Array(SILHOUETTE_NUM_AZIMUTHS * PROFILE_N)
+  profileData.fill(-Infinity)
+
+  // Helper: sample lateral terrain effElev at ±1 azimuth from a candidate
+  function sampleLateral(ai: number, dist: number, curvDrop: number): [number, number] {
+    const azStep = 1.0 / SILHOUETTE_RESOLUTION  // degrees per azimuth step
+    const leftAzDeg = (ai - 1 + SILHOUETTE_NUM_AZIMUTHS) % SILHOUETTE_NUM_AZIMUTHS / SILHOUETTE_RESOLUTION
+    const rightAzDeg = (ai + 1) % SILHOUETTE_NUM_AZIMUTHS / SILHOUETTE_RESOLUTION
+    const leftRad = leftAzDeg * DEG_TO_RAD
+    const rightRad = rightAzDeg * DEG_TO_RAD
+    const zoom = distToZoom(dist)
+    const leftLat = viewerLat + (Math.cos(leftRad) * dist) / 111_132
+    const leftLng = viewerLng + (Math.sin(leftRad) * dist) / (111_320 * cosViewerLat)
+    const rightLat = viewerLat + (Math.cos(rightRad) * dist) / 111_132
+    const rightLng = viewerLng + (Math.sin(rightRad) * dist) / (111_320 * cosViewerLat)
+    const leftEffElev = sampleBest(leftLat, leftLng, zoom) - curvDrop
+    const rightEffElev = sampleBest(rightLat, rightLng, zoom) - curvDrop
+    return [leftEffElev, rightEffElev]
+  }
+
   for (let ai = 0; ai < SILHOUETTE_NUM_AZIMUTHS; ai++) {
     const azDeg = ai / SILHOUETTE_RESOLUTION
     const azRad = azDeg * DEG_TO_RAD
@@ -1072,6 +1111,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     // Per-bin heaps
     const binHeaps: CandidateHeap[] = SILHOUETTE_BINS.map(b => new CandidateHeap(b[2]))
 
+    // Separate inflection candidate storage (not in heaps — avoids eviction by taller peaks)
+    // Max 2 inflection candidates per bin = 14 additional max per azimuth
+    const inflectionHeaps: CandidateHeap[] = SILHOUETTE_BINS.map(b => new CandidateHeap(2))
+
     // State for local maxima detection (near → far)
     let prevEffElev = -Infinity
     let wasRising = false
@@ -1079,6 +1122,12 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     let prevRawElev = 0, prevDist = 0, prevLat = viewerLat, prevLng = viewerLng
     // Valley floor tracking (lowest point between viewer/previous peak and current position)
     let valleyEffElev = Infinity, valleyDist = 0
+
+    // State for inflection detection (slope deceleration)
+    let prevGain = 0
+    let inflectionArmed = false  // true when slope is steep enough to detect deceleration
+    const MIN_GAIN_FOR_INFLECTION = 10  // metres — previous gain must exceed this
+    const INFLECTION_RATIO = 0.20  // current gain < 20% of previous → inflection
 
     for (let si = 0; si < silDistsDeduped.length; si++) {
       const dist = silDistsDeduped[si]
@@ -1090,12 +1139,28 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const curvDrop = (dist * dist) / (2 * EARTH_R) * (1 - REFRACTION_K)
       const effElev  = rawElev - curvDrop
 
+      // ── Record terrain profile at nearest checkpoint ──────────────────
+      if (dist >= 100) {
+        const logDist = Math.log(dist)
+        let pIdx = Math.round((logDist - PROFILE_LOG_MIN) / PROFILE_LOG_STEP)
+        if (pIdx >= 0 && pIdx < PROFILE_N) {
+          const pBase = ai * PROFILE_N + pIdx
+          // Keep the highest effElev at this checkpoint (in case multiple
+          // ray march steps map to the same checkpoint)
+          if (effElev > profileData[pBase]) {
+            profileData[pBase] = effElev
+          }
+        }
+      }
+
       // Detect local maxima: effElev was rising, now falling
       if (wasRising && effElev < prevEffElev) {
         // Previous step was a local maximum — insert into bin heap
         const binIdx = distToBin(prevDist)
         if (binIdx >= 0) {
           const isOcean = prevRawElev < 2.0  // sampleBest clamps ocean to 0; coast interpolation can yield 0-2m
+          const prevCurvDrop = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEE, rightEE] = sampleLateral(ai, prevDist, prevCurvDrop)
           binHeaps[binIdx].insert({
             effElev:     prevEffElev,
             rawElev:     prevRawElev,
@@ -1105,11 +1170,77 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
             baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
             baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
             flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEE,
+            rightEffElev: rightEE,
           })
         }
         // Reset valley tracking after recording a peak
         valleyEffElev = effElev
         valleyDist    = dist
+      }
+
+      // ── Inflection detection: steep slope → nearly flat ──────────────
+      // Supplements local-max detection. When a steep climb suddenly levels
+      // off, the "shoulder" point acts as an occlusion candidate — terrain
+      // behind the shoulder at lower angles is hidden from the viewer.
+      // Only fires once per deceleration event (inflectionArmed resets when
+      // slope steepens again).
+      const gain = effElev - prevEffElev
+      if (inflectionArmed && gain >= 0 && gain < prevGain * INFLECTION_RATIO && dist > 100) {
+        // Slope decelerated significantly — record the previous step as shoulder
+        const binIdx = distToBin(prevDist)
+        if (binIdx >= 0) {
+          const isOcean = prevRawElev < 2.0
+          const prevCurvDrop2 = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEE2, rightEE2] = sampleLateral(ai, prevDist, prevCurvDrop2)
+          inflectionHeaps[binIdx].insert({
+            effElev:     prevEffElev,
+            rawElev:     prevRawElev,
+            dist:        prevDist,
+            lat:         prevLat,
+            lng:         prevLng,
+            baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
+            flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEE2,
+            rightEffElev: rightEE2,
+          })
+        }
+        inflectionArmed = false  // Don't trigger again until slope steepens
+      }
+      // Arm inflection detection when gain is large enough
+      if (gain > MIN_GAIN_FOR_INFLECTION) {
+        inflectionArmed = true
+      }
+      prevGain = Math.max(0, gain)
+
+      // ── Shoulder detection: flat → dropping ────────────────────────────
+      // The visible edge of a hillside — where terrain goes from flat/gentle
+      // to dropping away. This transition never fires the local-max detector
+      // because wasRising is false on flat terrain. The shoulder IS the
+      // hillside edge as seen from the viewer — the point where contour
+      // lines on the far side should become hidden.
+      const SHOULDER_FLAT_THRESH = 5    // previous gain must be small (near-flat)
+      const SHOULDER_DROP_THRESH = -10  // current gain must be significantly negative
+      if (Math.abs(prevGain) < SHOULDER_FLAT_THRESH && gain < SHOULDER_DROP_THRESH && dist > 100) {
+        const binIdx = distToBin(prevDist)
+        if (binIdx >= 0) {
+          const isOcean = prevRawElev < 2.0
+          const prevCurvDropS = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+          const [leftEES, rightEES] = sampleLateral(ai, prevDist, prevCurvDropS)
+          inflectionHeaps[binIdx].insert({
+            effElev:     prevEffElev,
+            rawElev:     prevRawElev,
+            dist:        prevDist,
+            lat:         prevLat,
+            lng:         prevLng,
+            baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
+            baseDist:    valleyEffElev === Infinity ? prevDist : valleyDist,
+            flags:       isOcean ? 1 : 0,
+            leftEffElev: leftEES,
+            rightEffElev: rightEES,
+          })
+        }
       }
 
       // Track rising/falling
@@ -1138,19 +1269,28 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       const binIdx = distToBin(prevDist)
       if (binIdx >= 0) {
         const isOcean = prevRawElev < 2.0
+        const prevCurvDrop3 = (prevDist * prevDist) / (2 * EARTH_R) * (1 - REFRACTION_K)
+        const [leftEE3, rightEE3] = sampleLateral(ai, prevDist, prevCurvDrop3)
         binHeaps[binIdx].insert({
           effElev: prevEffElev, rawElev: prevRawElev, dist: prevDist,
           lat: prevLat, lng: prevLng,
           baseEffElev: valleyEffElev === Infinity ? prevEffElev : valleyEffElev,
           baseDist: valleyEffElev === Infinity ? prevDist : valleyDist,
           flags: isOcean ? 1 : 0,
+          leftEffElev: leftEE3, rightEffElev: rightEE3,
         })
       }
     }
 
     // Flatten all bins into a single sorted-by-distance candidate list
+    // Includes both local-max peaks AND inflection (shoulder) candidates
     const allCandidates: SilCandidate[] = []
     for (const heap of binHeaps) {
+      for (const c of heap.sortedByDist()) {
+        allCandidates.push(c)
+      }
+    }
+    for (const heap of inflectionHeaps) {
       for (const c of heap.sortedByDist()) {
         allCandidates.push(c)
       }
@@ -1218,6 +1358,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
       silData[silIdx++] = c.baseEffElev
       silData[silIdx++] = c.baseDist
       silData[silIdx++] = c.flags
+      silData[silIdx++] = c.leftEffElev
+      silData[silIdx++] = c.rightEffElev
       silTotalCandidates++
     }
   }
@@ -1304,6 +1446,10 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     candidateOffsets: silOffsets,
     resolution:       SILHOUETTE_RESOLUTION,
     numAzimuths:      SILHOUETTE_NUM_AZIMUTHS,
+    // Continuous terrain profile for contour occlusion
+    profileData,
+    profileDists,
+    profileN:         PROFILE_N,
   }
 
   const nearProfile: NearFieldProfileW = {
@@ -1340,6 +1486,8 @@ async function computeSkyline(req: SkylineRequest): Promise<void> {
     shading.buffer as ArrayBuffer,
     silData.buffer as ArrayBuffer,
     silOffsets.buffer as ArrayBuffer,
+    profileData.buffer as ArrayBuffer,
+    profileDists.buffer as ArrayBuffer,
     npData.buffer as ArrayBuffer,
     npCounts.buffer as ArrayBuffer,
   ]

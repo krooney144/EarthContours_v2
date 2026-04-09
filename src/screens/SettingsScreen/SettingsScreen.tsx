@@ -313,6 +313,9 @@ const SettingsScreen: React.FC = () => {
           <Row label="Debug Panel" description="Show diagnostics overlay on Scan screen">
             <Toggle id="toggle-debug-panel" label="Toggle debug panel" checked={settings.showDebugPanel} onChange={settings.toggleDebugPanel} />
           </Row>
+          <Row label="Debug Silhouette" description="Color overlay showing silhouette layer coverage">
+            <Toggle id="toggle-debug-silhouette" label="Toggle debug silhouette" checked={settings.debugSilhouette} onChange={settings.toggleDebugSilhouette} />
+          </Row>
           <Row
             label="Vertical Exaggeration"
             description="Multiply terrain heights for dramatic effect"

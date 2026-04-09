@@ -81,6 +81,10 @@ const SKYLINE_RESOLUTION = 4         // 0.25° per step = 1440 azimuths for full
 const TERRAIN_FILL_DARK  = 'rgb(4, 10, 18)'     // Deep navy — darker than sky gradient, contour lines visible
 const TERRAIN_FILL_LIGHT = 'rgb(175, 185, 170)'  // Cool sage/grey-green
 
+// Debug frame counter for throttled silhouette diagnostics
+let _silDbgCount = 0
+let _peakDiagCount = 0
+
 // ─── Re-Projection (AGL changes without worker round-trip) ────────────────────
 
 /**
@@ -271,7 +275,7 @@ function buildSilhouetteLayers(
   if (!sil || !sil.candidateData || sil.candidateData.length === 0) return null
 
   const { candidateData, candidateOffsets, numAzimuths } = sil
-  const FPC = 8  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
+  const FPC = 10  // floats per candidate (SILHOUETTE_FLOATS_PER_CANDIDATE)
   const result: SilhouetteLayer[][] = new Array(numAzimuths)
 
   for (let ai = 0; ai < numAzimuths; ai++) {
@@ -296,6 +300,8 @@ function buildSilhouetteLayers(
       const baseEffElev = candidateData[off + 5]
       const baseDist    = candidateData[off + 6]
       const flags       = candidateData[off + 7]
+      const leftEffElev = candidateData[off + 8]
+      const rightEffElev = candidateData[off + 9]
 
       const peakAngle = Math.atan2(effElev - viewerElev, dist)
       const isOcean   = (flags & 1) !== 0
@@ -312,6 +318,10 @@ function buildSilhouetteLayers(
           : -Math.PI / 2
         const baseAngle = Math.max(rawBaseAngle, maxAngle)
 
+        // Lateral peak angles — terrain elevation at ±1 azimuth, same distance
+        const leftPeakAngle = Math.atan2(leftEffElev - viewerElev, dist)
+        const rightPeakAngle = Math.atan2(rightEffElev - viewerElev, dist)
+
         layers.push({
           peakAngle,
           baseAngle,
@@ -322,6 +332,8 @@ function buildSilhouetteLayers(
           effElev,
           baseEffElev,
           isOcean,
+          leftPeakAngle,
+          rightPeakAngle,
         })
 
         maxAngle = peakAngle
@@ -332,6 +344,158 @@ function buildSilhouetteLayers(
   }
 
   return result
+}
+
+// ─── Continuous Terrain Occlusion Profile ────────────────────────────────────
+// Builds a running-max angle profile from the worker's terrain surface data.
+// For each azimuth × checkpoint, stores the highest terrain angle from 0 to
+// that checkpoint. Used with a distance buffer for contour occlusion.
+
+interface OcclusionProfile {
+  /** Running-max angle at each checkpoint, packed [az0_cp0, az0_cp1, ..., az1_cp0, ...] */
+  angles: Float32Array
+  /** Distance of each checkpoint in metres */
+  dists: Float32Array
+  /** Number of checkpoints */
+  n: number
+  /** Log-space constants for index lookup */
+  logMin: number
+  logStep: number
+  /** Number of azimuths */
+  numAzimuths: number
+  /** Azimuth resolution (steps per degree) */
+  resolution: number
+}
+
+function buildOcclusionProfile(
+  profileData: Float32Array,
+  profileDists: Float32Array,
+  profileN: number,
+  numAzimuths: number,
+  resolution: number,
+  viewerElev: number,
+): OcclusionProfile {
+  const angles = new Float32Array(numAzimuths * profileN)
+  const logMin = Math.log(profileDists[0])
+  const logStep = profileN > 1
+    ? (Math.log(profileDists[profileN - 1]) - logMin) / (profileN - 1)
+    : 1
+
+  // Step 1: Build per-azimuth running-max angle
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    let maxAngle = -Math.PI / 2
+    const base = ai * profileN
+    for (let i = 0; i < profileN; i++) {
+      const effElev = profileData[base + i]
+      if (effElev > -1e30) {
+        const angle = Math.atan2(effElev - viewerElev, profileDists[i])
+        if (angle > maxAngle) maxAngle = angle
+      }
+      angles[base + i] = maxAngle
+    }
+  }
+
+  // Step 2: Smooth across ±2 neighboring azimuths (max-window).
+  // Extends hillside occlusion laterally — a hill at azimuth A extends
+  // its influence to A±1, A±2 using the highest terrain in the window.
+  // Done per-checkpoint, in-place with a temp copy.
+  const SMOOTH_R = 2
+  const temp = new Float32Array(numAzimuths)
+  for (let i = 0; i < profileN; i++) {
+    // Extract column i across all azimuths
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      temp[ai] = angles[ai * profileN + i]
+    }
+    // Max-window smoothing
+    for (let ai = 0; ai < numAzimuths; ai++) {
+      let maxVal = temp[ai]
+      for (let offset = 1; offset <= SMOOTH_R; offset++) {
+        const left = (ai - offset + numAzimuths) % numAzimuths
+        const right = (ai + offset) % numAzimuths
+        if (temp[left] > maxVal) maxVal = temp[left]
+        if (temp[right] > maxVal) maxVal = temp[right]
+      }
+      angles[ai * profileN + i] = maxVal
+    }
+  }
+
+  return { angles, dists: profileDists, n: profileN, logMin, logStep, numAzimuths, resolution }
+}
+
+/**
+ * Generate synthetic silhouette layers from the terrain profile at "visibility
+ * boundary" points — where terrain first rises above the running horizon.
+ *
+ * These capture ridge FLANKS that the local-max detector misses: at the flank
+ * azimuth of a hill, the terrain rises above the horizon (it's the nearest
+ * visible feature) but never peaks — it's on a continuous slope. The visibility
+ * boundary IS the flank edge.
+ *
+ * Merges into the existing silhouetteLayers array alongside candidate-based layers.
+ */
+function addVisibilityBoundaryLayers(
+  layers: SilhouetteLayer[][],
+  profileData: Float32Array,
+  profileDists: Float32Array,
+  profileN: number,
+  numAzimuths: number,
+  viewerElev: number,
+): void {
+  for (let ai = 0; ai < numAzimuths; ai++) {
+    let runningMax = -Math.PI / 2
+    const base = ai * profileN
+    let wasAbove = false
+
+    for (let i = 0; i < profileN; i++) {
+      const effElev = profileData[base + i]
+      if (effElev <= -1e30) {
+        wasAbove = false
+        continue
+      }
+
+      const angle = Math.atan2(effElev - viewerElev, profileDists[i])
+      const isAbove = angle > runningMax + 0.002  // small threshold to avoid noise
+
+      // Visibility boundary: terrain just crossed above the running max
+      if (isAbove && !wasAbove && profileDists[i] > 500) {
+        // Insert this as a synthetic layer at the correct sorted position
+        const azLayers = layers[ai]
+        const dist = profileDists[i]
+
+        // Check if a candidate-based layer already exists near this distance
+        let duplicate = false
+        for (const l of azLayers) {
+          if (Math.abs(l.dist - dist) < dist * 0.1) { duplicate = true; break }
+        }
+
+        if (!duplicate) {
+          // Find insertion point (layers sorted near→far)
+          let insertIdx = azLayers.length
+          for (let li = 0; li < azLayers.length; li++) {
+            if (azLayers[li].dist > dist) { insertIdx = li; break }
+          }
+
+          const baseAngle = insertIdx > 0 ? azLayers[insertIdx - 1].peakAngle : runningMax
+
+          azLayers.splice(insertIdx, 0, {
+            peakAngle: angle,
+            baseAngle: Math.max(baseAngle, runningMax),
+            rawElev: effElev + (dist * dist) / (2 * 6_371_000) * (1 - 0.13), // approximate raw
+            dist,
+            lat: 0, lng: 0,  // GPS not available from profile
+            effElev,
+            baseEffElev: effElev,
+            isOcean: false,
+            leftPeakAngle: angle,   // approximate — profile doesn't have lateral
+            rightPeakAngle: angle,
+          })
+        }
+      }
+
+      if (angle > runningMax) runningMax = angle
+      wasAbove = isAbove
+    }
+  }
 }
 
 // ─── Silhouette Layer Matching (connect layers across azimuths into strands) ─
@@ -367,7 +531,7 @@ function matchSilhouetteStrands(
   // peakAngle by buildSilhouetteLayers (atan2(effElev - viewerElev, dist)).
   // Camera pitch only affects where on screen things are drawn, not whether
   // silhouette lines exist. Same mountain at same AGL = same silhouettes.
-  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
 
   // Determine visible azimuth range
   const bearingStart = heading_deg - hfov * 0.5
@@ -608,7 +772,7 @@ function renderSilhouetteGlow(
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
   const maxDist = 400_000
-  const MIN_PEAK_ANGLE = -0.35
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
   const MAX_ANGLE_JUMP = 0.005
   const MIN_STRAND_SEGS = 8
   const numAzimuths = silResolution * 360
@@ -798,7 +962,7 @@ function renderSilhouetteStrokes(
   const MIN_STRAND_SEGS = 8   // Eliminate short dash artifacts — 8 segs = 1° bearing
   const MAX_AZ_GAP_FOR_STROKE = 4  // Match the matching gap tolerance
   // Fixed min angle — AGL already baked into peakAngle, pitch is viewport only
-  const MIN_PEAK_ANGLE = -0.35  // ~-20° below horizon
+  const MIN_PEAK_ANGLE = -0.25  // ~-14° below horizon
 
   for (const strand of strands) {
     const segs = strand.segments
@@ -956,11 +1120,24 @@ interface PrebuiltContourStrand {
  * strand-tracks by level + direction + distance proximity. Contour levels
  * are snapped to the band's interval grid to eliminate floating point drift.
  */
+/** Per-band contour strand diagnostics */
+interface ContourStrandDiag {
+  bandIdx: number
+  strandCount: number
+  avgLength: number
+  maxLength: number
+  minLength: number
+  under5: number        // strands with < 5 azimuth points
+  crossingsPerAz: number // avg crossings per azimuth in this band
+  emptyAzimuths: number  // azimuths with zero crossings
+}
+
 function buildContourStrands(
   skyline: SkylineData,
   viewerElev: number,
-): PrebuiltContourStrand[] {
+): { strands: PrebuiltContourStrand[]; diag: ContourStrandDiag[] } {
   const completed: PrebuiltContourStrand[] = []
+  const diagPerBand: ContourStrandDiag[] = []
 
   for (let bi = skyline.bands.length - 1; bi >= 0; bi--) {
     const band = skyline.bands[bi]
@@ -973,9 +1150,13 @@ function buildContourStrands(
     // DEBUG: Log crossing data availability per band
     console.log(`[CONTOUR-DEBUG] Band ${bi} (${bandAz}az, res=${bandRes}): crossingData=${data?.length ?? 0} floats, crossings≈${data ? Math.floor(data.length / 5) : 0}, offsets=${offsets?.length ?? 0}`)
 
-    if (!data || data.length === 0) continue
+    if (!data || data.length === 0) {
+      diagPerBand.push({ bandIdx: bi, strandCount: 0, avgLength: 0, maxLength: 0, minLength: 0, under5: 0, crossingsPerAz: 0, emptyAzimuths: bandAz })
+      continue
+    }
 
     const maxAzGap = Math.ceil(bandRes * 2)  // Max 2° gap before expiring strand
+    let totalCrossings = 0, emptyAzimuths = 0
 
     // Active strands keyed by snapped-level + direction
     const activeStrands = new Map<string, Array<{
@@ -989,6 +1170,10 @@ function buildContourStrands(
       const start = offsets[ai]
       const end = offsets[ai + 1]
       const bearingDeg = ai / bandRes
+
+      const numCrossings = (end - start) / 5
+      totalCrossings += numCrossings
+      if (numCrossings === 0) emptyAzimuths++
 
       if (start < end) {
         // Collect crossings, sort near-first for occlusion sweep
@@ -1091,13 +1276,28 @@ function buildContourStrands(
       }
     }
 
-    // DEBUG: Count strands for this band
-    const bandStrandCount = completed.filter(s => s.bandIdx === bi).length
-    const bandPointCount = completed.filter(s => s.bandIdx === bi).reduce((sum, s) => sum + s.points.length, 0)
-    console.log(`[CONTOUR-DEBUG] Band ${bi}: ${bandStrandCount} strands, ${bandPointCount} total points`)
+    // ── Per-band diagnostics ──────────────────────────────────────────
+    const bandStrands = completed.filter(s => s.bandIdx === bi)
+    const lengths = bandStrands.map(s => s.points.length)
+    const strandCount = lengths.length
+    const avgLength = strandCount > 0 ? lengths.reduce((a, b) => a + b, 0) / strandCount : 0
+    const maxLength = strandCount > 0 ? Math.max(...lengths) : 0
+    const minLength = strandCount > 0 ? Math.min(...lengths) : 0
+    const under5 = lengths.filter(l => l < 5).length
+
+    diagPerBand.push({
+      bandIdx: bi,
+      strandCount,
+      avgLength,
+      maxLength,
+      minLength,
+      under5,
+      crossingsPerAz: bandAz > 0 ? totalCrossings / bandAz : 0,
+      emptyAzimuths,
+    })
   }
 
-  return completed
+  return { strands: completed, diag: diagPerBand }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1582,21 +1782,17 @@ function renderBandContours(
   silhouetteLayers: SilhouetteLayer[][] | null,
   silResolution: number,
   darkMode: boolean = true,
+  occlusionProfile: OcclusionProfile | null = null,
 ): void {
   const { W, H } = cam
   const elevRange = globalElevMax - globalElevMin
   const hasElevRange = elevRange > 1
 
-  // ── Silhouette occlusion setup ──────────────────────────────────────────
-  // For each contour point we check ALL silhouette layers at that azimuth
-  // that are CLOSER than the contour. If any closer surface's peakY is
-  // above (lower Y) the contour's screen Y, the contour is occluded.
-  // This handles intermediate surfaces correctly — a contour at 20km behind
-  // a silhouette at 10km is culled even though the nearest surface at 3km
-  // is below it on screen.
+  // ── Occlusion setup ──────────────────────────────────────────────────────
   const hasSilOcclusion = !!(silhouetteLayers && silResolution > 0)
   const numSilAz = hasSilOcclusion ? silResolution * 360 : 0
-  const OCCLUSION_TOLERANCE_PX = 2  // Cull contours within 2px of ridgeline edge
+  const hasProfile = !!occlusionProfile
+  const DIST_BUFFER_FRAC = 0.07  // 7% distance buffer
 
   // Logarithmic distance → line width mapping (replaces old 0.2 power curve).
   // log10(1 + d_km) / log10(401) maps 0–400km to 0–1 with even distribution.
@@ -1649,31 +1845,47 @@ function renderBandContours(
         continue
       }
 
-      // ── Silhouette occlusion check (multi-layer screen-Y) ──────────────
-      // Check ALL silhouette layers at this bearing that are CLOSER than
-      // the contour point. If ANY closer surface has a peakY above (<=)
-      // the contour's screen Y, the contour is behind that surface.
-      // Layers are sorted near→far, so we iterate until dist >= pt.dist.
-      if (hasSilOcclusion && silhouetteLayers) {
-        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
-        const ai = Math.round(normBearing * silResolution) % numSilAz
-        const azLayers = silhouetteLayers[ai]
+      // ── Contour occlusion (two-tier: terrain profile + silhouette layers) ──
+      {
         let occluded = false
-        if (azLayers) {
-          for (let li = 0; li < azLayers.length; li++) {
-            const layer = azLayers[li]
-            if (layer.isOcean) continue
-            // Only check surfaces CLOSER than this contour point
-            if (layer.dist >= pt.dist) break  // layers sorted near→far, done
-            // Project this closer surface's peak to screen Y
-            const silPeak = project(pt.bearingDeg, layer.peakAngle, cam)
-            if (y >= silPeak.y - OCCLUSION_TOLERANCE_PX) {
-              // Contour point is at or below a closer surface's ridgeline
+        const ANGLE_TOL = 0.001
+        const normBearing = ((pt.bearingDeg % 360) + 360) % 360
+
+        // Tier 1: Continuous terrain profile with distance buffer.
+        // Checks the running-max terrain angle from 0 to (D - buffer).
+        // The buffer prevents the slope immediately in front of the contour
+        // from occluding it (a contour is ON its slope, not behind it).
+        if (hasProfile && occlusionProfile) {
+          const bufferedDist = pt.dist * (1 - DIST_BUFFER_FRAC)
+          if (bufferedDist >= occlusionProfile.dists[0]) {
+            const logDist = Math.log(bufferedDist)
+            const pIdx = Math.min(occlusionProfile.n - 1,
+              Math.max(0, Math.floor((logDist - occlusionProfile.logMin) / occlusionProfile.logStep)))
+            const ai = Math.round(normBearing * occlusionProfile.resolution) % occlusionProfile.numAzimuths
+            const profileAngle = occlusionProfile.angles[ai * occlusionProfile.n + pIdx]
+            if (profileAngle > pt.elevAngleRad - ANGLE_TOL) {
               occluded = true
-              break
             }
           }
         }
+
+        // Tier 2: Silhouette layer check (catches fine-grained peaks not in profile)
+        if (!occluded && hasSilOcclusion && silhouetteLayers) {
+          const aiCenter = Math.round(normBearing * silResolution) % numSilAz
+          const azLayers = silhouetteLayers[aiCenter]
+          if (azLayers) {
+            for (let li = 0; li < azLayers.length; li++) {
+              const layer = azLayers[li]
+              if (layer.isOcean) continue
+              if (layer.dist >= pt.dist) break
+              if (layer.peakAngle > pt.elevAngleRad - ANGLE_TOL) {
+                occluded = true
+                break
+              }
+            }
+          }
+        }
+
         if (occluded) {
           if (pathStarted) { ctx.stroke(); pathStarted = false }
           continue
@@ -1738,6 +1950,7 @@ function renderTerrain(
   silResolution: number = 0,
   silElevMin: number = 0,
   silElevMax: number = 0,
+  occlusionProfile: OcclusionProfile | null = null,
 ): void {
   const { W, H } = cam
   const numBands = skyline.bands.length
@@ -1822,7 +2035,7 @@ function renderTerrain(
       const bandStrands = contourStrands.filter(s => s.bandIdx === bi)
       if (bandStrands.length > 0) {
         renderBandContours(ctx, bandStrands, cam, globalElevMin, globalElevMax,
-          silhouetteLayers, silResolution, darkMode)
+          silhouetteLayers, silResolution, darkMode, occlusionProfile)
       }
     }
 
@@ -2265,6 +2478,8 @@ function drawScanCanvas(
   showContourLines: boolean = true,
   showSilhouetteLines: boolean = true,
   darkMode: boolean = true,
+  debugSilhouette: boolean = false,
+  occlusionProfile: OcclusionProfile | null = null,
 ): PeakScreenPos[] {
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
@@ -2350,7 +2565,238 @@ function drawScanCanvas(
   if (skylineData) {
     renderTerrain(ctx, skylineData, cam, projectedBands, showBandLines, showFill,
       contourStrands, showContourLines, darkMode,
-      silhouetteLayers, silRes, silElevMin, silElevMax)
+      silhouetteLayers, silRes, silElevMin, silElevMax, occlusionProfile)
+  }
+
+  // ── DEBUG: Silhouette layer coverage overlay ────────────────────────────
+  // Draws the raw silhouette layer data per-azimuth to visualize coverage gaps.
+  // Each layer at each azimuth is drawn as a vertical bar from baseAngle to peakAngle.
+  // Layer 0 (nearest) = red, layer 1 = yellow, layer 2 = green, deeper = cyan.
+  // Gaps (azimuths with no layers) show as bare sky — making dropout locations obvious.
+  if (debugSilhouette && silhouetteLayers && silRes > 0) {
+    const numSilAz = silRes * 360
+
+    // ── Console diagnostics (throttled — once per 120 frames) ──
+    if (!_silDbgCount) _silDbgCount = 0
+    _silDbgCount++
+    if (_silDbgCount % 120 === 1) {
+
+      // ── NEW: Adjacent azimuth mismatch analysis ──
+      // For each pair of adjacent screen columns that map to DIFFERENT silhouette
+      // azimuths, compare the topmost layer's peakAngle. Large jumps = visual gaps.
+      const mismatches: Array<{
+        col: number; bearing: number;
+        ai1: number; ai2: number;
+        top1: number; top2: number;  // peakAngle of topmost layer (radians)
+        y1: number; y2: number;      // screen Y of topmost peak
+        layers1: number; layers2: number;
+        topDist1: number; topDist2: number;
+      }> = []
+
+      let prevAi = -1
+      let prevTopAngle = -Math.PI / 2
+      let prevTopY = H
+      let prevLayers = 0
+      let prevTopDist = 0
+
+      for (let col = 0; col < W; col++) {
+        const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+        const normBearing = ((bearingDeg % 360) + 360) % 360
+        const ai = Math.round(normBearing * silRes) % numSilAz
+        const azLayers = silhouetteLayers[ai]
+        const nLayers = azLayers?.length ?? 0
+
+        // Get topmost layer (last in array — layers sorted near→far, each higher than prev)
+        let topAngle = -Math.PI / 2
+        let topDist = 0
+        if (azLayers && nLayers > 0) {
+          const topLayer = azLayers[nLayers - 1]
+          topAngle = topLayer.peakAngle
+          topDist = topLayer.dist
+        }
+        const { y: topY } = project(bearingDeg, topAngle, cam)
+
+        if (ai !== prevAi && prevAi >= 0) {
+          const yDiff = Math.abs(topY - prevTopY)
+          // Log mismatches where screen Y jumps by >20px between adjacent sil azimuths
+          if (yDiff > 20) {
+            mismatches.push({
+              col, bearing: normBearing,
+              ai1: prevAi, ai2: ai,
+              top1: prevTopAngle, top2: topAngle,
+              y1: prevTopY, y2: topY,
+              layers1: prevLayers, layers2: nLayers,
+              topDist1: prevTopDist, topDist2: topDist,
+            })
+          }
+        }
+
+        prevAi = ai
+        prevTopAngle = topAngle
+        prevTopY = topY
+        prevLayers = nLayers
+        prevTopDist = topDist
+      }
+
+      console.log(`[SIL-DEBUG] Adjacent azimuth mismatches (topmost peak Y jump >20px): ${mismatches.length}`)
+      // Show top 10 worst mismatches
+      mismatches.sort((a, b) => Math.abs(b.y1 - b.y2) - Math.abs(a.y1 - a.y2))
+      for (const m of mismatches.slice(0, 10)) {
+        console.log(
+          `  col=${m.col} bearing=${m.bearing.toFixed(2)}° ` +
+          `ai ${m.ai1}→${m.ai2}: ` +
+          `topPeak ${(m.top1*180/Math.PI).toFixed(3)}°→${(m.top2*180/Math.PI).toFixed(3)}° ` +
+          `screenY ${m.y1.toFixed(0)}→${m.y2.toFixed(0)} (Δ${Math.abs(m.y1-m.y2).toFixed(0)}px) ` +
+          `layers ${m.layers1}→${m.layers2} ` +
+          `topDist ${(m.topDist1/1000).toFixed(1)}→${(m.topDist2/1000).toFixed(1)}km`
+        )
+      }
+
+      // ── NEW: Compare silhouette topmost peak vs band ridgeline ──
+      // The band ridgeline is continuous (every azimuth). The silhouette top peak
+      // should match or exceed it. Where the band ridgeline is ABOVE the sil top
+      // peak, contour lines will leak through.
+      if (skylineData) {
+        let mismatchCount = 0
+        let totalChecked = 0
+        const worstBandMismatches: Array<{
+          col: number; bearing: number; bandIdx: number;
+          bandAngle: number; silTopAngle: number;
+          bandY: number; silTopY: number;
+          bandDist: number; silTopDist: number;
+        }> = []
+
+        for (let col = 0; col < W; col += 4) {
+          const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+          const normBearing = ((bearingDeg % 360) + 360) % 360
+          const ai = Math.round(normBearing * silRes) % numSilAz
+          const azLayers = silhouetteLayers[ai]
+          const nLayers = azLayers?.length ?? 0
+          let silTopAngle = -Math.PI / 2
+          let silTopDist = 0
+          if (azLayers && nLayers > 0) {
+            silTopAngle = azLayers[nLayers - 1].peakAngle
+            silTopDist = azLayers[nLayers - 1].dist
+          }
+
+          // Check each band's ridgeline angle
+          for (let bi = 0; bi < skylineData.bands.length; bi++) {
+            const bAngle = bandAngleAt(skylineData, bi, bearingDeg, projectedBands)
+            if (bAngle <= -Math.PI / 2 + 0.001) continue
+            totalChecked++
+
+            // Band ridgeline is ABOVE silhouette top peak — contours here will leak
+            if (bAngle > silTopAngle + 0.002) {  // 0.002 rad ≈ 0.11° tolerance
+              mismatchCount++
+              const bandDist = bandDistAt(skylineData, bi, bearingDeg)
+              const { y: bandY } = project(bearingDeg, bAngle, cam)
+              const { y: silTopY } = project(bearingDeg, silTopAngle, cam)
+              if (worstBandMismatches.length < 200) {
+                worstBandMismatches.push({
+                  col, bearing: normBearing, bandIdx: bi,
+                  bandAngle: bAngle, silTopAngle,
+                  bandY, silTopY,
+                  bandDist: bandDist, silTopDist,
+                })
+              }
+            }
+          }
+        }
+
+        console.log(
+          `[SIL-DEBUG] Band vs silhouette coverage:\n` +
+          `  Band ridgeline ABOVE sil top peak: ${mismatchCount}/${totalChecked} (${(100*mismatchCount/totalChecked).toFixed(1)}%)`
+        )
+        // Show worst 10
+        worstBandMismatches.sort((a, b) =>
+          (b.bandAngle - b.silTopAngle) - (a.bandAngle - a.silTopAngle)
+        )
+        for (const m of worstBandMismatches.slice(0, 10)) {
+          console.log(
+            `  col=${m.col} bearing=${m.bearing.toFixed(2)}° band${m.bandIdx}: ` +
+            `bandAngle=${(m.bandAngle*180/Math.PI).toFixed(3)}° silTop=${(m.silTopAngle*180/Math.PI).toFixed(3)}° ` +
+            `Δ=${((m.bandAngle-m.silTopAngle)*180/Math.PI).toFixed(3)}° ` +
+            `bandY=${m.bandY.toFixed(0)} silTopY=${m.silTopY.toFixed(0)} ` +
+            `bandDist=${(m.bandDist/1000).toFixed(1)}km silTopDist=${(m.silTopDist/1000).toFixed(1)}km`
+          )
+        }
+
+        // ── NEW: Contour occlusion miss analysis ──
+        // For each visible contour strand point, check if it would be occluded
+        // by the silhouette layers AND by the band ridgeline. Log cases where
+        // the band says "below ridgeline" but silhouette says "not occluded".
+        if (contourStrands.length > 0) {
+          let contourTotal = 0, contourOccByBand = 0, contourOccBySil = 0, contourLeaks = 0
+          for (const strand of contourStrands) {
+            for (const pt of strand.points) {
+              const { x, y } = project(pt.bearingDeg, pt.elevAngleRad, cam)
+              if (x < 0 || x > W || y < 0 || y > H) continue
+              contourTotal++
+
+              // Check band ridgeline occlusion (would fill cover this?)
+              const bi = strand.bandIdx
+              let bandOccludes = false
+              for (let nearerBi = 0; nearerBi < bi; nearerBi++) {
+                const nearerAngle = bandAngleAt(skylineData, nearerBi, pt.bearingDeg, projectedBands)
+                if (nearerAngle > -Math.PI / 2 + 0.001) {
+                  const { y: nearerY } = project(pt.bearingDeg, nearerAngle, cam)
+                  if (y >= nearerY - 2) { bandOccludes = true; break }
+                }
+              }
+
+              // Check silhouette occlusion
+              const normB = ((pt.bearingDeg % 360) + 360) % 360
+              const sai = Math.round(normB * silRes) % numSilAz
+              const sLayers = silhouetteLayers[sai]
+              let silOccludes = false
+              if (sLayers) {
+                for (const layer of sLayers) {
+                  if (layer.dist >= pt.dist) break
+                  const silPeakY = project(pt.bearingDeg, layer.peakAngle, cam).y
+                  if (y >= silPeakY - 2) { silOccludes = true; break }
+                }
+              }
+
+              if (bandOccludes) contourOccByBand++
+              if (silOccludes) contourOccBySil++
+              if (bandOccludes && !silOccludes) contourLeaks++
+            }
+          }
+          console.log(
+            `[SIL-DEBUG] Contour occlusion analysis:\n` +
+            `  Total visible contour points: ${contourTotal}\n` +
+            `  Occluded by band ridgeline (fill): ${contourOccByBand} (${(100*contourOccByBand/contourTotal).toFixed(1)}%)\n` +
+            `  Occluded by silhouette layers: ${contourOccBySil} (${(100*contourOccBySil/contourTotal).toFixed(1)}%)\n` +
+            `  LEAKS (band says hidden, sil says visible): ${contourLeaks} (${(100*contourLeaks/contourTotal).toFixed(1)}%)`
+          )
+        }
+      }
+    }
+
+    // ── Visual overlay ──
+    ctx.save()
+    ctx.globalAlpha = 0.5
+    const layerColors = ['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#ff00ff', '#ffffff']
+
+    for (let col = 0; col < W; col += 1) {
+      const bearingDeg = cam.heading_deg + (col / W - 0.5) * cam.hfov
+      const normBearing = ((bearingDeg % 360) + 360) % 360
+      const ai = Math.round(normBearing * silRes) % numSilAz
+      const azLayers = silhouetteLayers[ai]
+      if (!azLayers || azLayers.length === 0) continue
+
+      for (let li = 0; li < azLayers.length; li++) {
+        const layer = azLayers[li]
+        const peakPt = project(bearingDeg, layer.peakAngle, cam)
+        const basePt = project(bearingDeg, layer.baseAngle, cam)
+        const topY = Math.max(0, Math.min(H, peakPt.y))
+        const botY = Math.max(0, Math.min(H, basePt.y))
+
+        ctx.fillStyle = layerColors[li % layerColors.length]
+        ctx.fillRect(col, topY, 1, Math.max(1, botY - topY))
+      }
+    }
+    ctx.restore()
   }
 
   // ── 2b. Silhouette glow + edge strokes ──────────────────────────────────
@@ -2407,6 +2853,76 @@ function drawScanCanvas(
   const topPeaks = visiblePeaks
     .sort((a, b) => b.elevation_m - a.elevation_m)
     .slice(0, 15)
+
+  // ── Peak terrain profile diagnostic (throttled, every 180 frames) ──────
+  // For each visible peak, log the terrain profile along the bearing to the peak,
+  // showing the running-max occlusion angle at each distance checkpoint vs the
+  // peak's actual angle. Also shows silhouette layers at that bearing.
+  _peakDiagCount++
+  if (skylineData && occlusionProfile && _peakDiagCount % 180 === 1) {
+    const sil = skylineData.silhouette
+    for (const peak of topPeaks.slice(0, 3)) {
+      const cosLat = Math.cos(activeLat * DEG_TO_RAD)
+      const dx = (peak.lng - activeLng) * 111_320 * cosLat
+      const dy = (peak.lat - activeLat) * 111_132
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const bearing = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360
+      const curvDrop = (dist * dist) / (2 * 6_371_000) * (1 - 0.13)
+      const peakAngle = Math.atan2(peak.elevation_m - curvDrop - eyeElev, dist)
+      const peakAngleDeg = (peakAngle * 180 / Math.PI).toFixed(3)
+
+      // Terrain profile at this bearing
+      const normB = ((bearing % 360) + 360) % 360
+      const ai = Math.round(normB * occlusionProfile.resolution) % occlusionProfile.numAzimuths
+      const profileAngles: string[] = []
+      let maxAngleAtPeakDist = -999
+      for (let i = 0; i < occlusionProfile.n; i++) {
+        const angle = occlusionProfile.angles[ai * occlusionProfile.n + i]
+        const d = occlusionProfile.dists[i]
+        if (d <= dist * 1.1) {
+          maxAngleAtPeakDist = angle
+        }
+        // Log checkpoints near the peak's distance and at key distances
+        if (d > 5000 && d < dist * 1.2 && (i % 3 === 0 || Math.abs(d - dist) < dist * 0.15)) {
+          profileAngles.push(`${(d/1000).toFixed(1)}km:${(angle*180/Math.PI).toFixed(3)}°`)
+        }
+      }
+
+      // Silhouette layers at this bearing
+      const silLayers: string[] = []
+      if (sil && silhouetteLayers) {
+        const silAi = Math.round(normB * sil.resolution) % sil.numAzimuths
+        const layers = silhouetteLayers[silAi]
+        if (layers) {
+          for (const l of layers) {
+            if (l.dist > 3000 && l.dist < dist * 1.3) {
+              silLayers.push(`${(l.dist/1000).toFixed(1)}km:${(l.peakAngle*180/Math.PI).toFixed(3)}°`)
+            }
+          }
+        }
+      }
+
+      // Band ridgeline angles at this bearing
+      const bandAngles: string[] = []
+      for (let bi = 0; bi < skylineData.bands.length; bi++) {
+        const bAngle = bandAngleAt(skylineData, bi, bearing, projectedBands)
+        if (bAngle > -Math.PI / 2 + 0.01) {
+          const bDist = bandDistAt(skylineData, bi, bearing)
+          bandAngles.push(`b${bi}:${(bAngle*180/Math.PI).toFixed(3)}°@${(bDist/1000).toFixed(1)}km`)
+        }
+      }
+
+      const occAngleDeg = (maxAngleAtPeakDist * 180 / Math.PI).toFixed(3)
+      const wouldOcclude = maxAngleAtPeakDist > peakAngle - 0.001
+      console.log(
+        `[PEAK-DIAG] ${peak.name} bearing:${bearing.toFixed(1)}° dist:${(dist/1000).toFixed(1)}km\n` +
+        `  peakAngle: ${peakAngleDeg}° | occlusionMax: ${occAngleDeg}° → ${wouldOcclude ? 'OCCLUDED' : 'VISIBLE'}\n` +
+        `  profile: ${profileAngles.join(' ')}\n` +
+        `  silLayers: ${silLayers.join(' ')}\n` +
+        `  bands: ${bandAngles.join(' ')}`
+      )
+    }
+  }
 
   for (const peak of topPeaks) {
     const projected = projectFirstPerson(
@@ -2533,7 +3049,7 @@ const ScanScreen: React.FC = () => {
   } = useCameraStore()
   const { activeLat, activeLng, mode, gpsLat, requestGPS, switchToGPS } = useLocationStore()
   const { peaks } = useTerrainStore()
-  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode } = useSettingsStore()
+  const { units, showPeakLabels, showBandLines, showFill, showDebugPanel, showContourLines, showSilhouetteLines, darkMode, debugSilhouette } = useSettingsStore()
 
   const viewportRef      = useRef<HTMLDivElement>(null)
   const terrainCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -2591,11 +3107,13 @@ const ScanScreen: React.FC = () => {
 
   // ── Pre-build contour strands (full 360°, one-time on data/AGL change) ────
   // Uses the worker's z15-corrected ground elevation so contour angles match ridgelines.
-  const contourStrands = useMemo<PrebuiltContourStrand[]>(() => {
-    if (!skylineData) return []
+  const contourStrandResult = useMemo(() => {
+    if (!skylineData) return { strands: [] as PrebuiltContourStrand[], diag: [] as ContourStrandDiag[] }
     const viewerElev = skylineData.computedAt.groundElev + height_m
     return buildContourStrands(skylineData, viewerElev)
   }, [skylineData, height_m])
+  const contourStrands = contourStrandResult.strands
+  const contourDiag = contourStrandResult.diag
 
   // ── Re-project refined arc angles when AGL changes ─────────────────────────
   // Uses separate refinedArcs state (from second-pass 'refine-peaks' response).
@@ -2613,6 +3131,14 @@ const ScanScreen: React.FC = () => {
     const viewerElev = skylineData.computedAt.groundElev + height_m
     const t0 = performance.now()
     const layers = buildSilhouetteLayers(skylineData, viewerElev)
+    // Add visibility boundary layers from terrain profile (captures ridge flanks)
+    const sil = skylineData.silhouette
+    if (layers && sil.profileData && sil.profileDists && sil.profileN) {
+      addVisibilityBoundaryLayers(
+        layers, sil.profileData, sil.profileDists, sil.profileN,
+        sil.numAzimuths, viewerElev,
+      )
+    }
     const dt = performance.now() - t0
     if (layers) {
       let totalLayers = 0, maxLayers = 0
@@ -2629,6 +3155,17 @@ const ScanScreen: React.FC = () => {
       })
     }
     return layers
+  }, [skylineData, height_m])
+
+  // ── Continuous terrain occlusion profile (for contour distance-gap occlusion) ─
+  const occlusionProfile = useMemo<OcclusionProfile | null>(() => {
+    const sil = skylineData?.silhouette
+    if (!sil?.profileData || !sil.profileDists || !sil.profileN) return null
+    const viewerElev = (skylineData?.computedAt.groundElev ?? 0) + height_m
+    return buildOcclusionProfile(
+      sil.profileData, sil.profileDists, sil.profileN,
+      sil.numAzimuths, sil.resolution, viewerElev,
+    )
   }, [skylineData, height_m])
 
   // ── Re-project near-field occlusion profile (AGL < 60m only) ──────────────
@@ -2974,6 +3511,8 @@ const ScanScreen: React.FC = () => {
       projectedNearProfile,
       showBandLines, showFill, showPeakLabels,
       showContourLines, showSilhouetteLines, darkMode,
+      debugSilhouette,
+      occlusionProfile,
     )
 
     setPeakPositions(rawPos.map(p => ({
@@ -2987,7 +3526,7 @@ const ScanScreen: React.FC = () => {
     activePeaks,
     skylineData, projectedBands, contourStrands, projectedArcs, silhouetteLayers,
     projectedNearProfile,
-    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode,
+    showBandLines, showFill, showPeakLabels, showContourLines, showSilhouetteLines, darkMode, debugSilhouette, occlusionProfile,
   ])
 
   // RAF-gated redraw: collapses multiple rapid state changes into one draw per frame
@@ -3333,6 +3872,20 @@ const ScanScreen: React.FC = () => {
                   <div>AGL:{height_m.toFixed(0)}m  ground:{gElev.toFixed(0)}m  eye:{eyeElev.toFixed(0)}m</div>
                   <div>interp:ON  az:{pxPerAzStd}px/std {pxPerAzHi}px/hi</div>
                   <div>horizon:{horizonDist.toFixed(0)}km (geometric)</div>
+
+                  <div style={{ color: '#68B0BF', marginTop: 3 }}>CONTOUR STRANDS</div>
+                  {contourDiag.length === 0
+                    ? <div style={{ color: '#666' }}>no contour data</div>
+                    : contourDiag.map(d => (
+                      <div key={`cs-${d.bandIdx}`} style={{ color: d.under5 > d.strandCount * 0.5 ? '#f84' : '#ccc', fontSize: 8 }}>
+                        b{d.bandIdx}: {d.strandCount}str avg:{d.avgLength.toFixed(1)}az
+                        {' '}min:{d.minLength} max:{d.maxLength}
+                        {' '}<span style={{ color: d.under5 > 20 ? '#f44' : '#888' }}>&lt;5az:{d.under5}</span>
+                        {' '}cx/az:{d.crossingsPerAz.toFixed(1)}
+                        {d.emptyAzimuths > 0 && <span style={{ color: '#f44' }}> empty:{d.emptyAzimuths}</span>}
+                      </div>
+                    ))
+                  }
 
                   <div style={{ color: '#68B0BF', marginTop: 3 }}>RE-PROJECTION</div>
                   <div style={{ color: angleDiffOk ? '#0f0' : '#f44' }}>
